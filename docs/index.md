@@ -3,26 +3,29 @@ layout: default
 title: Wheeled Robot Simulator Documentation
 ---
 
+<!--
+This file is auto-generated from README.md for GitHub Pages.
+It uses the default layout with MathJax enabled so LaTeX renders.
+-->
+
 # Wheeled Robot Simulator
 
-A modular differential-drive robot simulator designed for control, estimation,  
-and active-learning gain tuning research.
+A modular differential-drive robot simulator designed for **control**, **estimation**,  
+and **active-learning gain tuning** research.
 
-This page is rendered with GitHub Pages + MathJax, so LaTeX works.
+This README explains:
 
-Inline example: $v = \frac{r}{2}(u_r + u_l)$
-
-Block example:
-
-\[
-x_{k+1} = x_k + v\cos\theta_k \,\Delta t
-\]
+1. What each subsystem does  
+2. Which YAML fields configure it  
+3. The equations used in every module  
+4. How all components interact in the simulation loop  
+5. The planner, controller, robot model, estimator, and visualization
 
 ---
 
 # 1. Problem YAML Overview
 
-The simulator is driven by a YAML file such as empty.yaml.
+The simulator is driven by a YAML file such as **`empty.yaml`**.
 
 ```yaml
 sim_time: 5.0
@@ -62,7 +65,7 @@ estimator:
   proc_pos_std: 0.7
   proc_theta_std: 0.7
   start: [0.0, 0.0, 0.0]
-
+```
 
 ### YAML → Subsystems
 

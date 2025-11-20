@@ -6,23 +6,12 @@
 
   <!-- MathJax v3 -->
   <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js" async></script>
-
-  <style>
-    body {
-      max-width: 900px;
-      margin: 40px auto;
-      font-family: sans-serif;
-      line-height: 1.6;
-      padding: 0 20px;
-    }
-    h1, h2, h3 {
-      font-weight: 600;
-    }
-  </style>
 </head>
 <body>
-
-  {{ content }}
-
+  <main class="page-content" aria-label="Content">
+    <div class="wrapper">
+      {{ content }}
+    </div>
+  </main>
 </body>
 </html>
