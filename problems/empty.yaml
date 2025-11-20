@@ -1,0 +1,36 @@
+sim_time: 5.0 # seconds
+time_step: 0.01 # seconds
+environment:
+  min: [-5, -5]
+  max: [5, 5]
+  obstacles: []
+start: [0.0, 0.0, 0.0]
+goal:  [2.0, 1.0, 1.57]
+planner: 
+  waypoints:
+    - [0.5,0.0, -1.57]
+    - [1.0,0.5, 1.57]
+  time: 4.0 # seconds
+controller:
+  gains: [5.0, 5.0, 3.0, 0.4, 0.4, 0.2, 0.2] # [kx, ky, kth, kprmotor, kplmotor, kirmotor, kilmotor]
+robot: 
+  type: differential_drive
+  wheel_radius: 0.015  # m
+  base_diameter: 0.09  # m
+  max_wheel_speed: 150 # rad/s
+  time_constant:  0.1  # time constant for first-order wheel dynamics (set to 0 for ideal actuation)
+  slip_r: 0.4          # std of fractional slip on ur (40%) [0 -> 1.0]
+  slip_l: 0.5          # std of fractional slip on ul (50%) [0 -> 1.0]
+
+estimator:
+  type: "kf"              # estimator type: "kf" (Kalman Filter) or "df" (Dead Reckoning)
+  wheel_radius: 0.016     # estimator's wheel_radius [m]
+  base_diameter: 0.1      # estimator's base_diameter [m]
+  noise_pos: 0.0001       # position measurement noise [m] (from mocap almost no noise)  
+  noise_angle: 0.07       # orientation noise [rad] ~  4 degrees
+  enc_angle_noise: 0.01   # encoder noise   
+  
+  proc_pos_std: 0.1       # [m]   process noise on x,y per step
+  proc_theta_std: 0.05    # [rad] process noise on θ per step
+
+  start: [0.0, 0.0, 0.0]  # initial pose estimate
