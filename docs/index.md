@@ -1,3 +1,8 @@
+---
+layout: default
+title: Wheeled Robot Simulator
+---
+
 # Wheeled Robot Simulator
 
 A modular differential-drive robot simulator designed for **control**, **estimation**,  
