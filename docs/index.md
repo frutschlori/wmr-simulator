@@ -419,8 +419,8 @@ Pose errors in robot frame:
 $$
 
 \begin{aligned}
-x_e &= (x_d-x)\cos\theta + (y_d-y)\sin\theta,\\
-y_e &= -(x_d-x)\sin\theta + (y_d-y)\cos\theta,\\
+x_e &= (x_d-x)\cos\theta + (y_d-y)\sin\theta,\\  
+y_e &= -(x_d-x)\sin\theta + (y_d-y)\cos\theta,\\  
 \theta_e &= \operatorname{wrap}(\theta_d - \theta)
 \end{aligned}
 
