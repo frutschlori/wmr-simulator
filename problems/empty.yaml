@@ -18,19 +18,19 @@ robot:
   wheel_radius: 0.015  # m
   base_diameter: 0.09  # m
   max_wheel_speed: 150 # rad/s
-  time_constant:  0.1  # time constant for first-order wheel dynamics (set to 0 for ideal actuation)
-  slip_r: 0.4          # std of fractional slip on ur (40%) [0 -> 1.0]
-  slip_l: 0.5          # std of fractional slip on ul (50%) [0 -> 1.0]
+  time_constant:  0.0  # time constant for first-order wheel dynamics (set to 0 for ideal actuation)
+  slip_r: 0.0          # std of fractional slip on ur (40%) [0 -> 1.0]
+  slip_l: 0.0          # std of fractional slip on ul (50%) [0 -> 1.0]
 
 estimator:
-  type: "kf"              # estimator type: "kf" (Kalman Filter) or "df" (Dead Reckoning)
-  wheel_radius: 0.016     # estimator's wheel_radius [m]
-  base_diameter: 0.1      # estimator's base_diameter [m]
-  noise_pos: 0.0001       # position measurement noise [m] (from mocap almost no noise)  
-  noise_angle: 0.07       # orientation noise [rad] ~  4 degrees
-  enc_angle_noise: 0.01   # encoder noise   
+  type: "kf"              # estimator type: "kf" (Kalman Filter) or "dr" (Dead Reckoning)
+  wheel_radius: 0.015     # estimator's wheel_radius [m]
+  base_diameter: 0.09      # estimator's base_diameter [m]
+  noise_pos: 0.00       # position measurement noise [m] (from mocap almost no noise)  
+  noise_angle: 0.0       # orientation noise [rad] ~  4 degrees
+  enc_angle_noise: 0.0   # encoder noise   
   
-  proc_pos_std: 0.1       # [m]   process noise on x,y per step
-  proc_theta_std: 0.05    # [rad] process noise on θ per step
+  proc_pos_std: 0.0       # [m]   process noise on x,y per step
+  proc_theta_std: 0.0    # [rad] process noise on θ per step
 
   start: [0.0, 0.0, 0.0]  # initial pose estimate
