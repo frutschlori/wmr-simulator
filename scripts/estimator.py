@@ -183,6 +183,8 @@ class DiffDriveEstimator:
                 y_res[2] = self._wrap_to_pi(y_res[2])
 
                 S = H @ P_pred @ H.T + self.R
+                if np.linalg.det(S) == 0:
+                    S += 1e-6 * self.I3  # regularization
                 K = P_pred @ np.linalg.inv(S)
 
                 x_upd = x_pred + K @ y_res
