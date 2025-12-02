@@ -80,5 +80,5 @@ if __name__ == "__main__":
 
         
 
-    plot(robot, estimator, reference_states, sim_time_grid, out_prefix=args.output)
+    plot(robot, estimator, sim_time_grid, reference_states, out_prefix=args.output)
     visualize(problem_path, robot, reference_states, out_prefix=args.output)
