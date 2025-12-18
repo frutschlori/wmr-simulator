@@ -1,0 +1,23 @@
+
+[project]
+name = "wmr-simulator"
+version = "0.1.0"
+description = "Add description"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+
+dependencies = [
+    "cvxpy==1.7.4",
+    "matplotlib==3.10.7",
+    "meshcat==0.3.2",
+    "numpy==2.3.5",
+    "pyyaml>=6.0.3",
+    "moviepy>=2.2.1",
+    "tensorboard>=2.20.0",
+    "wandb>=0.23.1",
+    "hydra-core",
+]
+
+[build-system]
+requires = ["uv_build>=0.9.5,<0.10.0"]
+build-backend = "uv_build"

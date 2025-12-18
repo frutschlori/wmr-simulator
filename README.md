@@ -5,11 +5,30 @@ and **active-learning gain tuning** research.
 
 This README explains:
 
+0. Installation
 1. What each subsystem does  
 2. Which YAML fields configure it  
 3. The equations used in every module  
 4. How all components interact in the simulation loop  
 5. The planner, controller, robot model, estimator, and visualization
+---
+
+# 0. Installation
+
+```bash
+# Clone repo
+git clone git@github.com:IMRCLab/wmr-simulator.git
+
+# Create and activate a virtual env (using Python >=3.11,<3.13)
+cd wmr-simulator
+python3.11 -m venv .venv
+source .venv/bin/activate
+
+# Install dependecies
+# uv must be installed, see https://docs.astral.sh/uv/getting-started/installation/
+uv sync
+uv pip install -e . # Current package in editable mode
+```
 
 ---
 
@@ -108,45 +127,45 @@ Produces:
 
 ## State
 
-\[
+$$
 \mathbf{x} = (x,\;y,\;\theta)
-\]
+$$
 
 ## Inputs
 
-\[
+$$
 u_r,\; u_l
-\]
+$$
 
 ## Kinematics
 
-\[
+$$
 v = \frac{r}{2}(u_r + u_l),
 \qquad
 \omega = \frac{r}{L}(u_r - u_l)
-\]
+$$
 
 State evolution:
 
-\[
+$$
 \begin{aligned}
 x_{k+1} &= x_k + v\cos\theta_k \,\Delta t \\
 y_{k+1} &= y_k + v\sin\theta_k \,\Delta t \\
 \theta_{k+1} &= \theta_k + \omega \,\Delta t
 \end{aligned}
-\]
+$$
 
 ## Slip
 
-\[
+$$
 u_r^{\text{eff}} = u_r(1-\varepsilon_r),\qquad
 u_l^{\text{eff}} = u_l(1-\varepsilon_l)
-\]
+$$
 
-\[
+$$
 \varepsilon_r \sim U[-s_r,s_r],\qquad
 \varepsilon_l \sim U[-s_l,s_l]
-\]
+$$
 
 Robot state update uses the **effective** speeds.
 
@@ -169,62 +188,62 @@ robot:
 
 The continuous-time motor dynamics for each wheel are modeled as:
 
-\[
+$$
 \tau \,\dot{u}_r^{eff}(t) = -u_r^{eff}(t) + u_r^{cmd}(t),
 \qquad
 \tau \,\dot{u}_l^{eff}(t) = -u_l^{eff}(t) + u_l^{cmd}(t),
-\]
+$$
 
 where
 
-- \(u_r^{cmd}, u_l^{cmd}\) are the **commanded** wheel speeds from the PI controllers,
-- \(u_r^{eff}, u_l^{eff}\) are the **effective** wheel speeds seen by the kinematics,
-- \(\tau = \texttt{robot.time\_constant}\) is the motor time constant.
+- $u_r^{cmd}, u_l^{cmd}$ are the **commanded** wheel speeds from the PI controllers,
+- $u_r^{eff}, u_l^{eff}$ are the **effective** wheel speeds seen by the kinematics,
+- $\tau = \texttt{robot.time\_constant}$ is the motor time constant.
 
-In discrete time with simulator timestep \(\Delta t\), the implementation uses:
+In discrete time with simulator timestep $\Delta t$, the implementation uses:
 
-\[
+$$
 \alpha = e^{-\Delta t / \tau},
-\]
+$$
 
 and updates:
 
-\[
+$$
 u_r^{eff}[k+1] = \alpha\,u_r^{eff}[k] + (1-\alpha)\,u_r^{cmd}[k],
-\]
-\[
+$$
+$$
 u_l^{eff}[k+1] = \alpha\,u_l^{eff}[k] + (1-\alpha)\,u_l^{cmd}[k].
-\]
+$$
 
-If \(\tau < 10^{-3}\) (as a special case), the code sets
+If $\tau < 10^{-3}$ (as a special case), the code sets
 
-\[
+$$
 \alpha = 0,
-\]
+$$
 
 which reduces to
 
-\[
+$$
 u_r^{eff}[k+1] = u_r^{cmd}[k],\qquad
 u_l^{eff}[k+1] = u_l^{cmd}[k],
-\]
+$$
 
 i.e. **no motor lag** (instantaneous response).
 
 These effective wheel speeds are then used in the kinematics (and slip model):
 
-1. First apply motor dynamics to get \(u_r^{eff}, u_l^{eff}\).  
+1. First apply motor dynamics to get $u_r^{eff}, u_l^{eff}$.  
 2. Then apply slip:
-   \[
+   $$
    u_r^{slip} = u_r^{eff}(1-\varepsilon_r),\qquad
    u_l^{slip} = u_l^{eff}(1-\varepsilon_l),
-   \]
+   $$
 3. Finally compute
-   \[
+   $$
    v = \frac{r}{2}(u_r^{slip}+u_l^{slip}),
    \qquad
    \omega = \frac{r}{L}(u_r^{slip}-u_l^{slip}).
-   \]
+   $$
 
 ---
 
@@ -233,9 +252,9 @@ These effective wheel speeds are then used in the kinematics (and slip model):
 
 The planner produces the reference trajectory:
 
-\[
+$$
 [x_d, y_d, \theta_d, \dot{x}_d, \dot{y}_d, \omega_d,\ddot{x}_d,\ddot{y}_d]
-\]
+$$
 
 It performs:
 
@@ -275,53 +294,53 @@ Length of the waypoint determines whether heading is enforced.
 
 ## Tangent constraint (when θ is provided)
 
-\[
+$$
 \frac{1}{\|\mathbf{t}(u_i)\|}\mathbf{t}(u_i)=
 \begin{bmatrix}
 \cos\theta_i\\ \sin\theta_i
 \end{bmatrix}
-\]
+$$
 
 where
 
-\[
+$$
 \mathbf{t}(u_i)=\begin{bmatrix}x'(u_i)\\y'(u_i)\end{bmatrix}
-\]
+$$
 
 ---
 
 ## Time parameterization
 
-\[
+$$
 x_d(t)=x(u(t)),\qquad y_d(t)=y(u(t))
-\]
+$$
 
 Velocities:
 
-\[
+$$
 \dot{x}_d=x'(u)\dot{u},\qquad
 \dot{y}_d=y'(u)\dot{u}
-\]
+$$
 
 Heading:
 
-\[
+$$
 \theta_d=\operatorname{atan2}(\dot{y}_d,\dot{x}_d)
-\]
+$$
 
 Curvature:
 
-\[
+$$
 \kappa(u)=
 \frac{x'(u)y''(u)-y'(u)x''(u)}
 {(x'(u)^2+y'(u)^2)^{3/2}}
-\]
+$$
 
 Angular velocity:
 
-\[
+$$
 \omega_d = \kappa(u)\, v_d
-\]
+$$
 
 ---
 
@@ -372,33 +391,33 @@ Inputs:
 
 Pose errors in robot frame:
 
-\[
+$$
 \begin{aligned}
 x_e &= (x_d-x)\cos\theta + (y_d-y)\sin\theta,\\
 y_e &= -(x_d-x)\sin\theta + (y_d-y)\cos\theta,\\
 \theta_e &= \operatorname{wrap}(\theta_d - \theta)
 \end{aligned}
-\]
+$$
 
 Control law:
 
-\[
+$$
 v^{ref} = v_d \cos\theta_e + k_x x_e
-\]
+$$
 
-\[
+$$
 \omega^{ref} = \omega_d + v_d(k_y y_e + k_\theta\sin\theta_e) + k_\theta\theta_e
-\]
+$$
 
 ---
 
 ## 6.2 Wheel-Speed Mapping
 
-\[
+$$
 u_r^{ref} = \frac{2v^{ref} + L\omega^{ref}}{2r},
 \qquad
 u_l^{ref} = \frac{2v^{ref} - L\omega^{ref}}{2r}
-\]
+$$
 
 ---
 
@@ -406,22 +425,22 @@ u_l^{ref} = \frac{2v^{ref} - L\omega^{ref}}{2r}
 
 Errors:
 
-\[
+$$
 e_r = u_r^{ref} - u_r^{meas},\qquad
 e_l = u_l^{ref} - u_l^{meas}
-\]
+$$
 
 Commands:
 
-\[
+$$
 \tilde{u}_r = u_r^{ref} + k_{pr}e_r + k_{ir}\!\int e_r dt
-\]
+$$
 
-\[
+$$
 \tilde{u}_l = u_l^{ref} + k_{pl}e_l + k_{il}\!\int e_l dt
-\]
+$$
 
-Outputs \(\tilde{u}_r,\tilde{u}_l\) go to the robot.
+Outputs $\tilde{u}_r,\tilde{u}_l$ go to the robot.
 
 ---
 
@@ -440,10 +459,10 @@ Outputs \(\tilde{u}_r,\tilde{u}_l\) go to the robot.
 
 ## 7.1 Wheel-speed measurement model
 
-\[
+$$
 \hat{u}_r = u_r^{eff} + n_r,\qquad
 \hat{u}_l = u_l^{eff} + n_l
-\]
+$$
 
 ---
 
@@ -451,86 +470,86 @@ Outputs \(\tilde{u}_r,\tilde{u}_l\) go to the robot.
 
 Speeds:
 
-\[
+$$
 v_{hat}=\frac{r}{2}(\hat{u}_r+\hat{u}_l),\qquad
 \omega_{hat}=\frac{r}{L}(\hat{u}_r-\hat{u}_l)
-\]
+$$
 
 State prediction:
 
-\[
+$$
 \begin{aligned}
 \hat{x}_{k+1}^- &= \hat{x}_k + v_{hat}\cos\hat{\theta}_k\,\Delta t \\
 \hat{y}_{k+1}^- &= \hat{y}_k + v_{hat}\sin\hat{\theta}_k\,\Delta t \\
 \hat{\theta}_{k+1}^- &= \hat{\theta}_k + \omega_{hat}\Delta t
 \end{aligned}
-\]
+$$
 
 Jacobian:
 
-\[
+$$
 F_k=
 \begin{bmatrix}
 1 & 0 & -v_{hat}\sin\hat{\theta}\Delta t\\
 0 & 1 & v_{hat}\cos\hat{\theta}\Delta t\\
 0 & 0 & 1
 \end{bmatrix}
-\]
+$$
 
 Covariance:
 
-\[
+$$
 P^- = FP F^\top + Q
-\]
+$$
 
 ---
 
 ## 7.3 Measurement model
 
-\[
+$$
 h(x)=\begin{bmatrix}x\\y\\\theta\end{bmatrix},\qquad H=I_3
-\]
+$$
 
 Measurements:
 
-\[
+$$
 z_k=
 \begin{bmatrix}
 p_x\\p_y\\\theta_m
 \end{bmatrix}
-\]
+$$
 
 Angle wrapping:
 
-\[
+$$
 \operatorname{wrap}(\alpha)=\operatorname{atan2}(\sin\alpha,\cos\alpha)
-\]
+$$
 
 Residual:
 
-\[
+$$
 y_k=
 \begin{bmatrix}
 p_x-\hat{x}^-\\
 p_y-\hat{y}^-\\
 \operatorname{wrap}(\theta_m-\hat{\theta}^-)
 \end{bmatrix}
-\]
+$$
 
 Update:
 
-\[
+$$
 S=HP^-H^\top + R
-\]
-\[
+$$
+$$
 K=P^-H^\top S^{-1}
-\]
-\[
+$$
+$$
 \hat{x}=\hat{x}^- + Ky
-\]
-\[
+$$
+$$
 P=(I-KH)P^-
-\]
+$$
 
 ---
 
