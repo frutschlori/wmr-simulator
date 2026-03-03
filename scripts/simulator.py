@@ -1,11 +1,11 @@
 import numpy as np
-from scripts.controller import Controller
-from scripts.robot import DiffDrive
-from scripts.estimator import DiffDriveEstimator
-from scripts.planner import compute_reference_trajectory
+from wmr_simulator.controller import Controller
+from wmr_simulator.robot import DiffDrive
+from wmr_simulator.estimator import DiffDriveEstimator
+from wmr_simulator.planner import compute_reference_trajectory
 import argparse
 import yaml
-from visualize import visualize, plot
+from wmr_simulator.visualize import visualize, plot
 
 
 if __name__ == "__main__":
