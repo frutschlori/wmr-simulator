@@ -10,13 +10,13 @@
 ## State
 
 $$
-\mathbf{x} = (x,\;y,\;\theta)
+\mathbf{x} = (x, y, \theta)
 $$
 
 ## Inputs
 
 $$
-u_r,\; u_l
+u_r, u_l
 $$
 
 ## Kinematics
@@ -76,7 +76,7 @@ where:
 
 - $u_r^{cmd}, u_l^{cmd}$ are the commanded wheel speeds from the PI controllers,
 - $u_r^{eff}, u_l^{eff}$ are the effective wheel speeds seen by the kinematics,
-- $\tau = \texttt{robot.time\_constant}$ is the motor time constant.
+- $\tau =$ `robot.time_constant` is the motor time constant.
 
 In discrete time with simulator timestep $\Delta t$, the implementation uses:
 

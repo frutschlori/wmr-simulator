@@ -61,7 +61,7 @@ $$
 ## 7.3 Measurement model
 
 $$
-h(x)=\begin{bmatrix}x\\y\\\theta\end{bmatrix},\qquad 
+h(x)=\begin{bmatrix}x \\ y \\ \theta\end{bmatrix},\qquad 
 H = I_3
 $$
 
@@ -70,14 +70,14 @@ Measurements:
 $$
 z_k=
 \begin{bmatrix}
-p_x\\p_y\\\theta_m
+p_x \\ p_y \\ \theta_m
 \end{bmatrix}
 $$
 
 Angle wrapping:
 
 $$
-\operatorname{wrap}(\alpha)=\operatorname{atan2}(\sin\alpha,\cos\alpha)
+\text{wrap}(\alpha)=\text{atan2}(\sin\alpha,\cos\alpha)
 $$
 
 Residual:
@@ -87,7 +87,7 @@ y_k=
 \begin{bmatrix}
 p_x-\hat{x}^-\\
 p_y-\hat{y}^-\\
-\operatorname{wrap}(\theta_m-\hat{\theta}^-)
+\text{wrap}(\theta_m-\hat{\theta}^-)
 \end{bmatrix}
 $$
 
