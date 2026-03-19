@@ -22,20 +22,17 @@ $$
 \begin{aligned}
 x_e &= (x_d - x)\cos\theta + (y_d - y)\sin\theta, \\
 y_e &= -(x_d - x)\sin\theta + (y_d - y)\cos\theta, \\
-\theta_e &= \operatorname{wrap}(\theta_d - \theta)
+\theta_e &= \text{wrap}(\theta_d - \theta)
 \end{aligned}
 $$
 
 Control law:
 
 $$
-v^{ref} = v_d \cos\theta_e + k_x x_e
-$$
-
-$$
-\omega^{ref} = \omega_d 
-  + v_d(k_y y_e + k_\theta \sin\theta_e)
-  + k_\theta \theta_e
+\begin{aligned}
+v^{ref} &= v_d \cos\theta_e + k_x x_e \\
+\omega^{ref} &= \omega_d + v_d(k_y y_e + k_\theta \sin\theta_e) + k_\theta \theta_e
+\end{aligned}
 $$
 
 ---

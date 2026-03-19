@@ -82,7 +82,7 @@ $$
 Heading:
 
 $$
-\theta_d = \operatorname{atan2}(\dot{y}_d,\dot{x}_d)
+\theta_d = \text{atan2}(\dot{y}_d,\dot{x}_d)
 $$
 
 Curvature:
