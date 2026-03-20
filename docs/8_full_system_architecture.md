@@ -4,7 +4,7 @@ Subsystems:
 
 1. Planner → smooth reference trajectory  
 2. Trajectory sampler  
-3. Estimator → produces \(\hat{x},\hat{y},\hat{\theta}\)  
+3. Estimator → produces $(\hat{x},\hat{y},\hat{\theta})$  
 4. Controller  
    - geometric pose control  
    - wheel-speed PI loops  

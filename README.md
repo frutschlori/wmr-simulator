@@ -128,13 +128,13 @@ Produces:
 ## State
 
 $$
-\mathbf{x} = (x,\;y,\;\theta)
+\mathbf{x} = (x,y,\theta)
 $$
 
 ## Inputs
 
 $$
-u_r,\; u_l
+u_r, u_l
 $$
 
 ## Kinematics
@@ -189,16 +189,16 @@ robot:
 The continuous-time motor dynamics for each wheel are modeled as:
 
 $$
-\tau \,\dot{u}_r^{eff}(t) = -u_r^{eff}(t) + u_r^{cmd}(t),
+\tau \dot{u}_r^{eff}(t) = -u_r^{eff}(t) + u_r^{cmd}(t),
 \qquad
-\tau \,\dot{u}_l^{eff}(t) = -u_l^{eff}(t) + u_l^{cmd}(t),
+\tau \dot{u}_l^{eff}(t) = -u_l^{eff}(t) + u_l^{cmd}(t),
 $$
 
 where
 
 * $u_r^{cmd}, u_l^{cmd}$ are the **commanded** wheel speeds from the PI controllers,
 * $u_r^{eff}, u_l^{eff}$ are the **effective** wheel speeds seen by the kinematics,
-* $\tau = \texttt{robot.time\_constant}$ is the motor time constant.
+* $\tau =$ `robot.time_constant` is the motor time constant.
 
 In discrete time with simulator timestep $\Delta t$, the implementation uses:
 
@@ -234,16 +234,19 @@ These effective wheel speeds are then used in the kinematics (and slip model):
 
 1. First apply motor dynamics to get $u_r^{eff}, u_l^{eff}$.  
 2. Then apply slip:
-   $$
-   u_r^{slip} = u_r^{eff}(1-\varepsilon_r),\qquad
-   u_l^{slip} = u_l^{eff}(1-\varepsilon_l),
-   $$
+
+$$
+u_r^{slip} = u_r^{eff}(1-\varepsilon_r),\qquad
+u_l^{slip} = u_l^{eff}(1-\varepsilon_l),
+$$
+
 3. Finally compute
-   $$
-   v = \frac{r}{2}(u_r^{slip}+u_l^{slip}),
-   \qquad
-   \omega = \frac{r}{L}(u_r^{slip}-u_l^{slip}).
-   $$
+
+$$
+v = \frac{r}{2}(u_r^{slip}+u_l^{slip}),
+\qquad
+\omega = \frac{r}{L}(u_r^{slip}-u_l^{slip}).
+$$
 
 ---
 
@@ -297,14 +300,18 @@ Length of the waypoint determines whether heading is enforced.
 $$
 \frac{1}{\|\mathbf{t}(u_i)\|}\mathbf{t}(u_i)=
 \begin{bmatrix}
-\cos\theta_i\\ \sin\theta_i
+\cos\theta_i\\
+\sin\theta_i
 \end{bmatrix}
 $$
 
 where
 
 $$
-\mathbf{t}(u_i)=\begin{bmatrix}x'(u_i)\\y'(u_i)\end{bmatrix}
+\mathbf{t}(u_i)=\begin{bmatrix}
+x'(u_i)\\
+y'(u_i)
+\end{bmatrix}
 $$
 
 ---
@@ -325,7 +332,7 @@ $$
 Heading:
 
 $$
-\theta_d=\operatorname{atan2}(\dot{y}_d,\dot{x}_d)
+\theta_d=\text{atan2}(\dot{y}_d,\dot{x}_d)
 $$
 
 Curvature:
@@ -386,8 +393,8 @@ controller:
 
 Inputs:
 
-- Reference: \((x_d,y_d,\theta_d,v_d,\omega_d)\)  
-- Estimate: \((\hat{x},\hat{y},\hat{\theta})\)
+- Reference: $(x_d,y_d,\theta_d,v_d,\omega_d)$
+- Estimate: $(\hat{x},\hat{y},\hat{\theta})$
 
 Pose errors in robot frame:
 
@@ -395,7 +402,7 @@ $$
 \begin{aligned}
 x_e &= (x_d-x)\cos\theta + (y_d-y)\sin\theta,\\
 y_e &= -(x_d-x)\sin\theta + (y_d-y)\cos\theta,\\
-\theta_e &= \operatorname{wrap}(\theta_d - \theta)
+\theta_e &= \text{wrap}(\theta_d - \theta)
 \end{aligned}
 $$
 
@@ -507,7 +514,12 @@ $$
 ## 7.3 Measurement model
 
 $$
-h(x)=\begin{bmatrix}x\\y\\\theta\end{bmatrix},\qquad H=I_3
+h(x)=
+\begin{bmatrix}
+x\\
+y\\
+\theta
+\end{bmatrix},\qquad H=I_3
 $$
 
 Measurements:
@@ -515,14 +527,16 @@ Measurements:
 $$
 z_k=
 \begin{bmatrix}
-p_x\\p_y\\\theta_m
+p_x\\
+p_y\\
+\theta_m
 \end{bmatrix}
 $$
 
 Angle wrapping:
 
 $$
-\operatorname{wrap}(\alpha)=\operatorname{atan2}(\sin\alpha,\cos\alpha)
+\text{wrap}(\alpha)=\text{atan2}(\sin\alpha,\cos\alpha)
 $$
 
 Residual:
@@ -532,7 +546,7 @@ y_k=
 \begin{bmatrix}
 p_x-\hat{x}^-\\
 p_y-\hat{y}^-\\
-\operatorname{wrap}(\theta_m-\hat{\theta}^-)
+\text{wrap}(\theta_m-\hat{\theta}^-)
 \end{bmatrix}
 $$
 
@@ -559,7 +573,7 @@ Subsystems:
 
 1. Planner → smooth reference trajectory  
 2. Trajectory sampler  
-3. Estimator → produces \(\hat{x},\hat{y},\hat{\theta}\)  
+3. Estimator → produces $(\hat{x}, \hat{y}, \hat{\theta})$  
 4. Controller  
    - geometric pose control  
    - wheel-speed PI loops  
