@@ -3,9 +3,10 @@ from wmr_simulator.controller import Controller
 from wmr_simulator.robot import DiffDrive
 from wmr_simulator.estimator import DiffDriveEstimator
 from wmr_simulator.planner import compute_reference_trajectory
+from wmr_simulator.visualize import visualize, plot
 import argparse
 import yaml
-from wmr_simulator.visualize import visualize, plot
+import timeit
 
 
 if __name__ == "__main__":
@@ -53,7 +54,9 @@ if __name__ == "__main__":
                       cmd_limits=[-robot_cfg["max_wheel_speed"], robot_cfg["max_wheel_speed"]],
                       dt=dt)    
     
-    # Simulate only for the simulation time horizon
+    # Simulate over simulation time horizon and roughly measure runtime
+    tic = timeit.default_timer()
+
     for k in range(len(sim_time_grid)):
         # Update estimator with true wheel speeds
         ur_true, ul_true = robot.get_wheel_speeds()
@@ -75,10 +78,12 @@ if __name__ == "__main__":
 
         # Step the robot simulation
         robot.step(u)
-        
+
+    toc = timeit.default_timer()
+    print("Simulation runtime: ", round((toc - tic)*1e3, 2), " ms")
         
 
         
-
+    # Visualization
     plot(robot, estimator, sim_time_grid, reference_states, out_prefix=args.output)
     visualize(problem_path, robot, reference_states, out_prefix=args.output)
