@@ -91,10 +91,15 @@ estimator:
 
 # 2. Running the Simulator
 
-To run a complete simulation:
+To run a complete simulation using NumPy:
 
 ```bash
 python3 scripts/simulator.py --problem problems/empty.yaml --output simulation_visualization
+```
+To run a complete simulation using JAX:
+
+```bash
+python3 scripts/simulator_jax.py --problem problems/empty.yaml --output simulation_visualization_jax
 ```
 
 

@@ -6,13 +6,12 @@ class Controller:
         else: 
             self.gains = gains
         self.kx, self.ky, self.kth, self.kprmotor, self.kplmotor, self.kirmotor, self.kilmotor = self.gains
-        self.cmd_limit = cmd_limits
+        self.cmd_limits = cmd_limits
         self.ir = 0.0
         self.il = 0.0
         self.dt = dt # timestep (s) used in integral calculation
         self.r = robot_param['wheel_radius']  # wheel radius
         self.L = robot_param['base_diameter']  # wheelbase
-        self.cmd_limits = cmd_limits
         self.dt = dt
 
     def compute(self, refstate, pose_state, wheel_meas):
