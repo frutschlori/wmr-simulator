@@ -104,13 +104,6 @@ def plot(robot, estimator, time, reference_states=None, out_prefix="plot_traject
     est_pose_hat = np.array(estimator.log_pose_hat)   # [N, 3]
     est_pose_meas = np.array(estimator.log_pose_meas) # [N, 3]
 
-    # Trim / extend to match states length if needed
-    states = np.array(robot.log_states)
-    N = len(states)
-    est_pose_hat = est_pose_hat[:N]
-    est_pose_meas = est_pose_meas[:N]
-
-
     # Handle reference states
     if reference_states is not None:
         # Extend reference states if needed to match time length
@@ -153,7 +146,10 @@ def plot(robot, estimator, time, reference_states=None, out_prefix="plot_traject
             axes1[k].plot(time, states[:, k], 'b-', label=f'Actual {labels[k]}')
             if reference_states is not None:
                 axes1[k].plot(time, refstates[:, k], 'r--', label=f'Ref {labels[k]}')
-            axes1[k].plot(time[:N], est_pose_hat[:, k], 'g-.', label=f'Est {labels[k]}')
+            if estimator.filter_type == "dr":
+                axes1[k].plot(time, est_pose_meas[:, k], 'g-.', label=f'Est {labels[k]}')
+            elif estimator.filter_type == "kf":
+                axes1[k].plot(time, est_pose_hat[:, k], 'g-.', label=f'Est {labels[k]}')
             axes1[k].set_ylabel(f'{["X Position", "Y Position", "Angle"][k]}')
             axes1[k].legend()
             axes1[k].grid(True)
