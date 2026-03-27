@@ -95,21 +95,27 @@ def visualize(env_file, states, reference_states=None, out_prefix="simulation_vi
     print(f"Visualization saved to {video_file}")
 
 
-def plot(traj, time, reference_states=None, out_prefix="plot_trajectory"):
-    # Extract data from robot and reference_states
-    poses = traj.pose
-    wheel_inputs_true = traj.wheel_speeds
-    wheel_inputs_cmd = traj.wheel_cmd
-    vel_omega_ctrl = traj.vel_omega  # [v, w] actual from robot
+def plot(traj, estimator, time, reference_states=None, out_prefix="plot_trajectory"):
+    # Extract data from robot-, estimator and reference-states
+    robot_traj = traj[0]
+    est_traj = traj[1]
+
+    poses = robot_traj.pose
+    wheel_inputs_true = robot_traj.wheel_speeds
+    wheel_inputs_cmd = robot_traj.wheel_cmd
+    vel_omega_ctrl = robot_traj.vel_omega  # [v, w] actual from robot
 
     # Extract estimator logs
     # est_pose_hat = np.array(estimator.log_pose_hat)  # [N, 3]
     # est_pose_meas = np.array(estimator.log_pose_meas)  # [N, 3]
+    est_pose_hat = est_traj.pose_hat        # [N, 3]
+    est_pose_meas = est_traj.pose_meas      # [N, 3]
 
-    # Trim / extend to match states length if needed
-    N = len(poses)
-    # est_pose_hat = est_pose_hat[:N]
-    # est_pose_meas = est_pose_meas[:N]
+    # Align robot poses with estimates (estimates need to be left shifted one time step,
+    # because robot update gets called after first input, hence first state is not logged)
+    est_pose_hat = est_pose_hat[1:]
+    est_pose_meas = est_pose_meas[1:]
+    poses = poses[:-1] # to match length of estimates
 
     # Handle reference states
     if reference_states is not None:
@@ -150,10 +156,13 @@ def plot(traj, time, reference_states=None, out_prefix="plot_trajectory"):
         labels = ["x", "y", "theta"]
 
         for k in range(3):
-            axes1[k].plot(time, poses[:, k], 'b-', label=f'Actual {labels[k]}')
+            axes1[k].plot(time[1:], poses[:, k], 'b-', label=f'Actual {labels[k]}')
             if reference_states is not None:
-                axes1[k].plot(time, refstates[:, k], 'r--', label=f'Ref {labels[k]}')
-            # axes1[k].plot(time[:N], est_pose_hat[:, k], 'g-.', label=f'Est {labels[k]}')
+                axes1[k].plot(time[1:], refstates[1:, k], 'r--', label=f'Ref {labels[k]}')
+            if estimator.filter_type == "dr":
+                axes1[k].plot(time[1:], est_pose_meas[:, k], 'g-.', label=f'Est {labels[k]}')
+            elif estimator.filter_type == "kf":
+                axes1[k].plot(time[1:], est_pose_hat[:, k], 'g-.', label=f'Est {labels[k]}')
             axes1[k].set_ylabel(f'{["X Position", "Y Position", "Angle"][k]}')
             axes1[k].legend()
             axes1[k].grid(True)
