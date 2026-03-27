@@ -7,6 +7,7 @@ from wmr_simulator.visualize import visualize, plot
 import argparse
 import yaml
 import timeit
+import matplotlib.pyplot as plt
 
 
 if __name__ == "__main__":
@@ -57,7 +58,11 @@ if __name__ == "__main__":
     # Simulate over simulation time horizon and roughly measure runtime
     tic = timeit.default_timer()
 
+    u = (0.0, 0.0)  # initial input is zero, since reference is assumed to align with start
     for k in range(len(sim_time_grid)):
+        # Step the robot simulation
+        robot.step(u)
+
         # Update estimator with true wheel speeds
         ur_true, ul_true = robot.get_wheel_speeds()
         pose_true = robot.get_pose()
@@ -76,14 +81,21 @@ if __name__ == "__main__":
         # Compute control commands [ur_cmd, ul_cmd] using reference at current time step
         u = ctrl.compute(ref_state, pose_est, wheel_est)
 
-        # Step the robot simulation
-        robot.step(u)
-
     toc = timeit.default_timer()
     print("Simulation runtime: ", round((toc - tic)*1e3, 2), " ms")
-        
 
-        
+
+
     # Visualization
+
+    # Plot Estimator Error
+    plt.plot(sim_time_grid, np.array(estimator.log_pose_hat)-np.array(robot.log_states))
+    plt.xlabel("Time (s)")
+    plt.ylabel("Error")
+    plt.legend([r'$\hat{x}-x$', r'$\hat{y}-y$', r'$\hat{\theta }-\theta$'])
+    plt.title("Estimation Error")
+    # plt.savefig("est_error.pdf", bbox_inches='tight')
+    plt.show()
+
     plot(robot, estimator, sim_time_grid, reference_states, out_prefix=args.output)
     visualize(problem_path, robot, reference_states, out_prefix=args.output)

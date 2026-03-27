@@ -82,7 +82,9 @@ class DiffDriveEstimator:
             self.R = np.diag([rx2, ry2, rth2])
 
             self.I3 = np.eye(3)
-        self.log_pose_hat.append([self.x_hat, self.y_hat, self.theta_hat])
+
+        # For the robot we don't log the initialization, doing it here would create offset between logs
+        # self.log_pose_hat.append([self.x_hat, self.y_hat, self.theta_hat])
 
     def reset(self, x0: float, y0: float, theta0: float):
         """Public reset."""
@@ -123,9 +125,9 @@ class DiffDriveEstimator:
 
         if self.filter_type == "dr":
             # ----- DEAD-RECKONING: simple integration + noisy measurement
-            self.theta_hat = self._wrap_to_pi(self.theta_hat + w_hat * self.dt)
             self.x_hat += v_hat * np.cos(self.theta_hat) * self.dt
             self.y_hat += v_hat * np.sin(self.theta_hat) * self.dt
+            self.theta_hat = self._wrap_to_pi(self.theta_hat + w_hat * self.dt) # changed order to match robot model and EKF
 
             self.log_pose_hat.append([self.x_hat, self.y_hat, self.theta_hat])
 
@@ -141,7 +143,7 @@ class DiffDriveEstimator:
 
         elif self.filter_type == "kf":
             # ----- EKF prediction -----
-            # state x = [x, y, theta]
+            # state x = [x_hat, y_hat, theta_hat]
             x = np.array([self.x_hat, self.y_hat, self.theta_hat])
 
             th = self.theta_hat
