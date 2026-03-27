@@ -23,9 +23,11 @@ class DiffDriveEstimator:
         self.noise_angle = float(estimator_cfg.get("noise_angle", 0.0))  # theta measurement noise
         self.enc_angle_noise = float(estimator_cfg.get("enc_angle_noise", 0.0))
 
-        # process noise (for KF)
+        # process noise (for KF) and slip statistics
         self.proc_pos_std = float(estimator_cfg.get("proc_pos_std", 0.0))
         self.proc_theta_std = float(estimator_cfg.get("proc_theta_std", 0.0))
+        self.slip_r_var = (float(estimator_cfg.get("slip_r", 0.0)) ** 2) / 3
+        self.slip_l_var = (float(estimator_cfg.get("slip_l", 0.0)) ** 2) / 3
 
         # Logs: estimated internal state, noisy measurement, wheel speeds
         self.log_pose_hat = []    # [x_hat, y_hat, theta_hat]
@@ -74,6 +76,9 @@ class DiffDriveEstimator:
             qy2 = self.proc_pos_std ** 2
             qth2 = self.proc_theta_std ** 2
             self.Q = np.diag([qx2, qy2, qth2])
+
+            # Encoder noise covariance
+            self.M_encoder = np.eye(2) * (self.enc_angle_noise ** 2)  # encoder angle noise
 
             # Measurement noise (mocap + IMU)
             rx2 = self.noise_pos ** 2
@@ -161,8 +166,28 @@ class DiffDriveEstimator:
             Fx[1, 2] =  v_hat * np.cos(th) * dt
             # Fx[2,2] = 1 already
 
+            # Input Jacobian L = df/dphi
+            ct = np.cos(th)
+            st = np.sin(th)
+            rot = self.r_est / self.L_est
+            r = self.r_est
+            Lx = np.array([[r / 2 * ct, r / 2 * ct],
+                           [r / 2 * st, r / 2 * st],
+                           [rot, -rot]])
+
+            # Slip-induced covariance on measured wheel increments
+            # since slip is multiplicative its var needs to be scaled with dphi_true^2
+            # because in practice we only know dphi_meas, which also contains enc noise, we subtract its var
+            # to not inflate slip var (max just ensures non negativity for small speeds)
+            dphi_l_slip_var = np.maximum(dphi_l_meas ** 2 - self.enc_angle_noise ** 2, 0.0) * self.slip_l_var
+            dphi_r_slip_var = np.maximum(dphi_r_meas ** 2 - self.enc_angle_noise ** 2, 0.0) * self.slip_r_var
+            M_slip = np.diag(np.array([dphi_r_slip_var, dphi_l_slip_var]))
+
+            # Total input covariance: slip contribution + encoder increment noise
+            M = M_slip + self.M_encoder
+
             # Covariance prediction
-            P_pred = Fx @ self.P @ Fx.T + self.Q
+            P_pred = Fx @ self.P @ Fx.T + Lx @ M @ Lx.T + self.Q  # added input noise L M L^T
 
             # ----- Measurement simulation (mocap + IMU) -----
             if pose_true is not None:
