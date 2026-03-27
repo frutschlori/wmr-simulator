@@ -37,13 +37,11 @@ class Controller:
         return (ir, il), (ur_cmd, ul_cmd)
 
     def _pose_control(self, refstate, state):
-        px = state[0]
-        py = state[1]
-        th = state[2]
+        px, py, th = state[0:3]
         px_d, py_d, th_d = refstate[0:3]
         vx_d, vy_d, w_d = refstate[3:6]
-        ax_d, ay_d = refstate[6:8]
         v_d = np.linalg.norm(np.asarray([vx_d, vy_d]))
+        # ax_d, ay_d = refstate[6:8]
 
         x_e = (px_d - px) * np.cos(th) + (py_d - py) * np.sin(th)
         y_e = -(px_d - px) * np.sin(th) + (py_d - py) * np.cos(th)
