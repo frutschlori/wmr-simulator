@@ -405,9 +405,9 @@ Pose errors in robot frame:
 
 $$
 \begin{aligned}
-x_e &= (x_d-x)\cos\theta + (y_d-y)\sin\theta,\\
-y_e &= -(x_d-x)\sin\theta + (y_d-y)\cos\theta,\\
-\theta_e &= \text{wrap}(\theta_d - \theta)
+x_e &= (x_d-\hat{x})\cos\hat{\theta} + (y_d-\hat{y})\sin\hat{\theta},\\
+y_e &= -(x_d-\hat{x})\sin\hat{\theta} + (y_d-\hat{y})\cos\hat{\theta},\\
+\theta_e &= \text{wrap}(\theta_d - \hat{\theta})
 \end{aligned}
 $$
 
@@ -472,8 +472,14 @@ Outputs $\tilde{u}_r,\tilde{u}_l$ go to the robot.
 ## 7.1 Wheel-speed measurement model
 
 $$
-\hat{u}_r = u_r^{eff} + n_r,\qquad
-\hat{u}_l = u_l^{eff} + n_l
+\begin{aligned}
+\mathrm{d}\phi_r^{true} &= u_r^{eff}\Delta t,
+&\mathrm{d}\phi_l^{true} &= u_l^{eff}\Delta t, \\
+\mathrm{d}\hat{\phi}_r &= u_r^{eff}\Delta t+n_r,
+&\mathrm{d}\hat{\phi}_l &= u_l^{eff}\Delta t+n_l, \\
+\hat{u}_r &= \mathrm{d}\hat{\phi}_r / \Delta t, 
+&\hat{u}_l &= \mathrm{d}\hat{\phi}_l / \Delta t
+\end{aligned}
 $$
 
 ---
@@ -508,10 +514,35 @@ F_k=
 \end{bmatrix}
 $$
 
-Covariance:
+Input Jacobian:
 
 $$
-P^- = FP F^\top + Q
+L_k = \frac{\partial f}{\partial \mathrm{d}\phi} = 
+\begin{bmatrix}
+\frac{r}{2}\cos(\hat{\theta}_k) & \frac{r}{2}\cos(\hat{\theta}_k) \\
+\frac{r}{2}\sin(\hat{\theta}_k) & \frac{r}{2}\sin(\hat{\theta}_k) \\
+\frac{r}{L} & -\frac{r}{L}
+\end{bmatrix}
+$$
+
+Predicted State Covariance:
+
+$$
+P^- = FP F^\top + LML^\top + Q,
+$$
+
+where $M$ is the sum of slip-induced and encoder angle noise covariance:
+
+$$
+M = M_{slip} + M_{enc}= 
+\begin{bmatrix}
+\mathrm{d}\phi_r^2\sigma_{\epsilon_r}^2 & 0 \\ 
+0 & \mathrm{d}\phi_l^2\sigma_{\epsilon_l}^2
+\end{bmatrix} + 
+\begin{bmatrix}
+\sigma_{enc_r}^2 & 0 \\ 
+0 & \sigma_{enc_l}^2
+\end{bmatrix}
 $$
 
 ---
