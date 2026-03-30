@@ -223,3 +223,14 @@ def plot(robot, estimator, time, reference_states=None, out_prefix="plot_traject
         d['Keywords'] = 'diffdrive, simulation, robotics, control'
 
     print(f"Multi-page PDF saved at: {pdf_filename}")
+
+
+def plot_est_error(robot, estimator, sim_time_grid, export):
+    # Plot Estimator Error
+    plt.plot(sim_time_grid, np.array(estimator.log_pose_hat)-np.array(robot.log_states))
+    plt.xlabel("Time (s)")
+    plt.ylabel("Error")
+    plt.legend([r'$\hat{x}-x$', r'$\hat{y}-y$', r'$\hat{\theta }-\theta$'])
+    plt.title("Estimation Error")
+    if export: plt.savefig("est_error.pdf", bbox_inches='tight')
+    plt.show()
