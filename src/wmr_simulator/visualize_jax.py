@@ -237,3 +237,97 @@ def plot(traj, estimator, time, reference_states=None, out_prefix="plot_trajecto
         d['Keywords'] = 'diffdrive, simulation, robotics, control'
 
     print(f"Multi-page PDF saved at: {pdf_filename}")
+
+
+def plot_system_id(hidden_log, init_log, predicted_log, estimator_filter_type, time,
+         reference_states=None, out_prefix="plot_trajectory"):
+
+    plot_time = np.asarray(time[1:])
+
+    # Handle reference states
+    refstates = None
+    if reference_states is not None:
+        if len(plot_time) > len(reference_states):
+            num_extra_steps = len(plot_time) - len(reference_states)
+            last_ref_state = reference_states[-1]
+            extended_ref_states = np.vstack([
+                reference_states,
+                np.tile(last_ref_state, (num_extra_steps, 1))
+            ])
+        else:
+            extended_ref_states = reference_states[:len(plot_time)]
+
+        ref_pos = np.array(extended_ref_states[:, 0:2])
+        ref_th = np.array(extended_ref_states[:, 2])
+        refstates = np.column_stack([ref_pos, ref_th])
+        min_len = min(len(refstates), len(plot_time))
+        refstates = refstates[:min_len]
+
+    def _extract_state_series(sim_log):
+        poses = np.asarray(sim_log.robot_states.pose)[:len(plot_time)]
+        if estimator_filter_type == "dr":
+            est_pose = np.asarray(sim_log.estimator_states.pose_meas)[:len(plot_time)]
+        else:
+            est_pose = np.asarray(sim_log.estimator_states.pose_hat)[:len(plot_time)]
+        return poses, est_pose
+
+    poses_hidden, est_hidden = _extract_state_series(hidden_log)
+    poses_init, est_init = _extract_state_series(init_log)
+    poses_pred, est_pred = _extract_state_series(predicted_log)
+
+    # --- Prepare output path
+    os.makedirs("visualize", exist_ok=True)
+    pdf_filename = os.path.join("visualize/", f"{out_prefix}.pdf")
+
+    with PdfPages(pdf_filename) as pdf:
+        def _plot_state_tracking(actual_guess, est_guess, title_suffix):
+            fig, axes = plt.subplots(3, 1, figsize=(10, 8))
+            labels = ["x", "y", "theta"]
+
+            for k in range(3):
+                if refstates is not None:
+                    axes[k].plot(plot_time, refstates[:, k], 'r--', label=f'Ref {labels[k]}')
+                axes[k].plot(plot_time, poses_hidden[:, k], 'b-', label=f'Actual {labels[k]} (hidden)')
+                axes[k].plot(plot_time, est_hidden[:, k], 'g-.', label=f'Est {labels[k]} (hidden)')
+                axes[k].plot(plot_time, actual_guess[:, k], 'c-', label=f'Actual {labels[k]} ({title_suffix})')
+                axes[k].plot(plot_time, est_guess[:, k], 'm-.', label=f'Est {labels[k]} ({title_suffix})')
+                axes[k].set_ylabel(f'{["X Position", "Y Position", "Angle"][k]}')
+                axes[k].legend()
+                axes[k].grid(True)
+
+            axes[-1].set_xlabel('Time [s]')
+            fig.suptitle(f"State Tracking ({title_suffix})", fontsize=14)
+            fig.tight_layout(rect=[0, 0, 1, 0.96])
+            pdf.savefig(fig, bbox_inches='tight', transparent=True)
+            plt.close(fig)
+
+        _plot_state_tracking(poses_init, est_init, "initial guess")
+        _plot_state_tracking(poses_pred, est_pred, "identified")
+
+        d = pdf.infodict()
+        d['Title'] = 'Differential Drive Simulation Results'
+        d['Author'] = 'Wheeled Robot Simulator'
+        d['Subject'] = 'State Tracking and Wheel Inputs'
+        d['Keywords'] = 'diffdrive, simulation, robotics, control'
+
+    print(f"Multi-page PDF saved at: {pdf_filename}")
+
+
+def plot_loss_history(loss_history, out_prefix="plot_trajectory"):
+    os.makedirs("visualize", exist_ok=True)
+    pdf_filename = os.path.join("visualize/", f"{out_prefix}_loss.pdf")
+
+    steps = np.arange(1, len(loss_history) + 1)
+
+    fig, ax = plt.subplots(1, 1, figsize=(8, 4.5))
+    ax.plot(steps, np.asarray(loss_history), 'b-', linewidth=2, label='Loss')
+    ax.set_xlabel('Optimization Step')
+    ax.set_ylabel('Loss')
+    ax.set_title('Loss History')
+    ax.grid(True)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(pdf_filename, bbox_inches='tight', transparent=True)
+    plt.close(fig)
+
+    print(f"Loss history PDF saved at: {pdf_filename}")

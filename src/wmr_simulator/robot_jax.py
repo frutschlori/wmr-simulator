@@ -5,13 +5,13 @@ import jax.numpy as np
 
 class DiffDriveState(NamedTuple):
     # States for simulation
-    pose: np.ndarray           # [x, y, theta]
-    wheel_speeds: np.ndarray   # actual wheel speeds
+    pose: jax.Array           # [x, y, theta]
+    wheel_speeds: jax.Array   # actual wheel speeds
     key: jax.Array
 
     # States for logs
-    vel_omega: np.ndarray      #  [v, w]
-    wheel_cmd: np.ndarray      # commanded wheel speeds
+    vel_omega: jax.Array      #  [v, w]
+    wheel_cmd: jax.Array      # commanded wheel speeds
 
 
 class DiffDrive:
@@ -33,8 +33,15 @@ class DiffDrive:
         self.slip_r = float(robot_cfg.get('slip_r', 0.0))
         self.slip_l = float(robot_cfg.get('slip_l', 0.0))
 
-    def step(self, state, wheel_cmd):
+    def _resolve_geometry(self, wheel_radius=None, base_diameter=None):
+        # optionally accept explicit physical parameters s.t. SI-loop can differentiate through module
+        r = self.r if wheel_radius is None else wheel_radius
+        L = self.L if base_diameter is None else base_diameter
+        return r, L
+
+    def step(self, state, wheel_cmd, wheel_radius=None, base_diameter=None):
         wheel_cmd = np.array(wheel_cmd, dtype=np.float32)
+        r, L = self._resolve_geometry(wheel_radius, base_diameter)
         # 1) Saturate wheel commands
         wheel_cmd = np.clip(wheel_cmd, -self.max_wheel_speed, self.max_wheel_speed)
 
@@ -48,8 +55,8 @@ class DiffDrive:
         ul_eff = next_wheel_speeds[1] * (1.0 - slip_l)
 
         # 3) update (from ur, ul to v, w)
-        v = 0.5 * self.r * (ur_eff + ul_eff)
-        w = (self.r / self.L) * (ur_eff - ul_eff)
+        v = 0.5 * r * (ur_eff + ul_eff)
+        w = (r / L) * (ur_eff - ul_eff)
 
         # 4) Compute updated robot state and return it
         x, y, theta = state.pose
