@@ -3,7 +3,7 @@ from wmr_simulator.controller import Controller
 from wmr_simulator.robot import DiffDrive
 from wmr_simulator.estimator import DiffDriveEstimator
 from wmr_simulator.planner import compute_reference_trajectory
-from wmr_simulator.visualize import visualize, plot
+from wmr_simulator.visualize import visualize, plot, plot_est_error
 import argparse
 import yaml
 import timeit
@@ -87,15 +87,6 @@ if __name__ == "__main__":
 
 
     # Visualization
-
-    # Plot Estimator Error
-    plt.plot(sim_time_grid, np.array(estimator.log_pose_hat)-np.array(robot.log_states))
-    plt.xlabel("Time (s)")
-    plt.ylabel("Error")
-    plt.legend([r'$\hat{x}-x$', r'$\hat{y}-y$', r'$\hat{\theta }-\theta$'])
-    plt.title("Estimation Error")
-    # plt.savefig("est_error.pdf", bbox_inches='tight')
-    plt.show()
-
+    plot_est_error(robot, estimator, sim_time_grid, export=False)
     plot(robot, estimator, sim_time_grid, reference_states, out_prefix=args.output)
     visualize(problem_path, robot, reference_states, out_prefix=args.output)
