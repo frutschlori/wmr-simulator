@@ -473,12 +473,12 @@ Outputs $\tilde{u}_r,\tilde{u}_l$ go to the robot.
 
 $$
 \begin{aligned}
-\mathrm{d}\phi_r^{true} &= u_r^{eff}\Delta t,
-&\mathrm{d}\phi_l^{true} &= u_l^{eff}\Delta t, \\
-\mathrm{d}\hat{\phi}_r &= u_r^{eff}\Delta t+n_r,
-&\mathrm{d}\hat{\phi}_l &= u_l^{eff}\Delta t+n_l, \\
-\hat{u}_r &= \mathrm{d}\hat{\phi}_r / \Delta t, 
-&\hat{u}_l &= \mathrm{d}\hat{\phi}_l / \Delta t
+\Delta\phi_r^{true} &= u_r^{eff}\Delta t,
+&\Delta\phi_l^{true} &= u_l^{eff}\Delta t, \\
+\Delta\hat{\phi}_r &= u_r^{eff}\Delta t+n_r,
+&\Delta\hat{\phi}_l &= u_l^{eff}\Delta t+n_l, \\
+\hat{u}_r &= \Delta\hat{\phi}_r / \Delta t, 
+&\hat{u}_l &= \Delta\hat{\phi}_l / \Delta t
 \end{aligned}
 $$
 
@@ -517,7 +517,7 @@ $$
 Input Jacobian:
 
 $$
-L_k = \frac{\partial f}{\partial \mathrm{d}\phi} = 
+L_k = \frac{\partial f}{\partial \Delta\phi} = 
 \begin{bmatrix}
 \frac{r}{2}\cos(\hat{\theta}_k) & \frac{r}{2}\cos(\hat{\theta}_k) \\
 \frac{r}{2}\sin(\hat{\theta}_k) & \frac{r}{2}\sin(\hat{\theta}_k) \\
@@ -536,8 +536,8 @@ where $M$ is the sum of slip-induced and encoder angle noise covariance:
 $$
 M = M_{slip} + M_{enc}= 
 \begin{bmatrix}
-\mathrm{d}\phi_r^2\sigma_{\epsilon_r}^2 & 0 \\ 
-0 & \mathrm{d}\phi_l^2\sigma_{\epsilon_l}^2
+\Delta\phi_r^2\sigma_{\epsilon_r}^2 & 0 \\ 
+0 & \Delta\phi_l^2\sigma_{\epsilon_l}^2
 \end{bmatrix} + 
 \begin{bmatrix}
 \sigma_{enc_r}^2 & 0 \\ 
