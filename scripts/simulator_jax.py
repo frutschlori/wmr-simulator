@@ -18,15 +18,15 @@ if __name__ == "__main__":
                         help="path to output visualization pdf and html file")
     args = parser.parse_args()
 
-    # Initialize robot model
-    problem_path = args.problem
-    with open(problem_path, 'r') as file:
-        problem = yaml.safe_load(file)
-
     # generate random keys for JAX PRNG
     seed = int(np.random.randint(0, 2**31 - 1))
     master_key = jax.random.PRNGKey(seed)
     robot_key, est_key = jax.random.split(master_key, 2)
+
+    # Initialize robot model
+    problem_path = args.problem
+    with open(problem_path, 'r') as file:
+        problem = yaml.safe_load(file)
 
     # Simulation parameters
     sim_time = problem["sim_time"]  # simulation duration (s)
@@ -63,7 +63,7 @@ if __name__ == "__main__":
                       gains=ctrl_cfg["gains"],
                       cmd_limits=[-robot_cfg["max_wheel_speed"], robot_cfg["max_wheel_speed"]],
                       dt=dt)
-    ctrl_state0 = (0.0, 0.0) # Initial I-Error terms of wheel speed controller
+    ctrl_state0 = np.asarray((0.0, 0.0)) # Initial I-Error terms of wheel speed controller
 
     # Initial simulation state
     carry0 = (robot_state0, est_state0, ctrl_state0)
@@ -113,6 +113,5 @@ if __name__ == "__main__":
     print("Simulation runtime: ", round((toc - tic)*1e3, 2), " ms")
 
     # Visualization
-    robot_poses = traj[0].pose
     plot(traj, estimator, sim_time_grid, reference_states, out_prefix=args.output)
-    visualize(problem_path, robot_poses, reference_states, out_prefix=args.output)
+    visualize(problem_path, traj[0].pose, reference_states, out_prefix=args.output)

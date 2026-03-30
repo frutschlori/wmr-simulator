@@ -4,11 +4,11 @@ import jax.numpy as np
 
 
 class EstimatorState(NamedTuple):
-    pose_hat: np.ndarray
-    pose_meas: np.ndarray
-    u_hat: np.ndarray
-    u_true: np.ndarray
-    P: np.ndarray
+    pose_hat: jax.Array
+    pose_meas: jax.Array
+    u_hat: jax.Array
+    u_true: jax.Array
+    P: jax.Array
     key: jax.Array
 
 class DiffDriveEstimator:
@@ -80,7 +80,14 @@ class DiffDriveEstimator:
     # ------------------------------------------------------------------ #
     # Main update
     # ------------------------------------------------------------------ #
-    def update(self, est_state: EstimatorState, ur_true: float, ul_true: float, pose_true=None):
+    def _resolve_geometry(self, wheel_radius=None, base_diameter=None):
+        # optionally accept explicit physical parameters s.t. SI-loop can differentiate through module
+        r_est = self.r_est if wheel_radius is None else wheel_radius
+        L_est = self.L_est if base_diameter is None else base_diameter
+        return r_est, L_est
+
+    def update(self, est_state: EstimatorState, ur_true: float, ul_true: float, pose_true=None,
+               wheel_radius=None, base_diameter=None):
         """
         Update estimator.
 
@@ -91,6 +98,7 @@ class DiffDriveEstimator:
         """
         # Log true wheel speeds for later comparison
         u_true = np.array([ur_true, ul_true])
+        r_est, L_est = self._resolve_geometry(wheel_radius, base_diameter)
 
         # Generate keys for PRNG
         key, k_enc_r, k_enc_l, k_x_meas, k_y_meas, k_th_meas = jax.random.split(est_state.key, 6)
@@ -108,8 +116,8 @@ class DiffDriveEstimator:
         u_hat = np.array([ur_hat, ul_hat])
 
         # 3) Propagate pose (prediction step)
-        v_hat = 0.5 * self.r_est * (ur_hat + ul_hat)
-        w_hat = (self.r_est / self.L_est) * (ur_hat - ul_hat)
+        v_hat = 0.5 * r_est * (ur_hat + ul_hat)
+        w_hat = (r_est / L_est) * (ur_hat - ul_hat)
 
         if self.filter_type == "dr":
             # ----- DEAD-RECKONING: simple integration + noisy measurement
@@ -150,11 +158,10 @@ class DiffDriveEstimator:
             # Input Jacobian L = df/dphi
             ct = np.cos(th)
             st = np.sin(th)
-            rot = self.r_est / self.L_est
-            r = self.r_est
-            Lx = np.array([[r/2 * ct, r/2 * ct],
-                           [r/2 * st, r/2 * st],
-                           [rot     , -rot]])
+            r = r_est
+            Lx = np.array([[r/2 * ct,     r/2 * ct],
+                           [r/2 * st,     r/2 * st],
+                           [r/L_est, -r/L_est]])
 
             # Slip-induced covariance on measured wheel increments
             # since slip is multiplicative its var needs to be scaled with dphi_true^2
