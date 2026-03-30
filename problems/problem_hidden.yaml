@@ -12,7 +12,7 @@ planner:
     - [1.0,0.5, 1.57]
   time: 4.0 # seconds
 controller:
-  gains: [5.0, 5.0, 3.0, 0.4, 0.4, 1, 1] # [kx, ky, kth, kprmotor, kplmotor, kirmotor, kilmotor]
+  gains: [5.0, 5.0, 3.0, 0.4, 0.4, 0.2, 0.2] # [kx, ky, kth, kprmotor, kplmotor, kirmotor, kilmotor]
 robot: 
   type: differential_drive
   wheel_radius: 0.015  # m

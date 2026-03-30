@@ -25,12 +25,12 @@ robot:
 estimator:
   type: "kf"              # estimator type: "kf" (Kalman Filter) or "dr" (Dead Reckoning)
   wheel_radius: 0.015     # estimator's wheel_radius [m]
-  base_diameter: 0.09      # estimator's base_diameter [m]
-  noise_pos: 0.00       # position measurement noise [m] (from mocap almost no noise)  
-  noise_angle: 0.0       # orientation noise [rad] ~  4 degrees
-  enc_angle_noise: 0.0   # encoder noise   
+  base_diameter: 0.09     # estimator's base_diameter [m]
+  noise_pos: 0.00         # position measurement noise [m] (from mocap almost no noise)
+  noise_angle: 0.0        # orientation noise [rad] ~  4 degrees
+  enc_angle_noise: 0.0    # encoder noise
   
   proc_pos_std: 0.0       # [m]   process noise on x,y per step
-  proc_theta_std: 0.0    # [rad] process noise on θ per step
+  proc_theta_std: 0.0     # [rad] process noise on θ per step
 
   start: [0.0, 0.0, 0.0]  # initial pose estimate
