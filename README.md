@@ -445,11 +445,11 @@ $$
 Commands:
 
 $$
-\tilde{u}_r = u_r^{ref} + k_{pr}e_r + k_{ir}\!\int e_r dt
+\tilde{u}_r = u_r^{ref} + k_{pr}e_r + k_{ir}\int e_r dt
 $$
 
 $$
-\tilde{u}_l = u_l^{ref} + k_{pl}e_l + k_{il}\!\int e_l dt
+\tilde{u}_l = u_l^{ref} + k_{pl}e_l + k_{il}\int e_l dt
 $$
 
 Outputs $\tilde{u}_r,\tilde{u}_l$ go to the robot.
