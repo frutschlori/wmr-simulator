@@ -24,7 +24,7 @@ class SimulationLog(NamedTuple):
 
 
 class SystemIdentificationPipeline:
-    def __init__(self, problem_path: str, seed: int = 0):
+    def __init__(self, problem_path: str, initial_params: PhysicalParams, seed: int = 0):
         with open(problem_path, "r", encoding="utf-8") as file:
             self.problem = yaml.safe_load(file)
 
@@ -63,8 +63,10 @@ class SystemIdentificationPipeline:
             base_diameter=jnp.asarray(self.robot_cfg["base_diameter"], dtype=jnp.float32),
         )
         master_key = jax.random.PRNGKey(seed)
-        self.robot_key, self.estimator_key = jax.random.split(master_key, 2)
-        self.target_log = self.simulate(self.hidden_params)
+        target_key, replay_key = jax.random.split(master_key, 2)
+        self.target_robot_key, self.target_estimator_key = jax.random.split(target_key, 2)
+        self.replay_robot_key, self.replay_estimator_key = jax.random.split(replay_key, 2)
+        self.target_log = self.simulate(initial_params)
 
     def _extend_reference_states(self, reference_states: np.ndarray) -> np.ndarray:
         # Extend reference states if needed to match simulation horizon
@@ -75,9 +77,9 @@ class SystemIdentificationPipeline:
         last_ref_state = reference_states[-1]
         return np.vstack([reference_states, np.tile(last_ref_state, (num_extra_steps, 1))])
 
-    def _init_states(self):
-        robot_state0 = self.robot.get_init_state(key=self.robot_key, init_pose=self.problem["start"])
-        est_state0 = self.estimator.get_init_state(key=self.estimator_key, start_pose=self.estimator_cfg["start"])
+    def _init_states(self, robot_key, estimator_key):
+        robot_state0 = self.robot.get_init_state(key=robot_key, init_pose=self.problem["start"])
+        est_state0 = self.estimator.get_init_state(key=estimator_key, start_pose=self.estimator_cfg["start"])
         ctrl_state0 = jnp.zeros(2, dtype=jnp.float32)
         return robot_state0, est_state0, ctrl_state0
 
@@ -97,37 +99,37 @@ class SystemIdentificationPipeline:
             ur_true, ul_true = self.robot.get_wheel_speeds(robot_state)
             pose_true = self.robot.get_pose(robot_state)
 
-            # Update estimator
-            next_est_state = self.estimator.update(
-                est_state, ur_true, ul_true, pose_true,
-                wheel_radius=robot_params.wheel_radius,
-                base_diameter=robot_params.base_diameter)
+            # Update estimator (with estimated robot params)
+            next_est_state = self.estimator.update(est_state, ur_true, ul_true, pose_true,
+                                                   wheel_radius=robot_params.wheel_radius,
+                                                   base_diameter=robot_params.base_diameter)
             pose_est = self.estimator.get_est_pose(next_est_state)
             wheel_est = self.estimator.get_est_wheel_speeds(next_est_state)
 
             if simulate_experiment:
-                # Compute control commands using reference at current time step
-                next_ctrl_state, wheel_cmd = self.controller.compute(ctrl_state, ref_k, pose_est, wheel_est)
-            else:
-                # propagate robot using logged commands from simulated experiment
-                next_ctrl_state = ctrl_state
-                wheel_cmd = wheel_cmd_experiment
+                # Compute control commands using reference at current time step (and guessed initial robot params)
+                next_ctrl_state, wheel_cmd = self.controller.compute(ctrl_state, ref_k, pose_est, wheel_est,
+                                                                     wheel_radius=robot_params.wheel_radius,
+                                                                     base_diameter=robot_params.base_diameter)
+                # step robot (with hidden params)
+                next_robot_state = self.robot.step(robot_state, wheel_cmd)
 
-            next_robot_state = self.robot.step(
-                robot_state,
-                wheel_cmd,
-                wheel_radius=robot_params.wheel_radius,
-                base_diameter=robot_params.base_diameter,
-            )
+            else:
+                # propagate robot using logged commands from simulated experiment and estimated robot params
+                next_ctrl_state = ctrl_state      # just a place holder for consistent carry shape
+                next_robot_state = self.robot.step(robot_state, wheel_cmd_experiment,
+                                                   wheel_radius=robot_params.wheel_radius,
+                                                   base_diameter=robot_params.base_diameter)
 
             return (next_robot_state, next_est_state, next_ctrl_state), (next_robot_state, next_est_state)
 
-        carry0 = self._init_states()
         if wheel_cmds is None:
+            carry0 = self._init_states(self.target_robot_key, self.target_estimator_key)
             # keep dummy commands for shape consistency so that JAX is happy
             dummy_wheel_cmds = jnp.zeros((self.reference_states.shape[0], 2), dtype=jnp.float32)
             inputs = (self.reference_states, dummy_wheel_cmds)
         else:
+            carry0 = self._init_states(self.replay_robot_key, self.replay_estimator_key)
             # simulate robot with inputs from robot with hidden params (logged experiment inputs)
             inputs = (self.reference_states, wheel_cmds)
 
@@ -206,22 +208,23 @@ class SystemIdentificationPipeline:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--problem", type=str, default="problems/problem_hidden.yaml")
-    parser.add_argument("--steps", type=int, default=200)
+    parser.add_argument("--steps", type=int, default=300)
     parser.add_argument("--learning-rate", type=float, default=1e-2)
     parser.add_argument("--init-wheel-radius", type=float, default=0.08)  # hidden = 0.015
     parser.add_argument("--init-base-diameter", type=float, default=0.4)  # hidden = 0.09
-    parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--output", type=str, default="system_identification")
+    parser.add_argument("--seed", type=int, default=np.random.randint(low=0, high=1e16))
     args = parser.parse_args()
-
-    # Initialize pipeline
-    pipeline = SystemIdentificationPipeline(problem_path=args.problem, seed=args.seed)
+    # args.seed = 42
 
     # Set up initial params from arguments
     init_params = PhysicalParams(
         wheel_radius=jnp.asarray(args.init_wheel_radius),
         base_diameter=jnp.asarray(args.init_base_diameter),
     )
+
+    # Initialize pipeline
+    pipeline = SystemIdentificationPipeline(problem_path=args.problem, initial_params=init_params, seed=args.seed)
 
     # Simulate using initial params and log for plots
     init_log = pipeline.simulate(init_params, wheel_cmds=pipeline.target_log.robot_states.wheel_cmd)

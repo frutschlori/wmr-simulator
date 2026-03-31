@@ -286,10 +286,10 @@ def plot_system_id(hidden_log, init_log, predicted_log, estimator_filter_type, t
 
             for k in range(3):
                 if refstates is not None:
-                    axes[k].plot(plot_time, refstates[:, k], 'r--', label=f'Ref {labels[k]}')
-                axes[k].plot(plot_time, poses_hidden[:, k], 'b-', label=f'Actual {labels[k]} (hidden)')
-                axes[k].plot(plot_time, est_hidden[:, k], 'g-.', label=f'Est {labels[k]} (hidden)')
-                axes[k].plot(plot_time, actual_guess[:, k], 'c-', label=f'Actual {labels[k]} ({title_suffix})')
+                    axes[k].plot(plot_time, refstates[:, k], 'r-', label=f'Ref {labels[k]}')
+                axes[k].plot(plot_time, poses_hidden[:, k], 'b--', label=f'Actual {labels[k]} (hidden)')
+                axes[k].plot(plot_time, est_hidden[:, k], 'g--', label=f'Est {labels[k]} (hidden)')
+                axes[k].plot(plot_time, actual_guess[:, k], 'c-.', label=f'Actual {labels[k]} ({title_suffix})')
                 axes[k].plot(plot_time, est_guess[:, k], 'm-.', label=f'Est {labels[k]} ({title_suffix})')
                 axes[k].set_ylabel(f'{["X Position", "Y Position", "Angle"][k]}')
                 axes[k].legend()
