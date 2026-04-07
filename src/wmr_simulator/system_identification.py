@@ -10,7 +10,7 @@ from wmr_simulator.controller_jax import Controller
 from wmr_simulator.estimator_jax import DiffDriveEstimator, EstimatorState
 from wmr_simulator.planner import compute_reference_trajectory
 from wmr_simulator.robot_jax import DiffDrive, DiffDriveState
-from wmr_simulator.visualize_jax import plot_loss_history, plot_system_id
+from wmr_simulator.SI_visualization import plot_loss_history, plot_system_id
 
 
 class PhysicalParams(NamedTuple):
@@ -62,14 +62,18 @@ class SystemIdentificationPipeline:
             wheel_radius=jnp.asarray(self.robot_cfg["wheel_radius"], dtype=jnp.float32),
             base_diameter=jnp.asarray(self.robot_cfg["base_diameter"], dtype=jnp.float32),
         )
+
+        # Splitting keys for PRNG
         master_key = jax.random.PRNGKey(seed)
         target_key, replay_key = jax.random.split(master_key, 2)
         self.target_robot_key, self.target_estimator_key = jax.random.split(target_key, 2)
         self.replay_robot_key, self.replay_estimator_key = jax.random.split(replay_key, 2)
+
+        # Create log of simulated experiment run
         self.target_log = self.simulate(initial_params)
 
     def _extend_reference_states(self, reference_states: np.ndarray) -> np.ndarray:
-        # Extend reference states if needed to match simulation horizon
+        """ Extend reference states if needed to match simulation horizon """
         if len(reference_states) >= len(self.sim_time_grid):
             return reference_states[: len(self.sim_time_grid)]
 
@@ -78,6 +82,7 @@ class SystemIdentificationPipeline:
         return np.vstack([reference_states, np.tile(last_ref_state, (num_extra_steps, 1))])
 
     def _init_states(self, robot_key, estimator_key):
+        """ Init states and set PRNG keys """
         robot_state0 = self.robot.get_init_state(key=robot_key, init_pose=self.problem["start"])
         est_state0 = self.estimator.get_init_state(key=estimator_key, start_pose=self.estimator_cfg["start"])
         ctrl_state0 = jnp.zeros(2, dtype=jnp.float32)
@@ -87,7 +92,7 @@ class SystemIdentificationPipeline:
     def _wrap_to_pi(angle):
         return (angle + jnp.pi) % (2.0 * jnp.pi) - jnp.pi
 
-    def simulate(self, robot_params: PhysicalParams, wheel_cmds=None):
+    def simulate(self, robot_params: PhysicalParams, wheel_cmds=None, robot_key=None, estimator_key=None):
         # Flag to initially simulate experiment run and later feed forward logged commands from that run
         simulate_experiment = wheel_cmds is None
 
@@ -129,7 +134,9 @@ class SystemIdentificationPipeline:
             dummy_wheel_cmds = jnp.zeros((self.reference_states.shape[0], 2), dtype=jnp.float32)
             inputs = (self.reference_states, dummy_wheel_cmds)
         else:
-            carry0 = self._init_states(self.replay_robot_key, self.replay_estimator_key)
+            robot_key = self.replay_robot_key if robot_key is None else robot_key
+            estimator_key = self.replay_estimator_key if estimator_key is None else estimator_key
+            carry0 = self._init_states(robot_key, estimator_key)
             # simulate robot with inputs from robot with hidden params (logged experiment inputs)
             inputs = (self.reference_states, wheel_cmds)
 
@@ -137,10 +144,7 @@ class SystemIdentificationPipeline:
         _, logs = jax.lax.scan(sim_step, carry0, inputs)
 
         robot_states, estimator_states = logs
-        return SimulationLog(
-            robot_states=robot_states,
-            estimator_states=estimator_states,
-        )
+        return SimulationLog(robot_states=robot_states, estimator_states=estimator_states)
 
     @staticmethod
     def pose_mse(predicted_poses, target_poses):
@@ -150,11 +154,24 @@ class SystemIdentificationPipeline:
         squared_error = jnp.sum(pos_error ** 2, axis=1) + angle_error ** 2
         return jnp.mean(squared_error)
 
-    def loss(self, params: PhysicalParams):
-        """ Computes loss from estimated poses obtained with current params and est target poses """
-        predicted_log = self.simulate(params, wheel_cmds=self.target_log.robot_states.wheel_cmd)
-        predicted_pose_hat = predicted_log.estimator_states.pose_hat
-        return self.pose_mse(predicted_pose_hat, self.target_log.estimator_states.pose_hat)
+    def loss(self, params: PhysicalParams, replay_robot_keys: jax.Array, replay_estimator_keys: jax.Array):
+        """Compute averaged replay loss over a fixed batch of replay noise realizations."""
+        wheel_cmds = self.target_log.robot_states.wheel_cmd
+        target_pose_hat = self.target_log.estimator_states.pose_hat
+
+        def replay_loss(robot_key, estimator_key):
+            predicted_log = self.simulate(
+                params,
+                wheel_cmds=wheel_cmds,
+                robot_key=robot_key,
+                estimator_key=estimator_key,
+            )
+            predicted_pose_hat = predicted_log.estimator_states.pose_hat
+            return self.pose_mse(predicted_pose_hat, target_pose_hat)
+
+        # vmap automatically vectorizes according to shape of the keys
+        losses = jax.vmap(replay_loss)(replay_robot_keys, replay_estimator_keys)
+        return jnp.mean(losses)
 
     @staticmethod
     def _clip_physical_params(params: PhysicalParams):
@@ -179,15 +196,19 @@ class SystemIdentificationPipeline:
             sys.stdout.write("\n")
         sys.stdout.flush()
 
-    def optimize(self, init_params: PhysicalParams, num_steps: int, learning_rate: float):
+    def optimize(self, init_params: PhysicalParams, num_steps: int, learning_rate: float, num_realizations: int):
         """ Optimize the system with given initial params """
         optimizer = optax.adam(learning_rate)
         current_params = self._clip_physical_params(init_params)
         opt_state = optimizer.init(current_params)
 
+        # split keys
+        replay_robot_keys = jax.random.split(self.replay_robot_key, num_realizations)
+        replay_estimator_keys = jax.random.split(self.replay_estimator_key, num_realizations)
+
         @jax.jit
         def train_step(current_params, current_opt_state):
-            loss_value, grads = jax.value_and_grad(self.loss)(current_params)
+            loss_value, grads = jax.value_and_grad(self.loss)(current_params, replay_robot_keys, replay_estimator_keys)
             updates, next_opt_state = optimizer.update(grads, current_opt_state, current_params)
             next_params = optax.apply_updates(current_params, updates)
             next_params = self._clip_physical_params(next_params)
@@ -210,12 +231,14 @@ if __name__ == "__main__":
     parser.add_argument("--problem", type=str, default="problems/problem_hidden.yaml")
     parser.add_argument("--steps", type=int, default=300)
     parser.add_argument("--learning-rate", type=float, default=1e-2)
+    parser.add_argument("--num-realizations", type=int, default=8)
     parser.add_argument("--init-wheel-radius", type=float, default=0.08)  # hidden = 0.015
     parser.add_argument("--init-base-diameter", type=float, default=0.4)  # hidden = 0.09
     parser.add_argument("--output", type=str, default="system_identification")
     parser.add_argument("--seed", type=int, default=np.random.randint(low=0, high=1e16))
     args = parser.parse_args()
-    # args.seed = 42
+    # args.seed = 0
+    # args.num_realizations = 16
 
     # Set up initial params from arguments
     init_params = PhysicalParams(
@@ -227,16 +250,19 @@ if __name__ == "__main__":
     pipeline = SystemIdentificationPipeline(problem_path=args.problem, initial_params=init_params, seed=args.seed)
 
     # Simulate using initial params and log for plots
-    init_log = pipeline.simulate(init_params, wheel_cmds=pipeline.target_log.robot_states.wheel_cmd)
+    init_target_log = pipeline.target_log # save for plots
+    init_log = pipeline.simulate(init_params, pipeline.target_log.robot_states.wheel_cmd)
 
     # Actual parameter identification
     estimated_params, loss_history = pipeline.optimize(
         init_params=init_params,
         num_steps=args.steps,
         learning_rate=args.learning_rate,
+        num_realizations=args.num_realizations,
     )
 
-    # Simulate using optimized parameters and log for plots
+    # Simulate using identified parameters and log for plots
+    pipeline.target_log = pipeline.simulate(estimated_params)   # also let ctrl and estimator use found params
     predicted_log = pipeline.simulate(estimated_params, wheel_cmds=pipeline.target_log.robot_states.wheel_cmd)
 
     print("Initial guess:")
@@ -251,12 +277,10 @@ if __name__ == "__main__":
     print(f"Final loss: {loss_history[-1]:.8f}")
 
     plot_system_id(
-        hidden_log=pipeline.target_log,
+        pipeline=pipeline,
+        init_target_log=init_target_log,
         init_log=init_log,
         predicted_log=predicted_log,
-        estimator_filter_type=pipeline.estimator.filter_type,
-        time=pipeline.sim_time_grid,
-        reference_states=pipeline.reference_states,
         out_prefix=args.output,
     )
 

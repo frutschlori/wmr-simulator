@@ -56,6 +56,10 @@ JAX Notes
 
 # Extension libraries
 
+* Frax: fast Robot Kinematics and Dynamics in JAX
+  * https://github.com/danielpmorton/frax
+  * https://arxiv.org/pdf/2604.04310
+
 * Optax: gradient processing and optimization library for JAX
 	* https://github.com/google-deepmind/optax
 
