@@ -208,7 +208,7 @@ if __name__ == "__main__":
     parser.add_argument("--num-workers", type=int, default=8) # parallel workers
 
     # Tracking error surface plot arguments
-    parser.add_argument("--num-realizations", type=int, default=1) # replay realizations
+    parser.add_argument("--num-realizations", type=int, default=8) # replay realizations
     parser.add_argument("--init-wheel-radius", type=float, default=0.08)
     parser.add_argument("--init-base-diameter", type=float, default=0.4)
     parser.add_argument("--radius-min", type=float, default=0.0015)
@@ -221,8 +221,8 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=str, default=None)
     parser.add_argument("--seed", type=int, default=2)
     args = parser.parse_args()
-    args.plot_type = "realization_sensitivity"
-    # args.plot_type = "tracking_error_surface"
+    # args.plot_type = "realization_sensitivity"
+    args.plot_type = "tracking_error_surface"
 
     if args.output is None:
         args.output = args.plot_type

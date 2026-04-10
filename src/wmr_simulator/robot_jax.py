@@ -43,7 +43,7 @@ class DiffDrive:
         wheel_cmd = np.array(wheel_cmd, dtype=np.float32)
         r, L = self._resolve_geometry(wheel_radius, base_diameter)
         # 1) Saturate wheel commands
-        wheel_cmd = np.clip(wheel_cmd, -self.max_wheel_speed, self.max_wheel_speed)
+        wheel_cmd = np.clip(wheel_cmd, min=-self.max_wheel_speed, max=self.max_wheel_speed)
 
         # 2) First-order wheel dynamics (discrete)
         next_wheel_speeds = (self.alpha * state.wheel_speeds + (1.0 - self.alpha) * wheel_cmd)
@@ -60,14 +60,9 @@ class DiffDrive:
 
         # 4) Compute updated robot state and return it
         x, y, theta = state.pose
-        next_pose = np.array(
-            [
-                x + v * np.cos(theta) * self.dt,
-                y + v * np.sin(theta) * self.dt,
-                self._wrap_to_pi(theta + w * self.dt),
-            ],
-            dtype=np.float32,
-        )
+        next_pose = np.array([x + v * np.cos(theta) * self.dt,
+                              y + v * np.sin(theta) * self.dt,
+                              self._wrap_to_pi(theta + w * self.dt)])
 
         next_vel_omega = np.array([v, w])
 
