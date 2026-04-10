@@ -18,7 +18,7 @@ robot:
   wheel_radius: 0.015  # m
   base_diameter: 0.09  # m
   max_wheel_speed: 150 # rad/s
-  time_constant:  0.0  # time constant for first-order wheel dynamics (set to 0 for ideal actuation)
+  time_constant:  0.1  # time constant for first-order wheel dynamics (set to 0 for ideal actuation)
   slip_r: 0.1          # std of fractional slip on ur (40%) [0 -> 1.0]
   slip_l: 0.1          # std of fractional slip on ul (50%) [0 -> 1.0]
 
