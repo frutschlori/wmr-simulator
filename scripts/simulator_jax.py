@@ -51,6 +51,11 @@ if __name__ == "__main__":
     waypoints = planner_cfg["waypoints"]
     reference_states, polynomial_traj = compute_reference_trajectory(start, goal, waypoints, planner_time_grid)
 
+    # Hand coded reference (spinning on the spot)
+    # thetas = np.linspace(0, 2 * np.pi, 501)
+    # omega = 2 * np.pi / 5
+    # reference_states = np.array([[0.0, 0.0, thetas[i], 0.0, 0.0, omega, 0.0, 0.0] for i in range(501)])
+
     # Initialize estimator
     est_cfg = problem["estimator"]  # may be empty
     # Estimator uses robot+estimator params
