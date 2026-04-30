@@ -14,7 +14,7 @@ from wmr_simulator.planner import compute_reference_trajectory
 from wmr_simulator.robot_jax import DiffDrive, DiffDriveState
 from wmr_simulator.SI_visualization import (plot_controller_tuning_errors,
                                             plot_loss_history,
-                                            plot_system_id)
+                                            plot_system_id, plot_trajectory)
 
 
 class PhysicalParams(NamedTuple):
@@ -69,7 +69,7 @@ class BasePipeline:
         master_key = jax.random.PRNGKey(seed)
         target_key, replay_key = jax.random.split(master_key, 2)
         self.target_robot_key, self.target_estimator_key = jax.random.split(target_key, 2)
-        self.replay_robot_key, self.replay_estimator_key = jax.random.split(replay_key, 2)
+        self.robot_key, self.estimator_key = jax.random.split(replay_key, 2)
 
     def _extend_reference_states(self, reference_states: np.ndarray) -> np.ndarray:
         if len(reference_states) >= len(self.sim_time_grid):
@@ -108,7 +108,7 @@ class BasePipeline:
             sys.stdout.write("\n")
         sys.stdout.flush()
 
-    def simulate(self, robot_params, use_hidden_params=False, controller_gains=None, wheel_cmds=None, robot_key=None, estimator_key=None):
+    def simulate(self, robot_params, est_params=None, use_hidden_robot=False, controller_gains=None, wheel_cmds=None, robot_key=None, estimator_key=None):
         closed_loop_flag = wheel_cmds is None
 
         def sim_step(carry, inputs):
@@ -118,10 +118,11 @@ class BasePipeline:
             ur_true, ul_true = self.robot.get_wheel_speeds(robot_state)
             pose_true = self.robot.get_pose(robot_state)
 
+            model_params = robot_params if est_params is None else est_params
             next_est_state = self.estimator.update(
                                     est_state, ur_true, ul_true, pose_true,
-                                    wheel_radius=robot_params.wheel_radius,
-                                    base_diameter=robot_params.base_diameter)
+                                    wheel_radius=model_params.wheel_radius,
+                                    base_diameter=model_params.base_diameter)
             pose_est = self.estimator.get_est_pose(next_est_state)
             wheel_est = self.estimator.get_est_wheel_speeds(next_est_state)
 
@@ -131,7 +132,7 @@ class BasePipeline:
                                                     gains=controller_gains,
                                                     wheel_radius=robot_params.wheel_radius,
                                                     base_diameter=robot_params.base_diameter)
-                if use_hidden_params:
+                if use_hidden_robot:
                     next_robot_state = self.robot.step(robot_state, wheel_cmd) # for experiment simulation in SI
                 else:
                     next_robot_state = self.robot.step(robot_state, wheel_cmd, # for controller gain tuning
@@ -154,8 +155,8 @@ class BasePipeline:
             dummy_wheel_cmds = jnp.zeros((self.reference_states.shape[0], 2), dtype=jnp.float32)
             inputs = (self.reference_states, dummy_wheel_cmds)
         else:
-            robot_key = self.replay_robot_key if robot_key is None else robot_key
-            estimator_key = self.replay_estimator_key if estimator_key is None else estimator_key
+            robot_key = self.robot_key if robot_key is None else robot_key
+            estimator_key = self.estimator_key if estimator_key is None else estimator_key
             carry0 = self._init_states(robot_key, estimator_key)
             inputs = (self.reference_states, wheel_cmds)
 
@@ -167,7 +168,8 @@ class BasePipeline:
 class SystemIdentificationPipeline(BasePipeline):
     def __init__(self, problem_path: str, initial_params: PhysicalParams, seed: int = 0):
         super().__init__(problem_path=problem_path, seed=seed)
-        self.target_log = self.simulate(initial_params, use_hidden_params=True, controller_gains=self.gains)
+        self.initial_params = initial_params
+        self.target_log = self.simulate(initial_params, use_hidden_robot=True, controller_gains=self.gains)
 
     @staticmethod
     def _clip_physical_params(params: PhysicalParams):
@@ -185,6 +187,7 @@ class SystemIdentificationPipeline(BasePipeline):
         def replay_loss(robot_key, estimator_key):
             predicted_log = self.simulate(
                 params,
+                est_params=self.initial_params,
                 controller_gains=self.gains,
                 wheel_cmds=wheel_cmds,
                 robot_key=robot_key,
@@ -200,8 +203,8 @@ class SystemIdentificationPipeline(BasePipeline):
         current_params = self._clip_physical_params(init_params)
         current_opt_state = optimizer.init(current_params)
 
-        replay_robot_keys = jax.random.split(self.replay_robot_key, num_realizations)
-        replay_estimator_keys = jax.random.split(self.replay_estimator_key, num_realizations)
+        replay_robot_keys = jax.random.split(self.robot_key, num_realizations)
+        replay_estimator_keys = jax.random.split(self.estimator_key, num_realizations)
 
         @jax.jit
         def train_step(params, opt_state):
@@ -251,8 +254,8 @@ class ControllerTuningPipeline(BasePipeline):
         current_gains = self._clip_controller_gains(init_gains)
         current_opt_state = optimizer.init(current_gains)
 
-        replay_robot_keys = jax.random.split(self.replay_robot_key, num_realizations)
-        replay_estimator_keys = jax.random.split(self.replay_estimator_key, num_realizations)
+        replay_robot_keys = jax.random.split(self.robot_key, num_realizations)
+        replay_estimator_keys = jax.random.split(self.estimator_key, num_realizations)
 
         @jax.jit
         def train_step(gains, opt_state):
@@ -351,10 +354,10 @@ if __name__ == "__main__":
 
         # log simulations with estimated params for comparison in plots
         pipeline.target_log = pipeline.simulate(estimated_params,
-                                                use_hidden_params=True,
+                                                use_hidden_robot=True,
                                                 controller_gains=pipeline.gains) # closed-loop
         final_log = pipeline.simulate(estimated_params,
-                                      use_hidden_params=False,
+                                      use_hidden_robot=False,
                                       wheel_cmds=pipeline.target_log.robot_states.wheel_cmd,
                                       controller_gains=pipeline.gains) # feed-forward replay
         # print summary
@@ -375,7 +378,8 @@ if __name__ == "__main__":
             robot_params=fixed_robot_params,
             seed=args.seed)
         # Simulate with initial gains for comparison
-        init_gain_log = pipeline.simulate(fixed_robot_params)
+        init_gain_log = pipeline.simulate(fixed_robot_params, use_hidden_robot=True) # simulate deployment with real robot params
+        init_log_ctrl_perspective = pipeline.simulate(fixed_robot_params)
 
         # Tune controller gains
         estimated_gains, loss_history = pipeline.optimize(
@@ -385,13 +389,20 @@ if __name__ == "__main__":
             num_realizations=args.num_realizations)
 
         # Log simulation with tuned gains for comparison
-        final_log = pipeline.simulate(fixed_robot_params, controller_gains=estimated_gains)
+        # simulate deployment with real robot params
+        final_log = pipeline.simulate(fixed_robot_params, use_hidden_robot=True, controller_gains=estimated_gains)
+        # log what the controller sees for tuning
+        final_log_ctrl_perspective = pipeline.simulate(fixed_robot_params, controller_gains=estimated_gains)
         # Print summary
         print_physical_params("Robot parameters used for gain tuning:", fixed_robot_params)
         print_controller_gains("Initial gains:", pipeline.gains)
         print_controller_gains("Optimized gains:", estimated_gains)
         print(f"Final loss: {loss_history[-1]:.8f}")
 
+        plot_trajectory(pipeline, tuned_log=final_log, untuned_log=init_gain_log,
+                        out_prefix="trajectories_gain_tuning_hidden_params")
+        plot_trajectory(pipeline, tuned_log=final_log_ctrl_perspective, untuned_log=init_log_ctrl_perspective,
+                        out_prefix="trajectories_gain_tuning_used_params")
         plot_controller_tuning_errors(pipeline=pipeline, init_log=init_gain_log, tuned_log=final_log)
         plot_loss_history(loss_history=loss_history, out_prefix="ctrl_tuning")
 
@@ -400,6 +411,7 @@ if __name__ == "__main__":
 
         # Setup system ID pipeline
         sys_id_pipeline = SystemIdentificationPipeline(problem_path=args.problem, initial_params=init_params, seed=args.seed)
+
         # Save initial experiment run (hidden robot with guessed est and ctrl) for comparison in plots
         init_target_log = sys_id_pipeline.target_log
         # Save initial replay run (logged target commands feedforwarded through system with guessed params) for plots
@@ -421,7 +433,7 @@ if __name__ == "__main__":
             robot_params=estimated_params,
             seed=args.seed)
         # Save initial simulation for pose error plot
-        init_gain_log = ctrl_pipeline.simulate(estimated_params)
+        init_gain_log = ctrl_pipeline.simulate(estimated_params, use_hidden_robot=True)
 
         # Tune gains using identified robot parameters for estimator and ctrl, but hidden ones for robot step
         print("Starting gain tuning...")
@@ -433,7 +445,7 @@ if __name__ == "__main__":
         )
         # Log simulation after gain tuning for plots
         final_log = ctrl_pipeline.simulate(estimated_params,
-                                           use_hidden_params=True,
+                                           use_hidden_robot=True,
                                            controller_gains=estimated_gains) # closed-loop simulation of "real experiment"
         sys_id_pipeline.target_log = final_log # copy to pipeline just for plot
         final_ff_log = ctrl_pipeline.simulate(estimated_params,
@@ -451,8 +463,10 @@ if __name__ == "__main__":
 
         # Plots
         plot_system_id(pipeline=sys_id_pipeline, init_target_log=init_target_log, init_log=init_sys_id_log,
-                       predicted_log=final_log, out_prefix="sys_id_then_gain_tuning")
-        plot_controller_tuning_errors(pipeline=ctrl_pipeline, init_log=init_gain_log, tuned_log=final_log,
-                                      out_prefix="ctrl_tuning_after_system_id")
+                       predicted_log=final_log, out_prefix="sequential_opt")
+        plot_trajectory(ctrl_pipeline, tuned_log=final_log, untuned_log=init_target_log,
+                        out_prefix="sequential_opt_trajectory")
+        plot_controller_tuning_errors(pipeline=ctrl_pipeline, init_log=init_target_log, tuned_log=final_log,
+                                      out_prefix="sequential_opt")
         plot_loss_history(loss_history=id_loss_history, out_prefix="system_id")
-        plot_loss_history(loss_history=gain_loss_history, out_prefix="ctrl_tuning_after_system_id")
+        plot_loss_history(loss_history=gain_loss_history, out_prefix="ctrl_tuning")

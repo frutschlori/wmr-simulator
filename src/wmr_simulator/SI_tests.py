@@ -6,9 +6,11 @@ import jax.numpy as jnp
 import numpy as np
 
 from wmr_simulator.system_identification import PhysicalParams, SystemIdentificationPipeline
+from wmr_simulator.simultaneous_optimization_online import IDandGainPipeline
 from wmr_simulator.SI_visualization import (
     plot_system_id_realization_sweep,
     plot_tracking_error_surface,
+    plot_trajectory
 )
 
 
@@ -145,25 +147,40 @@ def run_tracking_error_surface(args):
         wheel_radius=jnp.asarray(args.init_wheel_radius, dtype=jnp.float32),
         base_diameter=jnp.asarray(args.init_base_diameter, dtype=jnp.float32),
     )
-    pipeline = SystemIdentificationPipeline(
-        problem_path=args.problem,
-        initial_params=init_params,
-        seed=args.seed,
-    )
+    if args.loss == "closed-loop":
+        pipeline = IDandGainPipeline(
+            problem_path=args.problem,
+            initial_params=init_params,
+            seed=args.seed,
+        )
+    else:
+        pipeline = SystemIdentificationPipeline(
+            problem_path=args.problem,
+            initial_params=init_params,
+            seed=args.seed,
+        )
+
+    # Hand coded reference (spinning on the spot)
+    # thetas = np.linspace(0, 2 * np.pi, 501)
+    # omega = 2*np.pi/5
+    # reference_states = jnp.array([[0.0, 0.0, thetas[i], 0.0, 0.0, omega, 0.0, 0.0] for i in range(501)])
+    # pipeline.reference_states = reference_states
 
     wheel_radius_values = build_parameter_grid(args.radius_min, args.radius_max, args.radius_points)
     base_diameter_values = build_parameter_grid(args.base_min, args.base_max, args.base_points)
-    replay_robot_keys = jax.random.split(pipeline.replay_robot_key, args.num_realizations)
-    replay_estimator_keys = jax.random.split(pipeline.replay_estimator_key, args.num_realizations)
+    robot_keys = jax.random.split(pipeline.robot_key, args.num_realizations)
+    estimator_keys = jax.random.split(pipeline.estimator_key, args.num_realizations)
     wheel_radius_values_jax = jnp.asarray(wheel_radius_values, dtype=jnp.float32)
     base_diameter_values_jax = jnp.asarray(base_diameter_values, dtype=jnp.float32)
 
     def loss_for_params(wheel_radius, base_diameter):
-        params = PhysicalParams(
+        dec_variables = PhysicalParams(
             wheel_radius=wheel_radius,
             base_diameter=base_diameter,
         )
-        return pipeline.loss(params, replay_robot_keys, replay_estimator_keys)
+        if args.loss == "closed-loop":
+            dec_variables = (dec_variables, pipeline.gains)
+        return pipeline.loss(dec_variables, robot_keys, estimator_keys)
 
     batched_loss_for_row = jax.vmap(loss_for_params, in_axes=(0, None))
 
@@ -183,6 +200,7 @@ def run_tracking_error_surface(args):
     )
     tracking_error_surface = np.asarray(evaluate_surface())
 
+    plot_trajectory(pipeline=pipeline,out_prefix="surface_reference")
     plot_tracking_error_surface(
         wheel_radius_values=wheel_radius_values,
         base_diameter_values=base_diameter_values,
@@ -195,20 +213,21 @@ def run_tracking_error_surface(args):
     )
 
 
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--plot-type", type=str, choices=["realization_sensitivity", "tracking_error_surface"])
-    parser.add_argument("--problem", type=str, default="problems/problem_hidden.yaml")
+    parser.add_argument("--problem", type=str, default="problems/straight.yaml")
 
     # SI optimiztation and realization plot arguments
     parser.add_argument("--steps", type=int, default=300)
     parser.add_argument("--learning-rate", type=float, default=1e-2)
     parser.add_argument("--max-num-realizations", type=int, default=64) # max number of vectorized sims in each opt iteration
     parser.add_argument("--num-seeds", type=int, default=1)  # number of complete SI runs to be averaged
-    parser.add_argument("--num-workers", type=int, default=8) # parallel workers
+    parser.add_argument("--num-workers", type=int, default=1) # parallel workers
 
     # Tracking error surface plot arguments
-    parser.add_argument("--num-realizations", type=int, default=8) # replay realizations
+    parser.add_argument("--num-realizations", type=int, default=1) # replay realizations
     parser.add_argument("--init-wheel-radius", type=float, default=0.08)
     parser.add_argument("--init-base-diameter", type=float, default=0.4)
     parser.add_argument("--radius-min", type=float, default=0.0015)
@@ -217,6 +236,7 @@ if __name__ == "__main__":
     parser.add_argument("--base-min", type=float, default=0.009)
     parser.add_argument("--base-max", type=float, default=0.5)
     parser.add_argument("--base-points", type=int, default=100)
+    parser.add_argument("--loss", type=str, default="replay")
 
     parser.add_argument("--output", type=str, default=None)
     parser.add_argument("--seed", type=int, default=2)
