@@ -73,10 +73,11 @@ def plot_trajectory(
     ax.plot(
         full_reference_states[:, 0],
         full_reference_states[:, 1],
-        linestyle="--",
+        linestyle="-",
+        marker="o",
         linewidth=trajectory_linewidth,
         color="red",
-        label="Complete",
+        label="Reference",
     )
     _draw_theta_arrows(ax, full_reference_states[:, :5], "red")
     if len(reference_states) > 0 and not np.array_equal(reference_states, full_reference_states):
@@ -152,6 +153,8 @@ def plot_tracking_error_frame(
     seed,
     out_path,
     init_params=None,
+    z_min=None,
+    z_max=None,
     x_label="Wheel radius [m]",
     y_label="Base diameter [m]",
     surface_label="Tracking loss",
@@ -276,6 +279,8 @@ def plot_tracking_error_frame(
     ax_surface.set_xlabel(x_label)
     ax_surface.set_ylabel(y_label)
     ax_surface.set_zlabel(surface_label)
+    if z_min is not None and z_max is not None:
+        ax_surface.set_zlim(z_min, z_max)
     ax_surface.view_init(elev=25, azim=-50)
     ax_surface.legend(loc="upper right")
     fig.colorbar(surf, ax=ax_surface, shrink=0.7, pad=0.1, label=surface_label)
@@ -468,9 +473,9 @@ def plot_loss_history(loss_history, validation_loss_history=None, hidden_loss_hi
         hidden_steps = np.arange(1, len(hidden_loss_history) + 1)
         hidden_ax = ax.twinx()
         hidden_ax.plot(hidden_steps, np.asarray(hidden_loss_history), 'g-', linewidth=2, label='Hidden Parameter')
-        # hidden_ax.set_yscale('log')
+        hidden_ax.set_yscale('log')
         legend_handles.extend(hidden_ax.get_lines()[-1:])
-    # ax.set_yscale('log')
+    ax.set_yscale('log')
     ax.set_xlabel('Optimization Step')
     ax.set_ylabel('Tracking MSE', color='black')
     ax.tick_params(axis='y', colors='black')
