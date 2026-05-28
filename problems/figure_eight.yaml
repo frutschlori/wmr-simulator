@@ -27,6 +27,10 @@ robot:
   time_constant:  0.1  # time constant for first-order wheel dynamics (set to 0 for ideal actuation)
   slip_r: 0.1          # std of fractional slip on ur (40%) [0 -> 1.0]
   slip_l: 0.1          # std of fractional slip on ul (50%) [0 -> 1.0]
+  v_max: 4.0
+  a_max: 20.0
+  omega_max: 4.0
+  alpha_max: 20.0
 
 estimator:
   type: "kf"              # estimator type: "kf" (Kalman Filter) or "dr" (Dead Reckoning)

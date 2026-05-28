@@ -349,9 +349,9 @@ if __name__ == "__main__":
     parser.add_argument("--z-poly-order", type=int, default=0)
 
     # GIF mode
-    parser.add_argument("--frames-dir", type=str, default="tracking_error_surface_frames")
+    parser.add_argument("--frames-dir", type=str, default="traj_opt_trace_frames")
     parser.add_argument("--gif-name", type=str, default="animation.gif")
-    parser.add_argument("--frame-time", type=float, default=0.2)
+    parser.add_argument("--frame-time", type=float, default=0.02)
     parser.add_argument("--stop-time", type=float, default=1.0)
 
     parser.add_argument("--output", type=str, default=None)
@@ -360,6 +360,9 @@ if __name__ == "__main__":
 
     # args.plot_type = "tracking_error_surface"
     args.plot_type = "gif_frames"
+
+    create_gif_from_frames(args)
+    exit(0)
 
     if args.output is None:
         args.output = "tracking_error_surface_frames" if args.plot_type == "gif_frames" else "tracking_error_surface"

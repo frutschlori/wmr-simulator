@@ -12,8 +12,8 @@ planner:
     - [1.0,0.5, 1.57]
   time: 5.0 # seconds
 controller:
-  # gains: [5.0, 5.0, 3.0, 0.4, 0.4, 0.2, 0.2] # [kx, ky, kth, kprmotor, kplmotor, kirmotor, kilmotor]
-  gains: [5.0, 5.0, 3.5, 5.0, 5.0, 0.0, 0.0] # [kx, ky, kth, kprmotor, kplmotor, kirmotor, kilmotor]
+  gains: [5.0, 5.0, 3.0, 0.4, 0.4, 0.2, 0.2] # [kx, ky, kth, kprmotor, kplmotor, kirmotor, kilmotor]
+  # gains: [5.0, 5.0, 3.5, 5.0, 5.0, 0.0, 0.0] # [kx, ky, kth, kprmotor, kplmotor, kirmotor, kilmotor]
 robot:
   type: differential_drive
   wheel_radius: 0.015  # m
@@ -22,6 +22,11 @@ robot:
   time_constant:  0.1  # time constant for first-order wheel dynamics (set to 0 for ideal actuation)
   slip_r: 0.1          # std of fractional slip on ur (40%) [0 -> 1.0]
   slip_l: 0.1          # std of fractional slip on ul (50%) [0 -> 1.0]
+  v_max: 2.0          # m/s
+  a_max: 10.0        # m/s^2
+  a_max_lateral: 8.0 # m/s^2
+  omega_max: 15.0    # rad/s
+  alpha_max: 50.0    # rad/s^2
 
 estimator:
   type: "kf"              # estimator type: "kf" (Kalman Filter) or "dr" (Dead Reckoning)

@@ -1,8 +1,12 @@
 import os
 
+import matplotlib
+
+matplotlib.use("Agg", force=False)
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.lines import Line2D
+from matplotlib.ticker import FormatStrFormatter
 import numpy as np
 
 
@@ -74,7 +78,6 @@ def plot_trajectory(
         full_reference_states[:, 0],
         full_reference_states[:, 1],
         linestyle="-",
-        marker="o",
         linewidth=trajectory_linewidth,
         color="red",
         label="Reference",
@@ -144,6 +147,111 @@ def plot_trajectory(
     print(f"Trajectory PDF saved at: {output_filename}")
 
 
+def plot_windowed_replay_trajectory(
+    pipeline,
+    closed_loop_log,
+    replay_log,
+    window_length=None,
+    out_prefix="identification_windowed_trajectory",
+    out_path=None,
+):
+    os.makedirs("visualize", exist_ok=True)
+    output_filename = out_path if out_path is not None else os.path.join("visualize", f"{out_prefix}.pdf")
+
+    reference_states = np.asarray(pipeline.reference_states)
+    full_reference_states = np.asarray(getattr(pipeline, "full_reference_states", pipeline.reference_states))
+    closed_loop_actual = np.asarray(closed_loop_log.robot_states.pose)
+    if pipeline.estimator.filter_type == "dr":
+        closed_loop_estimates = np.asarray(closed_loop_log.estimator_states.pose_meas)
+        replay_estimates = np.asarray(replay_log.estimator_states.pose_meas)
+    else:
+        closed_loop_estimates = np.asarray(closed_loop_log.estimator_states.pose_hat)
+        replay_estimates = np.asarray(replay_log.estimator_states.pose_hat)
+    replay_actual = np.asarray(replay_log.robot_states.pose)
+
+    resolved_window_length = pipeline.resolve_window_length(window_length)
+    window_start_indices = np.arange(0, len(replay_estimates), resolved_window_length)
+
+    fig, ax = plt.subplots(1, 1, figsize=(8, 8))
+    ax.plot(
+        full_reference_states[:, 0],
+        full_reference_states[:, 1],
+        color="red",
+        linestyle="--",
+        linewidth=1.2,
+        label="Reference",
+    )
+    if len(reference_states) > 0 and not np.array_equal(reference_states, full_reference_states):
+        ax.plot(
+            reference_states[:, 0],
+            reference_states[:, 1],
+            color="red",
+            linestyle="-",
+            linewidth=1.5,
+            label="Selected Reference",
+        )
+    ax.plot(
+        closed_loop_actual[:, 0],
+        closed_loop_actual[:, 1],
+        color="blue",
+        linestyle="-",
+        linewidth=0.9,
+        label="Closed-Loop Actual",
+    )
+    ax.scatter(
+        closed_loop_estimates[:, 0],
+        closed_loop_estimates[:, 1],
+        color="blue",
+        marker="x",
+        s=3,
+        alpha=1,
+        linewidth=0.5,
+        label="Closed-Loop Estimate",
+    )
+    for window_idx, start_idx in enumerate(window_start_indices):
+        end_idx = min(start_idx + resolved_window_length, len(replay_actual))
+        label = "Windowed Replay Actual" if window_idx == 0 else None
+        ax.plot(
+            replay_actual[start_idx:end_idx, 0],
+            replay_actual[start_idx:end_idx, 1],
+            color="orange",
+            linestyle="-",
+            linewidth=0.9,
+            label=label,
+        )
+    ax.scatter(
+        replay_estimates[:, 0],
+        replay_estimates[:, 1],
+        color="orange",
+        s=3,
+        marker="x",
+        alpha=1,
+        linewidth=0.5,
+        label="Windowed Replay Estimate",
+    )
+    ax.scatter(
+        closed_loop_estimates[window_start_indices, 0],
+        closed_loop_estimates[window_start_indices, 1],
+        marker="x",
+        s=36,
+        linewidths=1.0,
+        color="black",
+        label="Window Start",
+    )
+
+    ax.set_xlabel("x [m]")
+    ax.set_ylabel("y [m]")
+    ax.set_title("Identification Replay Trajectory")
+    ax.set_aspect("equal", adjustable="box")
+    ax.grid(True)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(output_filename, bbox_inches="tight", transparent=False, facecolor="white")
+    plt.close(fig)
+
+    print(f"Trajectory PDF saved at: {output_filename}")
+
+
 def plot_tracking_error_frame(
     pipeline,
     wheel_radius_values,
@@ -152,13 +260,15 @@ def plot_tracking_error_frame(
     num_realizations,
     seed,
     out_path,
+    hidden_params=None,
     init_params=None,
     z_min=None,
     z_max=None,
     x_label="Wheel radius [m]",
     y_label="Base diameter [m]",
-    surface_label="Tracking loss",
+    surface_label="Identification Loss",
     init_label="Initial parameter guess",
+    hidden_label="Hidden parameters",
     min_label="Minimum sampled loss",
     theta_arrow_stride=20,
     theta_arrow_length=0.12,
@@ -263,6 +373,22 @@ def plot_tracking_error_frame(
             alpha=1,
             label=init_label,
         )
+    if hidden_params is not None:
+        hidden_radius = float(hidden_params.wheel_radius)
+        hidden_base = float(hidden_params.base_diameter)
+        hidden_loss = _surface_value(hidden_radius, hidden_base)
+        ax_surface.scatter(
+            [hidden_radius],
+            [hidden_base],
+            [hidden_loss],
+            color="gold",
+            edgecolors="black",
+            marker="*",
+            s=180,
+            depthshade=False,
+            alpha=1,
+            label=hidden_label,
+        )
     ax_surface.scatter(
         [min_radius],
         [min_base],
@@ -283,7 +409,14 @@ def plot_tracking_error_frame(
         ax_surface.set_zlim(z_min, z_max)
     ax_surface.view_init(elev=25, azim=-50)
     ax_surface.legend(loc="upper right")
-    fig.colorbar(surf, ax=ax_surface, shrink=0.7, pad=0.1, label=surface_label)
+    fig.colorbar(
+        surf,
+        ax=ax_surface,
+        shrink=0.7,
+        pad=0.1,
+        label=surface_label,
+        format=FormatStrFormatter("%.1f"),
+    )
 
     fig.tight_layout()
     fig.savefig(out_path, bbox_inches="tight")
@@ -454,7 +587,8 @@ def plot_system_id(pipeline, init_target_log, init_log, predicted_log, out_prefi
     print(f"Multi-page PDF saved at: {pdf_filename}")
 
 
-def plot_loss_history(loss_history, validation_loss_history=None, hidden_loss_history=None, out_prefix="system_id"):
+def plot_loss_history(loss_history, validation_loss_history=None, hidden_loss_history=None,
+                      parameter_error_history=None, out_prefix="system_id"):
     os.makedirs("visualize", exist_ok=True)
     pdf_filename = os.path.join("visualize/", f"loss_{out_prefix}.pdf")
 
@@ -462,17 +596,18 @@ def plot_loss_history(loss_history, validation_loss_history=None, hidden_loss_hi
 
     fig, ax = plt.subplots(1, 1, figsize=(8, 4.5))
     legend_handles = []
-    ax.plot(steps, np.asarray(loss_history), 'b-', linewidth=2, label='Training')
+    ax.plot(steps, np.asarray(loss_history), 'b-', linewidth=2, label='Tracking Error')
     legend_handles.extend(ax.get_lines()[-1:])
     if validation_loss_history is not None and len(validation_loss_history) > 0:
         validation_steps = np.arange(1, len(validation_loss_history) + 1)
         ax.plot(validation_steps, np.asarray(validation_loss_history), 'r-', linewidth=2, label='Validation')
         legend_handles.extend(ax.get_lines()[-1:])
     hidden_ax = None
-    if hidden_loss_history is not None and len(hidden_loss_history) > 0:
-        hidden_steps = np.arange(1, len(hidden_loss_history) + 1)
+    parameter_history = parameter_error_history if parameter_error_history is not None else hidden_loss_history
+    if parameter_history is not None and len(parameter_history) > 0:
+        hidden_steps = np.arange(1, len(parameter_history) + 1)
         hidden_ax = ax.twinx()
-        hidden_ax.plot(hidden_steps, np.asarray(hidden_loss_history), 'g-', linewidth=2, label='Hidden Parameter')
+        hidden_ax.plot(hidden_steps, np.asarray(parameter_history), 'g-', linewidth=2, label='Parameter MSE [mm^2]')
         hidden_ax.set_yscale('log')
         legend_handles.extend(hidden_ax.get_lines()[-1:])
     ax.set_yscale('log')
@@ -484,7 +619,7 @@ def plot_loss_history(loss_history, validation_loss_history=None, hidden_loss_hi
     ax.spines['bottom'].set_color('black')
     ax.spines['top'].set_color('black')
     if hidden_ax is not None:
-        hidden_ax.set_ylabel('Parameter MSE', color='black')
+        hidden_ax.set_ylabel('Parameter MSE [mm^2]', color='black')
         hidden_ax.tick_params(axis='y', colors='black')
         hidden_ax.spines['right'].set_color('black')
         hidden_ax.spines['top'].set_color('black')
@@ -496,86 +631,6 @@ def plot_loss_history(loss_history, validation_loss_history=None, hidden_loss_hi
     plt.close(fig)
 
     print(f"Loss history PDF saved at: {pdf_filename}")
-
-
-def plot_controller_tuning_errors(pipeline, init_log, tuned_log, out_prefix="ctrl_tuning"):
-    os.makedirs("visualize", exist_ok=True)
-    pdf_filename = os.path.join("visualize", f"{out_prefix}_tracking_errors.pdf")
-
-    reference_poses = np.asarray(pipeline.reference_states[:, :3])
-    reference_vel = np.asarray(pipeline.reference_states[:, 3:5])
-    reference_omega = np.asarray(pipeline.reference_states[:, 5])
-    init_poses = np.asarray(init_log.robot_states.pose)
-    tuned_poses = np.asarray(tuned_log.robot_states.pose)
-    init_vel_omega = np.asarray(init_log.robot_states.vel_omega)
-    tuned_vel_omega = np.asarray(tuned_log.robot_states.vel_omega)
-    plot_len = min(
-        len(reference_poses),
-        len(reference_vel),
-        len(reference_omega),
-        len(init_poses),
-        len(tuned_poses),
-        len(init_vel_omega),
-        len(tuned_vel_omega),
-        len(pipeline.sim_time_grid) - 1,
-    )
-    plot_time = np.asarray(pipeline.sim_time_grid[1:plot_len + 1])
-
-    reference_poses = reference_poses[:plot_len]
-    reference_vel = reference_vel[:plot_len]
-    reference_omega = reference_omega[:plot_len]
-    init_poses = init_poses[:plot_len]
-    tuned_poses = tuned_poses[:plot_len]
-    init_vel_omega = init_vel_omega[:plot_len]
-    tuned_vel_omega = tuned_vel_omega[:plot_len]
-
-    init_errors = init_poses - reference_poses
-    tuned_errors = tuned_poses - reference_poses
-    init_errors[:, 2] = (init_errors[:, 2] + np.pi) % (2.0 * np.pi) - np.pi
-    tuned_errors[:, 2] = (tuned_errors[:, 2] + np.pi) % (2.0 * np.pi) - np.pi
-    reference_speed = np.sqrt(reference_vel[:, 0] ** 2 + reference_vel[:, 1] ** 2)
-    init_speed_errors = init_vel_omega[:, 0] - reference_speed
-    tuned_speed_errors = tuned_vel_omega[:, 0] - reference_speed
-    init_omega_errors = init_vel_omega[:, 1] - reference_omega
-    tuned_omega_errors = tuned_vel_omega[:, 1] - reference_omega
-
-    with PdfPages(pdf_filename) as pdf:
-        fig, axes = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
-        labels = ["x error [m]", "y error [m]", "theta error [rad]"]
-
-        for idx, label in enumerate(labels):
-            axes[idx].plot(plot_time, init_errors[:, idx], label="Initial gains", linewidth=2)
-            axes[idx].plot(plot_time, tuned_errors[:, idx], label="Tuned gains", linewidth=2)
-            axes[idx].set_ylabel(label)
-            axes[idx].grid(True)
-            axes[idx].legend()
-
-        axes[-1].set_xlabel("Time [s]")
-        fig.suptitle(r"Pose Errors $(\hat x - x_{ref})$", fontsize=14)
-        fig.tight_layout(rect=[0, 0, 1, 0.96])
-        pdf.savefig(fig, bbox_inches="tight", transparent=True)
-        plt.close(fig)
-
-        fig, axes = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
-        axes[0].plot(plot_time, init_speed_errors, label="Initial gains", linewidth=2)
-        axes[0].plot(plot_time, tuned_speed_errors, label="Tuned gains", linewidth=2)
-        axes[0].set_ylabel("linear velocity error [m/s]")
-        axes[0].grid(True)
-        axes[0].legend()
-
-        axes[1].plot(plot_time, init_omega_errors, label="Initial gains", linewidth=2)
-        axes[1].plot(plot_time, tuned_omega_errors, label="Tuned gains", linewidth=2)
-        axes[1].set_ylabel("angular velocity error [rad/s]")
-        axes[1].set_xlabel("Time [s]")
-        axes[1].grid(True)
-        axes[1].legend()
-
-        fig.suptitle("Velocity Errors $(v_{ctrl} - v_{ref})$", fontsize=14)
-        fig.tight_layout(rect=[0, 0, 1, 0.96])
-        pdf.savefig(fig, bbox_inches="tight", transparent=True)
-        plt.close(fig)
-
-    print(f"Controller tuning error PDF saved at: {pdf_filename}")
 
 
 def plot_system_id_realization_sweep(
@@ -605,13 +660,13 @@ def plot_system_id_realization_sweep(
         color="tab:orange",
         marker="s",
         linewidth=2,
-        label="Final Parameter MSE",
+        label="Final Parameter MSE [mm^2]",
     )[0]
 
     ax1.set_xscale("log")
     ax1.set_xlabel("Number of replay realizations")
     ax1.set_ylabel("Final tracking loss", color="tab:blue")
-    ax2.set_ylabel("Parameter MSE", color="tab:orange")
+    ax2.set_ylabel("Parameter MSE [mm^2]", color="tab:orange")
     ax1.tick_params(axis="y", labelcolor="tab:blue")
     ax2.tick_params(axis="y", labelcolor="tab:orange")
     if num_seeds is None:
@@ -640,9 +695,11 @@ def plot_tracking_error_surface(
     init_params=None,
     out_prefix="si_tracking_error_surface",
     out_path=None,
+    z_min=None,
+    z_max=None,
     x_label="Wheel radius [m]",
     y_label="Base diameter [m]",
-    surface_label="Tracking loss",
+    surface_label="Identification Loss",
     title="Tracking Error Surface",
     init_label="Initial parameter guess",
     hidden_label="Hidden parameters",
@@ -721,12 +778,21 @@ def plot_tracking_error_surface(
     ax.set_xlabel(x_label)
     ax.set_ylabel(y_label)
     ax.set_zlabel(surface_label)
+    if z_min is not None and z_max is not None:
+        ax.set_zlim(z_min, z_max)
     ax.set_title(
         f"{title} (seed={seed}, replay realizations={num_realizations})"
     )
-    ax.view_init(elev=25, azim=-50)
+    ax.view_init(elev=10, azim=-157)
     ax.legend(loc="upper right")
-    fig.colorbar(surf, ax=ax, shrink=0.7, pad=0.1, label=surface_label)
+    fig.colorbar(
+        surf,
+        ax=ax,
+        shrink=0.7,
+        pad=0.1,
+        label=surface_label,
+        format=FormatStrFormatter("%.1f"),
+    )
 
     fig.tight_layout()
     fig.savefig(output_filename, bbox_inches="tight")

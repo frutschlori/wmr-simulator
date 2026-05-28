@@ -4,6 +4,9 @@ import meshcat
 import meshcat.geometry as g
 import meshcat.transformations as tf
 from meshcat.animation import Animation
+import matplotlib
+
+matplotlib.use("Agg", force=False)
 import matplotlib.pyplot as plt
 import os
 from matplotlib.backends.backend_pdf import PdfPages
@@ -22,47 +25,63 @@ DnametoColor = {
 }
 
 
-def visualize(env_file, states, reference_states=None, out_prefix="simulation_visualization"):
+def _as_numpy(value):
+    return np.asarray(value)
+
+
+def _extend_to_length(states, length):
+    states = _as_numpy(states)
+    if len(states) >= length:
+        return states[:length]
+
+    num_extra_steps = length - len(states)
+    last_state = states[-1]
+    return np.vstack([states, np.tile(last_state, (num_extra_steps, 1))])
+
+
+def _line_points(x, y):
+    return np.vstack([x, y, np.zeros_like(x)])
+
+
+def _as_xyz(values, z=0.0):
+    values = list(values)
+    if len(values) == 2:
+        return [values[0], values[1], z]
+    return values
+
+
+def visualize(env_file, states, reference_states=None, out_prefix="simulation_visualization", dt=0.01):
     vis = meshcat.Visualizer()
-    anim = Animation(default_framerate=1 / 0.01)
+    anim = Animation(default_framerate=1 / float(dt))
 
     # Load environment
     with open(env_file) as f:
         data = yaml.load(f, Loader=yaml.FullLoader)
 
+    states = _as_numpy(states)
+
     # Handle reference states
     if reference_states is not None:
-        # Extend reference states if needed to match robot states length
-        if len(states) > len(reference_states):
-            num_extra_steps = len(states) - len(reference_states)
-            last_ref_state = reference_states[-1]
-            extended_ref_states = np.vstack([
-                reference_states,
-                np.tile(last_ref_state, (num_extra_steps, 1))
-            ])
-        else:
-            extended_ref_states = reference_states[:len(states)]
-
+        extended_ref_states = _extend_to_length(reference_states, len(states))
         ref_pos = extended_ref_states[:, 0:2]  # x, y
         ref_th = extended_ref_states[:, 2]  # theta
 
     obstacles = data["environment"]["obstacles"]
     for k, obs in enumerate(obstacles):
-        center = obs["center"]
-        size = obs["size"]
+        center = _as_xyz(obs["center"], z=0.0)
+        size = _as_xyz(obs["size"], z=0.05)
         vis[f"Obstacle_Box{k}"].set_object(g.Mesh(g.Box(size)))
         vis[f"Obstacle_Box{k}"].set_transform(tf.translation_matrix(center))
 
-    states = np.array(states)
     px_trace, py_trace, _ = states[:, 0].copy(), states[:, 1].copy(), states[:, 2].copy()
     vis[f"trace_0"].set_object(
-        g.Line(g.PointsGeometry(np.array([px_trace, py_trace])), g.LineBasicMaterial(color=DnametoColor.get("blue"))))
+        g.Line(g.PointsGeometry(_line_points(px_trace, py_trace)), g.LineBasicMaterial(color=DnametoColor.get("blue"))))
     vis[f"unicycle0"].set_object(
         g.Mesh(g.Box([0.1, 0.05, 0.05]), material=g.MeshLambertMaterial(color=DnametoColor.get("blue"))))
 
     if reference_states is not None:
         px_traced, py_traced = ref_pos[:, 0].copy(), ref_pos[:, 1].copy()
-        vis[f"trace_d0"].set_object(g.Line(g.PointsGeometry(np.array([px_traced, py_traced])),
+        vis[f"trace_d0"].set_object(g.Line(g.PointsGeometry(_line_points(px_traced, py_traced)),
                                            g.LineBasicMaterial(color=DnametoColor.get("red"))))
         vis[f"unicycle_d0"].set_object(
             g.Mesh(g.Box([0.1, 0.05, 0.05]), material=g.MeshLambertMaterial(color=DnametoColor.get("red"))))
@@ -100,14 +119,15 @@ def plot(traj, estimator, time, reference_states=None, out_prefix="plot_trajecto
     robot_traj = traj[0]
     est_traj = traj[1]
 
-    poses = robot_traj.pose
-    wheel_inputs_true = robot_traj.wheel_speeds
-    wheel_inputs_cmd = robot_traj.wheel_cmd
-    vel_omega_ctrl = robot_traj.vel_omega  # [v, w] actual from robot
+    time = _as_numpy(time)
+    poses = _as_numpy(robot_traj.pose)
+    wheel_inputs_true = _as_numpy(robot_traj.wheel_speeds)
+    wheel_inputs_cmd = _as_numpy(robot_traj.wheel_cmd)
+    vel_omega_ctrl = _as_numpy(robot_traj.vel_omega)  # [v, w] actual from robot
 
     # Extract estimator logs
-    est_pose_hat = est_traj.pose_hat        # [N, 3]
-    est_pose_meas = est_traj.pose_meas      # [N, 3]
+    est_pose_hat = _as_numpy(est_traj.pose_hat)        # [N, 3]
+    est_pose_meas = _as_numpy(est_traj.pose_meas)      # [N, 3]
 
     # Align robot poses with estimates (copy initial state to robot poses,
     # because robot update gets called after first input, hence first state is not logged)
@@ -115,17 +135,7 @@ def plot(traj, estimator, time, reference_states=None, out_prefix="plot_trajecto
 
     # Handle reference states
     if reference_states is not None:
-        # Extend reference states if needed to match time length
-        if len(time) > len(reference_states):
-            num_extra_steps = len(time) - len(reference_states)
-            last_ref_state = reference_states[-1]
-            extended_ref_states = np.vstack([
-                reference_states,
-                np.tile(last_ref_state, (num_extra_steps, 1))
-            ])
-        else:
-            extended_ref_states = reference_states[:len(time)]
-
+        extended_ref_states = _extend_to_length(reference_states, len(time))
         ref_pos = extended_ref_states[:, 0:2]  # x, y
         ref_th = extended_ref_states[:, 2]  # theta
         ref_vel = extended_ref_states[:, 3:5]  # vx, vy
