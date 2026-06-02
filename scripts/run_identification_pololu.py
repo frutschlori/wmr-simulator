@@ -24,7 +24,7 @@ def print_param_block(label: str, params: PhysicalParams, signed: bool = False, 
     print(f"  wheel_radius   = {values_mm[0]:{value_format}} mm")
     print(f"  base_diameter  = {values_mm[1]:{value_format}} mm")
     if show_mean:
-        print(f"  average    = {np.mean(np.abs(values_mm)):.2f} mm")
+        print(f"  mean           = {np.mean(np.abs(values_mm)):.2f} mm")
 
 
 def main():
@@ -32,26 +32,25 @@ def main():
     # Problem configuration (contains real robot parameters, noise, optionally reference traj)
     parser.add_argument("--problem", type=str, default="problems/problem_hidden.yaml")
     # Optimization hyper-parameters
-    parser.add_argument("--window-length", type=int, default=50) # Good for sim with 0.01 s dt
-    parser.add_argument("--closed-loop-measurement-dt", type=float, default=None,
-                        help="Sparsify simulated target measurements to this dt while simulating at problem time_step.")
-    parser.add_argument("--steps", type=int, default=500)
-    parser.add_argument("--learning-rate", type=float, default=1e-3) # Good for simulated id
+    parser.add_argument("--window-length", type=int, default=10)
+    parser.add_argument("--steps", type=int, default=1000)
+    parser.add_argument("--learning-rate", type=float, default=1e-5)
     # Initial guess robot parameters
     parser.add_argument("--init-wheel-radius", type=float, default=0.02)
     parser.add_argument("--init-base-diameter", type=float, default=0.2)
     # Noise settings
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=2)
     parser.add_argument("--stochastic-replay", action="store_true", default=False)
     parser.add_argument("--num-realizations", type=int, default=8)
-    parser.add_argument("--replay-wheel-speeds", choices=("true", "noisy"), default="noisy")
+    parser.add_argument("--replay-wheel-speeds", choices=("true", "noisy"), default="true",
+                        help="Use true wheel speeds or noisy estimator wheel speeds as replay input.")
     # Optionally load target trajectory from disk
-    parser.add_argument("--reference-trajectories-dir", type=str, default="trajectory_exports")
-    # parser.add_argument("--reference-trajectories-dir", type=str, default=None)
-    parser.add_argument("--bootstrap-samples", type=int, default=10000)
+    parser.add_argument("--reference-trajectories-dir", type=str, default=None)
+    # Bootstrap parameters (for identification performance eval), set 1 to disable
+    parser.add_argument("--bootstrap-samples", type=int, default=1)
 
     # Arguments for running pipeline on real experiment log
-    parser.add_argument("--pololu-log", type=str, default=None)
+    parser.add_argument("--pololu-log", type=str, default="Pololu Data/Logs/TR06")
     parser.add_argument("--pololu-start-time", type=float, default=None)
     parser.add_argument("--pololu-stop-time", type=float, default=12.0)
     parser.add_argument("--pololu-wheel-radius", type=float, default=0.016)
@@ -101,7 +100,6 @@ def main():
         target_time_s=target_time_s,
         target_reference_states=target_reference_states,
         replay_wheel_speed_source=args.replay_wheel_speeds,
-        closed_loop_measurement_dt=None if is_real_experiment else args.closed_loop_measurement_dt,
     )
     pipeline = result["pipeline"]
     if is_real_experiment:

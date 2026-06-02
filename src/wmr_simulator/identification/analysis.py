@@ -37,8 +37,17 @@ def list_reference_trajectory_pickles(reference_trajectories_dir: str) -> list[s
 
 def load_reference_states(reference_trajectory_path: str) -> np.ndarray:
     with open(reference_trajectory_path, "rb") as file:
-        reference_states = pickle.load(file)
+        reference_payload = pickle.load(file)
 
+    if isinstance(reference_payload, dict):
+        if "reference_states" not in reference_payload:
+            raise ValueError(
+                f"Loaded reference trajectory payload from {reference_trajectory_path} must contain a "
+                "'reference_states' field."
+            )
+        reference_states = reference_payload["reference_states"]
+    else:
+        reference_states = reference_payload
     reference_states = np.asarray(reference_states, dtype=float)
     if reference_states.ndim != 2 or reference_states.shape[1] != 8:
         raise ValueError(

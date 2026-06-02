@@ -90,16 +90,30 @@ class SimulationPipeline:
 
         latest_file = max(pickle_files, key=os.path.getctime)
         with open(latest_file, "rb") as file:
-            reference_states = pickle.load(file)
+            reference_payload = pickle.load(file)
+
+        reference_states = self._unpack_reference_states(reference_payload, latest_file)
+        self.loaded_reference_trajectory_path = latest_file
+        print(f"Loaded Reference Trajectory: {latest_file}")
+        return reference_states
+
+    @staticmethod
+    def _unpack_reference_states(reference_payload, reference_path: str) -> np.ndarray:
+        if isinstance(reference_payload, dict):
+            if "reference_states" not in reference_payload:
+                raise ValueError(
+                    f"Loaded reference trajectory payload from {reference_path} must contain a "
+                    "'reference_states' field."
+                )
+            reference_states = reference_payload["reference_states"]
+        else:
+            reference_states = reference_payload
 
         reference_states = np.asarray(reference_states, dtype=float)
         if reference_states.ndim != 2 or reference_states.shape[1] != 8:
             raise ValueError(
-                f"Loaded reference states from {latest_file} must have shape (N, 8), got {reference_states.shape}"
+                f"Loaded reference states from {reference_path} must have shape (N, 8), got {reference_states.shape}"
             )
-
-        self.loaded_reference_trajectory_path = latest_file
-        print(f"Loaded Reference Trajectory: {latest_file}")
         return reference_states
 
     def _extend_reference_states(self, reference_states: np.ndarray) -> np.ndarray:

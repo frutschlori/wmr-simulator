@@ -1,12 +1,13 @@
 import jax.numpy as jnp
 
 from wmr_simulator.trajectory_optimization.constraints import constraint_loss_from_reference_states
-from wmr_simulator.trajectory_optimization.fim import max_inverse_eigenvalue
+from wmr_simulator.trajectory_optimization.fim import max_inverse_eigenvalue, trace_inverse_criterion, logdet_criterion
 
 
 def fim_loss(fim: jnp.ndarray) -> jnp.ndarray:
-    return max_inverse_eigenvalue(fim)
-
+    # return max_inverse_eigenvalue(fim)
+    return trace_inverse_criterion(fim)
+    # return logdet_criterion(fim)
 
 def trajectory_objective(
     fim: jnp.ndarray,

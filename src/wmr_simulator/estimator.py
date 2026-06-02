@@ -87,7 +87,7 @@ class DiffDriveEstimator:
         return r_est, L_est
 
     def update(self, est_state: EstimatorState, ur_true: float, ul_true: float, pose_true=None,
-               wheel_radius=None, base_diameter=None):
+               wheel_radius=None, base_diameter=None, dt=None):
         """
         Update estimator.
 
@@ -99,20 +99,21 @@ class DiffDriveEstimator:
         # Log true wheel speeds for later comparison
         u_true = np.array([ur_true, ul_true])
         r_est, L_est = self._resolve_geometry(wheel_radius, base_diameter)
+        dt = self.dt if dt is None else dt
 
         # Generate keys for PRNG
         key, k_enc_r, k_enc_l, k_x_meas, k_y_meas, k_th_meas = jax.random.split(est_state.key, 6)
 
         # 1) Simulate encoder increments
-        dphi_r_true = ur_true * self.dt
-        dphi_l_true = ul_true * self.dt
+        dphi_r_true = ur_true * dt
+        dphi_l_true = ul_true * dt
 
         dphi_r_meas = dphi_r_true + self.enc_angle_noise * jax.random.normal(k_enc_r)
         dphi_l_meas = dphi_l_true + self.enc_angle_noise * jax.random.normal(k_enc_l)
 
         # 2) Estimated wheel angular velocities from increments
-        ur_hat = dphi_r_meas / self.dt
-        ul_hat = dphi_l_meas / self.dt
+        ur_hat = dphi_r_meas / dt
+        ul_hat = dphi_l_meas / dt
         u_hat = np.array([ur_hat, ul_hat])
 
         # 3) Propagate pose (prediction step)
@@ -122,9 +123,9 @@ class DiffDriveEstimator:
         if self.filter_type == "dr":
             # ----- DEAD-RECKONING: simple integration + noisy measurement
             x_hat, y_hat, theta_hat = est_state.pose_hat
-            x_hat += v_hat * np.cos(theta_hat) * self.dt
-            y_hat += v_hat * np.sin(theta_hat) * self.dt
-            theta_hat = self._wrap_to_pi(theta_hat + w_hat * self.dt) # changed order to match robot model and EKF
+            x_hat += v_hat * np.cos(theta_hat) * dt
+            y_hat += v_hat * np.sin(theta_hat) * dt
+            theta_hat = self._wrap_to_pi(theta_hat + w_hat * dt) # changed order to match robot model and EKF
             pose_hat = np.array([x_hat, y_hat, theta_hat])
 
             # simulate one noisy pose measurement (mocap + IMU)
@@ -145,14 +146,14 @@ class DiffDriveEstimator:
 
             # Nonlinear prediction
             x_pred = np.array([
-                x[0] + v_hat * np.cos(th) * self.dt,
-                x[1] + v_hat * np.sin(th) * self.dt,
-                self._wrap_to_pi(th + w_hat * self.dt),
+                x[0] + v_hat * np.cos(th) * dt,
+                x[1] + v_hat * np.sin(th) * dt,
+                self._wrap_to_pi(th + w_hat * dt),
                 ])
 
             # Jacobian F = df/dx
-            Fx = np.array([[1, 0, -v_hat * np.sin(th) * self.dt],
-                           [0, 1, v_hat * np.cos(th) * self.dt],
+            Fx = np.array([[1, 0, -v_hat * np.sin(th) * dt],
+                           [0, 1, v_hat * np.cos(th) * dt],
                            [0, 0, 1]])
 
             # Input Jacobian L = df/dphi
