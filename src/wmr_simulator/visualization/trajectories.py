@@ -25,7 +25,8 @@ def _plot_trajectory_axes(
     replay_actual = np.asarray(replay_actual)
     replay_estimates = np.asarray(replay_estimates)
     resolved_window_length = pipeline.resolve_window_length(window_length)
-    window_start_indices = np.arange(0, len(replay_estimates), resolved_window_length)
+    num_replay_intervals = max(len(replay_estimates) - 1, 1)
+    window_start_indices = np.arange(0, num_replay_intervals, resolved_window_length)
     if axis_limits is not None:
         x_limits, y_limits = axis_limits
     elif bezier_control_points is not None:
@@ -94,10 +95,14 @@ def _plot_trajectory_axes(
     )
     for window_idx, start_idx in enumerate(window_start_indices):
         end_idx = min(start_idx + resolved_window_length, len(replay_actual))
+        if end_idx <= start_idx:
+            continue
         label = "Windowed Replay Actual" if window_idx == 0 else None
+        window_actual = replay_actual[start_idx:end_idx].copy()
+        window_actual[0] = closed_loop_estimates[start_idx]
         ax.plot(
-            replay_actual[start_idx:end_idx, 0],
-            replay_actual[start_idx:end_idx, 1],
+            window_actual[:, 0],
+            window_actual[:, 1],
             color="orange",
             linestyle="-",
             linewidth=0.9,

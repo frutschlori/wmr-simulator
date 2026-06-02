@@ -106,6 +106,15 @@ class OptimizationSnapshot(NamedTuple):
     closed_loop_log: ClosedLoopLog
 
 
+def reference_states_export_payload(reference_states, dt: float, **metadata):
+    payload = {
+        "reference_states": np.asarray(reference_states),
+        "dt": float(dt),
+    }
+    payload.update(metadata)
+    return payload
+
+
 class TrajectoryOptimizationPipeline:
     def __init__(
         self,
@@ -113,8 +122,10 @@ class TrajectoryOptimizationPipeline:
         trajectory_generator: TrajectoryGenerator | None = None,
         trajectory_generator_type: str | None = None,
         time_scaling: str | None = None,
+        replay_wheel_speed_source: str = "true",
     ):
         self.problem = ProblemDefinition(problem_path)
+        self.replay_wheel_speed_source = self.resolve_replay_wheel_speed_source(replay_wheel_speed_source)
         self.robot = self.problem.build_robot()
         self.controller = self.problem.build_controller()
         self.controller_gains = jnp.asarray(self.problem.controller_cfg["gains"], dtype=jnp.float32)
@@ -154,6 +165,18 @@ class TrajectoryOptimizationPipeline:
 
     def default_measurement_variances(self) -> np.ndarray:
         return default_measurement_variances(self.problem.estimator_cfg)
+
+    @staticmethod
+    def resolve_replay_wheel_speed_source(source: str) -> str:
+        source = source.lower()
+        if source not in {"true", "noisy"}:
+            raise ValueError("replay_wheel_speed_source must be 'true' or 'noisy'.")
+        return source
+
+    def closed_loop_replay_wheel_speeds(self, closed_loop_log: ClosedLoopLog) -> jax.Array:
+        if self.replay_wheel_speed_source == "true":
+            return closed_loop_log.replay_init.wheel_speeds
+        return closed_loop_log.replay_init.estimator_u_hat
 
     def motion_limits(self) -> dict[str, jnp.ndarray]:
         return motion_limits_from_robot_config(self.problem.robot_cfg)
@@ -336,16 +359,19 @@ class TrajectoryOptimizationPipeline:
             replay_init=replay_init,
         )
 
-    def open_loop_replay_step(self, carry, wheel_cmd: jnp.ndarray, params: jnp.ndarray):
+    def open_loop_replay_step(self, carry, inputs, params: jnp.ndarray):
         robot_state, estimator_state = carry
+        wheel_speeds, wheel_cmd = inputs
 
-        next_robot_state = self.robot.step(
+        next_robot_state = self.robot.step_kinematic(
             robot_state,
+            wheel_speeds,
             wheel_cmd,
             wheel_radius=params[0],
             base_diameter=params[1],
+            dt=self.problem.dt,
         )
-        ur_true, ul_true = self.robot.get_wheel_speeds(next_robot_state)
+        ur_true, ul_true = wheel_speeds
         pose_true = self.robot.get_pose(next_robot_state)
         next_estimator_state = self.estimator.update(
             estimator_state,
@@ -354,6 +380,7 @@ class TrajectoryOptimizationPipeline:
             pose_true,
             wheel_radius=params[0],
             base_diameter=params[1],
+            dt=self.problem.dt,
         )
         measurement = self.estimator.get_est_pose(next_estimator_state)
         actual_pose = self.robot.get_pose(next_robot_state)
@@ -369,12 +396,17 @@ class TrajectoryOptimizationPipeline:
         if closed_loop_log is None:
             closed_loop_log = self.closed_loop_log
 
-        num_steps = closed_loop_log.wheel_cmds.shape[0]
-        num_windows = int(np.ceil(num_steps / window_length))
-        padded_num_steps = num_windows * window_length
-        pad_steps = padded_num_steps - num_steps
+        replay_wheel_speeds = self.closed_loop_replay_wheel_speeds(closed_loop_log)[:-1]
+        replay_wheel_cmds = closed_loop_log.wheel_cmds[:-1]
 
-        padded_wheel_cmds = jnp.pad(closed_loop_log.wheel_cmds, ((0, pad_steps), (0, 0)))
+        num_intervals = replay_wheel_speeds.shape[0]
+        num_windows = int(np.ceil(num_intervals / window_length))
+        padded_num_intervals = num_windows * window_length
+        pad_steps = padded_num_intervals - num_intervals
+
+        padded_wheel_speeds = jnp.pad(replay_wheel_speeds, ((0, pad_steps), (0, 0)))
+        padded_wheel_cmds = jnp.pad(replay_wheel_cmds, ((0, pad_steps), (0, 0)))
+        wheel_speed_windows = padded_wheel_speeds.reshape(num_windows, window_length, 2)
         wheel_cmd_windows = padded_wheel_cmds.reshape(num_windows, window_length, 2)
 
         window_start_indices = jnp.arange(num_windows, dtype=jnp.int32) * window_length
@@ -395,6 +427,7 @@ class TrajectoryOptimizationPipeline:
             init_window_covariance,
             robot_key,
             estimator_key,
+            wheel_speed_window,
             wheel_cmd_window,
         ):
             initial_carry = self.initial_replay_carry(
@@ -407,9 +440,9 @@ class TrajectoryOptimizationPipeline:
                 init_covariance=init_window_covariance,
             )
             _, outputs = jax.lax.scan(
-                lambda carry, wheel_cmd: self.open_loop_replay_step(carry, wheel_cmd, params),
+                lambda carry, replay_inputs: self.open_loop_replay_step(carry, replay_inputs, params),
                 initial_carry,
-                wheel_cmd_window,
+                (wheel_speed_window, wheel_cmd_window),
             )
             return outputs
 
@@ -421,11 +454,16 @@ class TrajectoryOptimizationPipeline:
             init_covariances,
             window_robot_keys,
             window_estimator_keys,
+            wheel_speed_windows,
             wheel_cmd_windows,
         )
 
-        actual_poses = actual_pose_windows.reshape(-1, 3)[:num_steps]
-        measurements = measurement_windows.reshape(-1, 3)[:num_steps]
+        actual_poses = actual_pose_windows.reshape(-1, 3)[:num_intervals]
+        measurements = measurement_windows.reshape(-1, 3)[:num_intervals]
+        actual_poses = jnp.concatenate([closed_loop_log.measurements[:1], actual_poses], axis=0)
+        measurements = jnp.concatenate([closed_loop_log.measurements[:1], measurements], axis=0)
+        actual_poses = actual_poses.at[window_start_indices].set(closed_loop_log.measurements[window_start_indices])
+        measurements = measurements.at[window_start_indices].set(closed_loop_log.measurements[window_start_indices])
         return actual_poses, measurements
 
     def replay_measurement_sequence(
@@ -652,7 +690,15 @@ class TrajectoryOptimizationPipeline:
             filename = f"step_{snapshot.step:05d}.pkl"
             out_path = os.path.join(export_dir, filename)
             with open(out_path, "wb") as file:
-                pickle.dump(np.asarray(snapshot.reference_states), file)
+                pickle.dump(
+                    reference_states_export_payload(
+                        snapshot.reference_states,
+                        self.problem.dt,
+                        step=int(snapshot.step),
+                        loss_value=float(snapshot.loss_value),
+                    ),
+                    file,
+                )
             saved_paths.append(out_path)
 
         return export_dir, saved_paths
@@ -663,5 +709,5 @@ class TrajectoryOptimizationPipeline:
         filename = f"{filename_prefix}_{timestamp}.pkl"
         out_path = os.path.join(out_dir, filename)
         with open(out_path, "wb") as file:
-            pickle.dump(np.asarray(self.reference_states), file)
+            pickle.dump(reference_states_export_payload(self.reference_states, self.problem.dt), file)
         return out_path

@@ -36,6 +36,14 @@ ENV/
 .env/
 .venv
 
+# Local dependency management
+pyproject.toml
+requirements*.txt
+_requirements.txt
+uv.lock
+.uv/
+uv.toml
+
 # IDEs
 .vscode/
 .idea/
@@ -48,6 +56,7 @@ ENV/
 .coverage
 htmlcov/
 .tox/
+.jax_cache/
 
 # Jupyter Notebook
 .ipynb_checkpoints

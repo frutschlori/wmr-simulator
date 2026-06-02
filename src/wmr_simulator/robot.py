@@ -39,14 +39,19 @@ class DiffDrive:
         L = self.L if base_diameter is None else base_diameter
         return r, L
 
-    def step(self, state, wheel_cmd, wheel_radius=None, base_diameter=None):
+    def step(self, state, wheel_cmd, wheel_radius=None, base_diameter=None, dt=None):
         wheel_cmd = np.array(wheel_cmd, dtype=np.float32)
         r, L = self._resolve_geometry(wheel_radius, base_diameter)
+        dt = self.dt if dt is None else dt
+        if self.tau >= 1e-3:
+            alpha = np.exp(-dt / self.tau)
+        else:
+            alpha = 0.0
         # 1) Saturate wheel commands
         wheel_cmd = np.clip(wheel_cmd, min=-self.max_wheel_speed, max=self.max_wheel_speed)
 
         # 2) First-order wheel dynamics (discrete)
-        next_wheel_speeds = (self.alpha * state.wheel_speeds + (1.0 - self.alpha) * wheel_cmd)
+        next_wheel_speeds = (alpha * state.wheel_speeds + (1.0 - alpha) * wheel_cmd)
         # add slip
         key, key_r, key_l = jax.random.split(state.key, 3)
         slip_r = jax.random.uniform(key_r, minval=-self.slip_r, maxval=self.slip_r)
@@ -60,14 +65,31 @@ class DiffDrive:
 
         # 4) Compute updated robot state and return it
         x, y, theta = state.pose
-        next_pose = np.array([x + v * np.cos(theta) * self.dt,
-                              y + v * np.sin(theta) * self.dt,
-                              self._wrap_to_pi(theta + w * self.dt)])
+        next_pose = np.array([x + v * np.cos(theta) * dt,
+                              y + v * np.sin(theta) * dt,
+                              self._wrap_to_pi(theta + w * dt)])
 
         next_vel_omega = np.array([v, w])
 
         # 6) Log states are included in DiffDriveState
         return DiffDriveState(next_pose, next_wheel_speeds, key, next_vel_omega, wheel_cmd)
+
+    def step_kinematic(self, state, wheel_speeds, wheel_cmd, wheel_radius=None, base_diameter=None, dt=None):
+        wheel_speeds = np.array(wheel_speeds, dtype=np.float32)
+        r, L = self._resolve_geometry(wheel_radius, base_diameter)
+        dt = self.dt if dt is None else dt
+
+        ur, ul = wheel_speeds
+        v = 0.5 * r * (ur + ul)
+        w = (r / L) * (ur - ul)
+
+        x, y, theta = state.pose
+        next_pose = np.array([x + v * np.cos(theta) * dt,
+                              y + v * np.sin(theta) * dt,
+                              self._wrap_to_pi(theta + w * dt)])
+        next_vel_omega = np.array([v, w])
+
+        return DiffDriveState(next_pose, wheel_speeds, state.key, next_vel_omega, wheel_cmd)
 
     # getters
     @staticmethod

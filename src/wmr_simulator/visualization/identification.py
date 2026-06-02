@@ -170,7 +170,8 @@ def plot_windowed_replay_trajectory(
     replay_actual = np.asarray(replay_log.robot_states.pose)
 
     resolved_window_length = pipeline.resolve_window_length(window_length)
-    window_start_indices = np.arange(0, len(replay_estimates), resolved_window_length)
+    num_replay_intervals = max(len(replay_estimates) - 1, 1)
+    window_start_indices = np.arange(0, num_replay_intervals, resolved_window_length)
 
     fig, ax = plt.subplots(1, 1, figsize=(8, 8))
     ax.plot(
@@ -210,10 +211,14 @@ def plot_windowed_replay_trajectory(
     )
     for window_idx, start_idx in enumerate(window_start_indices):
         end_idx = min(start_idx + resolved_window_length, len(replay_actual))
+        if end_idx <= start_idx:
+            continue
         label = "Windowed Replay Actual" if window_idx == 0 else None
+        window_actual = replay_actual[start_idx:end_idx].copy()
+        window_actual[0] = closed_loop_estimates[start_idx]
         ax.plot(
-            replay_actual[start_idx:end_idx, 0],
-            replay_actual[start_idx:end_idx, 1],
+            window_actual[:, 0],
+            window_actual[:, 1],
             color="orange",
             linestyle="-",
             linewidth=0.9,
@@ -512,15 +517,29 @@ def plot_system_id(pipeline, init_target_log, init_log, predicted_log, out_prefi
 
     hidden_log = pipeline.target_log
     estimator_filter_type = pipeline.estimator.filter_type
-    time = pipeline.sim_time_grid
     reference_states = pipeline.reference_states
+    is_real_experiment = getattr(pipeline, "uses_external_target_log", False)
+    target_label = "meas" if is_real_experiment else "hidden"
 
-    plot_time = np.asarray(time[1:])
+    plot_len = min(
+        hidden_log.robot_states.pose.shape[0],
+        init_target_log.robot_states.pose.shape[0],
+        init_log.robot_states.pose.shape[0],
+        predicted_log.robot_states.pose.shape[0],
+    )
+    if getattr(pipeline, "target_time_s", None) is not None:
+        plot_time = np.asarray(pipeline.target_time_s)[:plot_len]
+    else:
+        plot_time = np.asarray(pipeline.sim_time_grid)[:plot_len]
 
     # Handle reference states
     refstates = None
     if reference_states is not None:
-        if len(plot_time) > len(reference_states):
+        if getattr(pipeline, "target_time_s", None) is not None and not getattr(pipeline, "uses_external_target_log", False):
+            ref_indices = np.rint(plot_time / pipeline.dt).astype(int)
+            ref_indices = np.clip(ref_indices, 0, len(reference_states) - 1)
+            extended_ref_states = reference_states[ref_indices]
+        elif len(plot_time) > len(reference_states):
             num_extra_steps = len(plot_time) - len(reference_states)
             last_ref_state = reference_states[-1]
             extended_ref_states = np.vstack([
@@ -537,11 +556,11 @@ def plot_system_id(pipeline, init_target_log, init_log, predicted_log, out_prefi
         refstates = refstates[:min_len]
 
     def _extract_state_series(sim_log):
-        poses = np.asarray(sim_log.robot_states.pose)[:len(plot_time)]
+        poses = np.asarray(sim_log.robot_states.pose)[:plot_len]
         if estimator_filter_type == "dr":
-            est_pose = np.asarray(sim_log.estimator_states.pose_meas)[:len(plot_time)]
+            est_pose = np.asarray(sim_log.estimator_states.pose_meas)[:plot_len]
         else:
-            est_pose = np.asarray(sim_log.estimator_states.pose_hat)[:len(plot_time)]
+            est_pose = np.asarray(sim_log.estimator_states.pose_hat)[:plot_len]
         return poses, est_pose
 
     poses_hidden, est_hidden = _extract_state_series(hidden_log)
@@ -561,10 +580,14 @@ def plot_system_id(pipeline, init_target_log, init_log, predicted_log, out_prefi
             for k in range(3):
                 if refstates is not None:
                     axes[k].plot(plot_time, refstates[:, k], 'r-', label=f'Ref {labels[k]}')
-                axes[k].plot(plot_time, hidden_actual[:, k], 'b--', label=f'Actual {labels[k]} (hidden)')
-                axes[k].plot(plot_time, hidden_est[:, k], 'g--', label=f'Est {labels[k]} (hidden)')
-                axes[k].plot(plot_time, actual_guess[:, k], 'c-.', label=f'Actual {labels[k]} ({title_suffix})')
-                axes[k].plot(plot_time, est_guess[:, k], 'm-.', label=f'Est {labels[k]} ({title_suffix})')
+                if is_real_experiment:
+                    axes[k].plot(plot_time, hidden_actual[:, k], 'b--', label="Measured")
+                    axes[k].plot(plot_time, actual_guess[:, k], 'c-.', label="Model")
+                else:
+                    axes[k].plot(plot_time, hidden_actual[:, k], 'b--', label=f'Actual {labels[k]} ({target_label})')
+                    axes[k].plot(plot_time, hidden_est[:, k], 'g--', label=f'Est {labels[k]} ({target_label})')
+                    axes[k].plot(plot_time, actual_guess[:, k], 'c-.', label=f'Actual {labels[k]} ({title_suffix})')
+                    axes[k].plot(plot_time, est_guess[:, k], 'm-.', label=f'Est {labels[k]} ({title_suffix})')
                 axes[k].set_ylabel(f'{["X Position", "Y Position", "Angle"][k]}')
                 axes[k].legend()
                 axes[k].grid(True)

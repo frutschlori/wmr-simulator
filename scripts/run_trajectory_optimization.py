@@ -1,17 +1,16 @@
 import argparse
-
-import numpy as np
-
-from wmr_simulator.trajectory_optimization.pipeline import TrajectoryOptimizationPipeline
+import os
 
 
 def main():
     parser = argparse.ArgumentParser(description="Initialize trajectory optimization inputs.")
-    parser.add_argument("problem", nargs="?", default="problems/problem_hidden.yaml")
+    parser.add_argument("--problem", default="problems/problem_hidden.yaml")
+    parser.add_argument("--jax-platform", choices=["default", "cpu"], default="cpu")
     parser.add_argument("--window-length", type=int, default=50)
+    parser.add_argument("--replay-wheel-speeds", choices=["true", "noisy"], default="true")
     parser.add_argument("--trajectory-generator", choices=["planner", "bezier"], default="bezier")
-    parser.add_argument("--time-scaling", choices=["s-curve", "linear"], default="s-curve")
-    parser.add_argument("--bezier-order", type=int, default=20)
+    parser.add_argument("--time-scaling", choices=["s-curve", "linear"], default="linear")
+    parser.add_argument("--bezier-order", type=int, default=10)
     parser.add_argument("--opt-steps", type=int, default=5000)
     parser.add_argument("--learning-rate", type=float, default=1e-2)
     parser.add_argument("--constraint-weight", type=float, default=1.0)
@@ -24,14 +23,20 @@ def main():
     parser.add_argument("--constraint-smooth-violation-alpha", type=float, default=20.0)
     parser.add_argument("--save-opt-GIF", action="store_true", default=False)
     parser.add_argument("--export-opt-reference-states", action="store_true", default=False)
-    parser.add_argument("--opt-trace-stride", type=int, default=50)
+    parser.add_argument("--opt-trace-stride", type=int, default=500)
     parser.add_argument("--save-trajectory", action="store_true", default=True)
     args = parser.parse_args()
+
+    if args.jax_platform == "cpu":
+        os.environ["JAX_PLATFORMS"] = "cpu"
+
+    from wmr_simulator.trajectory_optimization.pipeline import TrajectoryOptimizationPipeline
 
     pipeline = TrajectoryOptimizationPipeline(
         args.problem,
         trajectory_generator_type=args.trajectory_generator,
         time_scaling=args.time_scaling,
+        replay_wheel_speed_source=args.replay_wheel_speeds,
     )
 
     print(f"Loaded problem: {pipeline.problem.path}")
@@ -40,6 +45,7 @@ def main():
     if args.trajectory_generator == "bezier":
         print(f"Time scaling: {pipeline.time_scaling}")
     print(f"Trajectory samples: {len(pipeline.trajectory.time)}")
+    print(f"Replay wheel speeds: {pipeline.replay_wheel_speed_source}")
     print(f"Start pose: {pipeline.trajectory.poses[0]}")
     print(f"Goal pose:  {pipeline.trajectory.poses[-1]}")
     print(f"Window length: {pipeline.resolve_window_length(args.window_length)}")
@@ -67,8 +73,6 @@ def main():
             "omega": args.constraint_omega_weight,
             "alpha": args.constraint_alpha_weight,
         }
-        print("Initial control points:")
-        print(np.asarray(initial_control_points))
         optimized_control_points, loss_history = pipeline.optimize_bezier_trajectory(
             order=args.bezier_order,
             num_steps=args.opt_steps,
@@ -89,8 +93,6 @@ def main():
             constraint_smooth_max_beta=args.constraint_smooth_max_beta,
             constraint_smooth_violation_alpha=args.constraint_smooth_violation_alpha,
         )
-        print("Optimized control points:")
-        print(np.asarray(optimized_control_points))
         print("Final optimization loss:")
         print(loss_history[-1])
         print("Final objective terms:")

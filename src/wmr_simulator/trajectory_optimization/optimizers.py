@@ -53,6 +53,8 @@ def optimize_bezier_control_points(
 
     initial_loss = unnormalized_loss_fn(initial_decision_variables)
     loss_scale = 1.0 / jnp.maximum(initial_loss, 1e-12)
+    # loss_scale = -1.0 / jnp.maximum(initial_loss, 1e-12)
+    # loss_scale = 1.0
 
     def loss_fn(decision_variables):
         return loss_scale * unnormalized_loss_fn(decision_variables)
