@@ -288,7 +288,7 @@ if __name__ == "__main__":
     from wmr_simulator.visualization.pololu import plot_logged_multipage, plot_logged_trajectory
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--log", type=str, default="Pololu Data/Logs/TR06")
+    parser.add_argument("--log", type=str, default="Pololu Data/Logs/10cp_constrained_scurve")
     parser.add_argument("--start-time", type=float, default=None)
     parser.add_argument("--stop-time", type=float, default=12.0)
     parser.add_argument("--wheel-radius", type=float, default=0.016, help="Wheel radius in meters.")
