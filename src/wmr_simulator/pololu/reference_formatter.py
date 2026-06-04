@@ -119,7 +119,7 @@ def export_latest_reference(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     if output_name is None:
-        output_name = f"{trajectory.path.stem}.json"
+        output_name = f"{trajectory.path.stem}.JSN"
     output_path = output_dir / output_name
     with output_path.open("w", encoding="utf-8") as file:
         json.dump(formatted, file, indent=2)
