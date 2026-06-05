@@ -1,5 +1,5 @@
 sim_time: 5.0 # seconds
-time_step: 0.01 # seconds
+time_step: 0.05 # seconds
 environment:
   min: [-1.5, -3.0]
   max: [1.5, 3.0]
@@ -12,16 +12,16 @@ planner:
     - [1.0,0.5, 1.57]
   time: 5.0 # seconds
 controller:
-  gains: [5.0, 5.0, 3.0, 0.4, 0.4, 0.2, 0.2] # [kx, ky, kth, kprmotor, kplmotor, kirmotor, kilmotor]
+  gains: [4.5, 6.0, 12.0, 0.01, 0.01, 0.02, 0.02] # [kx, ky, kth, kprmotor, kplmotor, kirmotor, kilmotor]
   # gains: [5.0, 5.0, 3.5, 5.0, 5.0, 0.0, 0.0] # [kx, ky, kth, kprmotor, kplmotor, kirmotor, kilmotor]
 robot:
   type: differential_drive
-  wheel_radius: 0.015  # m
-  base_diameter: 0.09  # m
+  wheel_radius: 0.016  # m
+  base_diameter: 0.0842  # m
   max_wheel_speed: 150 # rad/s
-  time_constant:  0.1  # time constant for first-order wheel dynamics (set to 0 for ideal actuation)
-  slip_r: 0.1          # std of fractional slip on ur (40%) [0 -> 1.0]
-  slip_l: 0.1          # std of fractional slip on ul (50%) [0 -> 1.0]
+  time_constant:  0.15  # time constant for first-order wheel dynamics (set to 0 for ideal actuation)
+  slip_r: 0.05          # std of fractional slip on ur (40%) [0 -> 1.0]
+  slip_l: 0.05          # std of fractional slip on ul (50%) [0 -> 1.0]
   v_max: 2.0          # m/s
   a_max: 10.0        # m/s^2
   a_max_lateral: 8.0 # m/s^2
@@ -33,8 +33,8 @@ estimator:
   wheel_radius: 0.015     # estimator's wheel_radius [m]
   base_diameter: 0.09     # estimator's base_diameter [m]
   noise_pos: 0.02         # position measurement noise [m] (from mocap almost no noise)
-  noise_angle: 0.07        # orientation noise [rad] ~  4 degrees
-  enc_angle_noise: 0.01    # encoder noise
+  noise_angle: 0.07       # orientation noise [rad] ~  4 degrees
+  enc_angle_noise: 0.03   # encoder noise
   
   proc_pos_std: 0.02      # [m]   process noise on x,y per step
   proc_theta_std: 0.05     # [rad] process noise on θ per step

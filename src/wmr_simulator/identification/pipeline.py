@@ -30,7 +30,6 @@ class SystemIdentificationPipeline(SimulationPipeline):
         target_time_s=None,
         target_reference_states=None,
         replay_wheel_speed_source: str = "true",
-        closed_loop_measurement_dt: float | None = None,
     ):
         super().__init__(
             problem_path=problem_path,
@@ -44,8 +43,6 @@ class SystemIdentificationPipeline(SimulationPipeline):
         self.deterministic_replay = bool(deterministic_replay)
         self.replay_wheel_speed_source = self._resolve_replay_wheel_speed_source(replay_wheel_speed_source)
         self.max_replay_dt = self.dt if max_replay_dt is None else self._resolve_max_replay_dt(max_replay_dt)
-        self.closed_loop_measurement_dt = self._resolve_closed_loop_measurement_dt(closed_loop_measurement_dt)
-        self.measurement_stride = self._measurement_stride(self.closed_loop_measurement_dt)
         self.uses_external_target_log = target_log is not None
         if target_log is None:
             self.target_log = self.run_target_closed_loop(
@@ -53,7 +50,7 @@ class SystemIdentificationPipeline(SimulationPipeline):
                 use_hidden_robot=True,
                 controller_gains=self.gains,
             )
-            self.target_time_s = self._target_time_grid(self.target_log)
+            self.target_time_s = None
         else:
             self.target_log = target_log
             if target_time_s is None:
@@ -91,72 +88,8 @@ class SystemIdentificationPipeline(SimulationPipeline):
             raise ValueError("replay_wheel_speed_source must be 'true' or 'noisy'.")
         return source
 
-    def _resolve_closed_loop_measurement_dt(self, measurement_dt: float | None) -> float | None:
-        if measurement_dt is None:
-            return None
-        measurement_dt = float(measurement_dt)
-        if measurement_dt <= 0.0:
-            raise ValueError("closed_loop_measurement_dt must be positive.")
-        if measurement_dt < self.dt:
-            raise ValueError("closed_loop_measurement_dt must be greater than or equal to the problem time_step.")
-        ratio = measurement_dt / self.dt
-        stride = int(round(ratio))
-        if not np.isclose(ratio, stride, rtol=0.0, atol=1e-6):
-            raise ValueError("closed_loop_measurement_dt must be an integer multiple of the problem time_step.")
-        return measurement_dt
-
-    def _measurement_stride(self, measurement_dt: float | None) -> int | None:
-        if measurement_dt is None:
-            return None
-        return int(round(measurement_dt / self.dt))
-
-    def _target_time_grid(self, target_log: SimulationLog):
-        if self.closed_loop_measurement_dt is None:
-            return None
-        return jnp.arange(target_log.robot_states.pose.shape[0], dtype=jnp.float32) * self.closed_loop_measurement_dt
-
-    def _sparsify_target_log(self, target_log: SimulationLog) -> SimulationLog:
-        if self.measurement_stride is None or self.measurement_stride == 1:
-            return target_log
-
-        stride = self.measurement_stride
-        num_steps = target_log.robot_states.pose.shape[0]
-        num_intervals = num_steps - 1
-        if num_intervals % stride != 0:
-            raise ValueError(
-                "closed_loop_measurement_dt must divide the simulated time horizon exactly "
-                f"({num_intervals} simulation intervals with stride {stride})."
-            )
-
-        sample_indices = jnp.arange(0, num_steps, stride, dtype=jnp.int32)
-
-        def sample(values):
-            return values[sample_indices]
-
-        def interval_average(values):
-            leading = values[:-1].reshape((num_intervals // stride, stride) + values.shape[1:])
-            averaged = jnp.mean(leading, axis=1)
-            return jnp.concatenate([averaged, values[-1:]], axis=0)
-
-        robot_states = DiffDriveState(
-            pose=sample(target_log.robot_states.pose),
-            wheel_speeds=interval_average(target_log.robot_states.wheel_speeds),
-            key=sample(target_log.robot_states.key),
-            vel_omega=interval_average(target_log.robot_states.vel_omega),
-            wheel_cmd=interval_average(target_log.robot_states.wheel_cmd),
-        )
-        estimator_states = EstimatorState(
-            pose_hat=sample(target_log.estimator_states.pose_hat),
-            pose_meas=sample(target_log.estimator_states.pose_meas),
-            u_hat=interval_average(target_log.estimator_states.u_hat),
-            u_true=interval_average(target_log.estimator_states.u_true),
-            P=sample(target_log.estimator_states.P),
-            key=sample(target_log.estimator_states.key),
-        )
-        return SimulationLog(robot_states=robot_states, estimator_states=estimator_states)
-
     def run_target_closed_loop(self, *args, **kwargs) -> SimulationLog:
-        return self._sparsify_target_log(self.run_closed_loop(*args, **kwargs))
+        return self.run_closed_loop(*args, **kwargs)
 
     def _target_replay_wheel_speeds(self, target_log: SimulationLog):
         if self.replay_wheel_speed_source == "true":
@@ -237,8 +170,8 @@ class SystemIdentificationPipeline(SimulationPipeline):
         model_params = robot_params if est_params is None else est_params
 
         target_wheel_speeds = self._target_replay_wheel_speeds(target_log)
-        replay_wheel_speeds = target_wheel_speeds[:-1]
-        logged_wheel_cmds = target_log.robot_states.wheel_cmd[:-1]
+        replay_wheel_speeds = target_wheel_speeds[1:]
+        logged_wheel_cmds = target_log.robot_states.wheel_cmd[1:]
         interval_dts = self._target_interval_dts(target_log, target_time_s)
         target_measurements = self._extract_estimated_pose_series(target_log)
         target_u_hat = target_log.estimator_states.u_hat
@@ -320,17 +253,6 @@ class SystemIdentificationPipeline(SimulationPipeline):
                 def active_step(_):
                     robot_state, est_state = subcarry
 
-                    ur_true, ul_true = wheel_speeds
-                    pose_true = self.robot.get_pose(robot_state)
-                    next_est_state = self.estimator.update(
-                        est_state,
-                        ur_true,
-                        ul_true,
-                        pose_true,
-                        wheel_radius=model_params.wheel_radius,
-                        base_diameter=model_params.base_diameter,
-                        dt=substep_dt,
-                    )
                     next_robot_state = self.robot.step_kinematic(
                         robot_state,
                         wheel_speeds,
@@ -338,6 +260,16 @@ class SystemIdentificationPipeline(SimulationPipeline):
                         base_diameter=robot_params.base_diameter,
                         dt=substep_dt,
                         wheel_cmd=wheel_cmd,
+                    )
+                    ur_true, ul_true = wheel_speeds
+                    next_est_state = self.estimator.update(
+                        est_state,
+                        ur_true,
+                        ul_true,
+                        self.robot.get_pose(next_robot_state),
+                        wheel_radius=model_params.wheel_radius,
+                        base_diameter=model_params.base_diameter,
+                        dt=substep_dt,
                     )
                     return next_robot_state, next_est_state
 
@@ -452,31 +384,6 @@ class SystemIdentificationPipeline(SimulationPipeline):
             P=jnp.concatenate([initial_estimator_state.P[None, :, :], interval_estimator_states.P], axis=0),
             key=jnp.concatenate([initial_estimator_state.key[None, :], interval_estimator_states.key], axis=0),
         )
-        valid_window_starts = jnp.asarray(
-            window_start_indices_np[window_start_indices_np < num_target_steps],
-            dtype=jnp.int32,
-        )
-        robot_states = DiffDriveState(
-            pose=robot_states.pose.at[valid_window_starts].set(target_measurements[valid_window_starts]),
-            wheel_speeds=robot_states.wheel_speeds.at[valid_window_starts].set(
-                target_log.robot_states.wheel_speeds[valid_window_starts]
-            ),
-            key=robot_states.key,
-            vel_omega=robot_states.vel_omega.at[valid_window_starts].set(target_log.robot_states.vel_omega[valid_window_starts]),
-            wheel_cmd=robot_states.wheel_cmd.at[valid_window_starts].set(target_log.robot_states.wheel_cmd[valid_window_starts]),
-        )
-        estimator_states = EstimatorState(
-            pose_hat=estimator_states.pose_hat.at[valid_window_starts].set(
-                target_log.estimator_states.pose_hat[valid_window_starts]
-            ),
-            pose_meas=estimator_states.pose_meas.at[valid_window_starts].set(
-                target_log.estimator_states.pose_meas[valid_window_starts]
-            ),
-            u_hat=estimator_states.u_hat.at[valid_window_starts].set(target_log.estimator_states.u_hat[valid_window_starts]),
-            u_true=estimator_states.u_true.at[valid_window_starts].set(target_log.estimator_states.u_true[valid_window_starts]),
-            P=estimator_states.P.at[valid_window_starts].set(target_log.estimator_states.P[valid_window_starts]),
-            key=estimator_states.key,
-        )
         return SimulationLog(robot_states=robot_states, estimator_states=estimator_states)
 
     def loss(self, params: PhysicalParams, replay_robot_keys: jax.Array, replay_estimator_keys: jax.Array):
@@ -536,7 +443,6 @@ def run_single_experiment_identification(
     target_time_s=None,
     target_reference_states=None,
     replay_wheel_speed_source: str = "true",
-    closed_loop_measurement_dt: float | None = None,
 ):
     pipeline = SystemIdentificationPipeline(
         problem_path=problem_path,
@@ -550,7 +456,6 @@ def run_single_experiment_identification(
         target_time_s=target_time_s,
         target_reference_states=target_reference_states,
         replay_wheel_speed_source=replay_wheel_speed_source,
-        closed_loop_measurement_dt=closed_loop_measurement_dt,
     )
     init_target_log = pipeline.target_log
     init_replay_log = pipeline.replay_rollout(
