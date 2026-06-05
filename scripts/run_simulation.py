@@ -8,7 +8,7 @@ from wmr_simulator.visualization.simulation import plot, visualize
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--problem", type=str, default="problems/figure_eight.yaml")
+    parser.add_argument("--problem", type=str, default="problems/pololu.yaml")
     parser.add_argument("--reference-trajectories-dir", type=str, default="trajectory_exports")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output", type=str, default="simulation")

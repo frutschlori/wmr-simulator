@@ -20,7 +20,6 @@ class ReferenceTrajectory:
 def load_latest_reference_trajectory(
     input_dir: str | Path,
     *,
-    input_dt: float | None = None,
     recursive: bool = False,
 ) -> ReferenceTrajectory:
     input_dir = Path(input_dir)
@@ -32,21 +31,15 @@ def load_latest_reference_trajectory(
     if not candidates:
         raise ValueError(f"No pickle trajectories found in {input_dir}")
 
-    return load_reference_trajectory(candidates[-1], input_dt=input_dt)
+    return load_reference_trajectory(candidates[-1])
 
 
-def load_reference_trajectory(path: str | Path, *, input_dt: float | None = None) -> ReferenceTrajectory:
+def load_reference_trajectory(path: str | Path) -> ReferenceTrajectory:
     path = Path(path)
     with path.open("rb") as file:
         payload = pickle.load(file)
 
-    reference_states, dt = _unpack_reference_payload(payload)
-    if dt is None:
-        if input_dt is None:
-            raise ValueError(
-                f"{path} does not contain a dt field. Pass --input-dt for legacy array-only pickles."
-            )
-        dt = input_dt
+    reference_states, dt = _unpack_reference_payload(payload, path)
 
     reference_states = np.asarray(reference_states, dtype=float)
     if reference_states.ndim != 2 or reference_states.shape[1] < 6:
@@ -63,20 +56,12 @@ def load_reference_trajectory(path: str | Path, *, input_dt: float | None = None
 def format_pololu_reference(
     trajectory: ReferenceTrajectory,
     *,
-    output_dt: float,
     cost: float = 100.0,
     time_stamp: float = 0.0,
     decimals: int = 6,
 ) -> dict[str, Any]:
-    step = _downsample_step(trajectory.dt, output_dt)
-    sampled = trajectory.reference_states[::step]
-    if sampled.shape[0] < 2:
-        raise ValueError(
-            f"Downsampling from dt={trajectory.dt} to dt={output_dt} leaves fewer than two states."
-        )
-
-    states = sampled[:, :3]
-    actions = _actions_from_reference_states(sampled[:-1])
+    states = trajectory.reference_states[:, :3]
+    actions = _actions_from_reference_states(trajectory.reference_states[:-1])
 
     return {
         "result": [
@@ -87,7 +72,7 @@ def format_pololu_reference(
                 "states": _round_nested(states, decimals),
                 "num_actions": int(actions.shape[0]),
                 "actions": _round_nested(actions, decimals),
-                "dt": _round_float(output_dt, decimals),
+                "dt": _round_float(trajectory.dt, decimals),
                 "start": _round_nested(states[0], decimals),
                 "goal": _round_nested(states[-1], decimals),
             }
@@ -99,18 +84,15 @@ def export_latest_reference(
     input_dir: str | Path,
     output_dir: str | Path,
     *,
-    output_dt: float,
-    input_dt: float | None = None,
     output_name: str | None = None,
     recursive: bool = False,
     cost: float = 100.0,
     time_stamp: float = 0.0,
     decimals: int = 6,
 ) -> Path:
-    trajectory = load_latest_reference_trajectory(input_dir, input_dt=input_dt, recursive=recursive)
+    trajectory = load_latest_reference_trajectory(input_dir, recursive=recursive)
     formatted = format_pololu_reference(
         trajectory,
-        output_dt=output_dt,
         cost=cost,
         time_stamp=time_stamp,
         decimals=decimals,
@@ -127,36 +109,22 @@ def export_latest_reference(
     return output_path
 
 
-def _unpack_reference_payload(payload) -> tuple[np.ndarray, float | None]:
-    if isinstance(payload, dict):
-        if "reference_states" not in payload:
-            raise ValueError("Reference pickle dictionary must contain a 'reference_states' key.")
-        return payload["reference_states"], payload.get("dt")
-    return payload, None
+def _unpack_reference_payload(payload, path: Path) -> tuple[np.ndarray, float]:
+    if not isinstance(payload, dict):
+        raise ValueError(f"{path} must contain a reference pickle dictionary with 'reference_states' and 'dt'.")
+    if "reference_states" not in payload:
+        raise ValueError(f"Reference pickle dictionary in {path} must contain a 'reference_states' key.")
+    if "dt" not in payload:
+        raise ValueError(f"Reference pickle dictionary in {path} must contain a 'dt' key.")
+    dt = float(payload["dt"])
+    if dt <= 0.0:
+        raise ValueError(f"Reference dt in {path} must be positive, got {dt}.")
+    return payload["reference_states"], dt
 
 
 def _latest_reference_activity_time(path: Path) -> float:
     stat = path.stat()
     return max(stat.st_mtime, stat.st_ctime)
-
-
-def _downsample_step(input_dt: float, output_dt: float) -> int:
-    if input_dt <= 0.0:
-        raise ValueError(f"Input dt must be positive, got {input_dt}.")
-    if output_dt <= 0.0:
-        raise ValueError(f"Output dt must be positive, got {output_dt}.")
-    ratio = output_dt / input_dt
-    step = int(round(ratio))
-    if step < 1:
-        raise ValueError(
-            f"Output dt ({output_dt}) must be greater than or equal to input dt ({input_dt})."
-        )
-    if not np.isclose(ratio, step, rtol=1e-7, atol=1e-9):
-        raise ValueError(
-            f"Output dt ({output_dt}) must be an integer multiple of input dt ({input_dt}); "
-            f"got ratio {ratio}."
-        )
-    return step
 
 
 def _actions_from_reference_states(reference_states: np.ndarray) -> np.ndarray:
@@ -182,9 +150,6 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--input_dir", type=str, default="trajectory_exports")
     parser.add_argument("--output_dir", type=str, default="Pololu Data/References")
-    parser.add_argument("--dt", type=float, default=0.05)
-    parser.add_argument("--input-dt", type=float, default=0.01,
-        help="Input time step for legacy array-only pickles that do not contain dt.")
     parser.add_argument("--output-name", default=None)
 
     parser.add_argument("--recursive", action="store_true", help="Search for pickle files recursively.")
@@ -196,8 +161,6 @@ def main(argv: list[str] | None = None) -> int:
     output_path = export_latest_reference(
         args.input_dir,
         args.output_dir,
-        output_dt=args.dt,
-        input_dt=args.input_dt,
         output_name=args.output_name,
         recursive=args.recursive,
         cost=args.cost,

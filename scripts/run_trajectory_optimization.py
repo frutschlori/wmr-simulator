@@ -4,13 +4,13 @@ import os
 
 def main():
     parser = argparse.ArgumentParser(description="Initialize trajectory optimization inputs.")
-    parser.add_argument("--problem", default="problems/problem_hidden.yaml")
+    parser.add_argument("--problem", default="problems/pololu.yaml")
     parser.add_argument("--jax-platform", choices=["default", "cpu"], default="cpu")
-    parser.add_argument("--window-length", type=int, default=50)
+    parser.add_argument("--window-length", type=int, default=10)
     parser.add_argument("--replay-wheel-speeds", choices=["true", "noisy"], default="true")
     parser.add_argument("--trajectory-generator", choices=["planner", "bezier"], default="bezier")
-    parser.add_argument("--time-scaling", choices=["s-curve", "linear"], default="linear")
-    parser.add_argument("--bezier-order", type=int, default=10)
+    parser.add_argument("--time-scaling", choices=["s-curve", "linear"], default="s-curve")
+    parser.add_argument("--bezier-order", type=int, default=20)
     parser.add_argument("--opt-steps", type=int, default=5000)
     parser.add_argument("--learning-rate", type=float, default=1e-2)
     parser.add_argument("--constraint-weight", type=float, default=1.0)
