@@ -41,8 +41,9 @@ def smooth_max(x: jnp.ndarray, beta: float = 20.0) -> jnp.ndarray:
     return jax.nn.logsumexp(beta * x) / beta
 
 
-def smooth_violation(g: jnp.ndarray, alpha: float = 20.0) -> jnp.ndarray:
-    return jax.nn.softplus(alpha * g) / alpha
+def smooth_positive_max(x: jnp.ndarray, beta: float = 20.0) -> jnp.ndarray:
+    zero = jnp.zeros((1,), dtype=x.dtype)
+    return smooth_max(jnp.concatenate([zero, x], axis=0), beta=beta)
 
 
 def smooth_norm(x: jnp.ndarray, axis: int = -1, eps: float = 1e-8) -> jnp.ndarray:
@@ -91,8 +92,28 @@ def constraint_loss(
     limits: dict,
     weights: dict,
     smooth_max_beta: float = 20.0,
-    smooth_violation_alpha: float = 20.0,
 ) -> jnp.ndarray:
+    components = constraint_loss_components(
+        v=v,
+        a=a,
+        omega=omega,
+        alpha_ang=alpha_ang,
+        limits=limits,
+        weights=weights,
+        smooth_max_beta=smooth_max_beta,
+    )
+    return sum(components.values())
+
+
+def constraint_loss_components(
+    v: jnp.ndarray,
+    a: jnp.ndarray,
+    omega: jnp.ndarray,
+    alpha_ang: jnp.ndarray,
+    limits: dict,
+    weights: dict,
+    smooth_max_beta: float = 20.0,
+) -> dict[str, jnp.ndarray]:
     v_norm = smooth_norm(v, axis=-1)
     a_norm = smooth_norm(a, axis=-1)
     a_lat = jnp.abs(v_norm * omega)
@@ -103,25 +124,19 @@ def constraint_loss(
     g_w_samples = jnp.abs(omega) / limits["omega_max"] - 1.0
     g_alpha_samples = jnp.abs(alpha_ang) / limits["alpha_max"] - 1.0
 
-    g_v = smooth_max(g_v_samples, beta=smooth_max_beta)
-    g_a = smooth_max(g_a_samples, beta=smooth_max_beta)
-    g_lat = smooth_max(g_lat_samples, beta=smooth_max_beta)
-    g_w = smooth_max(g_w_samples, beta=smooth_max_beta)
-    g_alpha = smooth_max(g_alpha_samples, beta=smooth_max_beta)
+    v_loss = smooth_positive_max(g_v_samples, beta=smooth_max_beta) ** 2
+    a_loss = smooth_positive_max(g_a_samples, beta=smooth_max_beta) ** 2
+    lateral_loss = smooth_positive_max(g_lat_samples, beta=smooth_max_beta) ** 2
+    omega_loss = smooth_positive_max(g_w_samples, beta=smooth_max_beta) ** 2
+    alpha_loss = smooth_positive_max(g_alpha_samples, beta=smooth_max_beta) ** 2
 
-    v_loss = smooth_violation(g_v, alpha=smooth_violation_alpha) ** 2
-    a_loss = smooth_violation(g_a, alpha=smooth_violation_alpha) ** 2
-    lateral_loss = smooth_violation(g_lat, alpha=smooth_violation_alpha) ** 2
-    omega_loss = smooth_violation(g_w, alpha=smooth_violation_alpha) ** 2
-    alpha_loss = smooth_violation(g_alpha, alpha=smooth_violation_alpha) ** 2
-
-    return (
-        weights["v"] * v_loss
-        + weights["a"] * a_loss
-        + weights["lateral"] * lateral_loss
-        + weights["omega"] * omega_loss
-        + weights["alpha"] * alpha_loss
-    )
+    return {
+        "v": weights["v"] * v_loss,
+        "a": weights["a"] * a_loss,
+        "lateral": weights["lateral"] * lateral_loss,
+        "omega": weights["omega"] * omega_loss,
+        "alpha": weights["alpha"] * alpha_loss,
+    }
 
 
 def constraint_loss_from_reference_states(
@@ -130,7 +145,6 @@ def constraint_loss_from_reference_states(
     limits: dict,
     weights: dict,
     smooth_max_beta: float = 20.0,
-    smooth_violation_alpha: float = 20.0,
 ) -> jnp.ndarray:
     v = reference_states[:, 3:5]
     omega = reference_states[:, 5]
@@ -144,5 +158,26 @@ def constraint_loss_from_reference_states(
         limits=limits,
         weights=weights,
         smooth_max_beta=smooth_max_beta,
-        smooth_violation_alpha=smooth_violation_alpha,
+    )
+
+
+def constraint_loss_components_from_reference_states(
+    reference_states: jnp.ndarray,
+    dt: float,
+    limits: dict,
+    weights: dict,
+    smooth_max_beta: float = 20.0,
+) -> dict[str, jnp.ndarray]:
+    v = reference_states[:, 3:5]
+    omega = reference_states[:, 5]
+    a = reference_states[:, 6:8]
+    alpha_ang = finite_difference(omega, dt)
+    return constraint_loss_components(
+        v=v,
+        a=a,
+        omega=omega,
+        alpha_ang=alpha_ang,
+        limits=limits,
+        weights=weights,
+        smooth_max_beta=smooth_max_beta,
     )

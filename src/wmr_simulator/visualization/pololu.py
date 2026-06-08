@@ -28,14 +28,15 @@ def plot_logged_summary(
     odom_vel = log.wheel_odometry_vel_omega()
     wheel_cmd = log.commanded_wheel_speeds()
     wheel_meas = log.measured_wheel_speeds()
-    velocity_len = min(len(time) - 1, len(measured_vel), len(odom_vel) - 1, len(reference_vel) - 1)
-    velocity_time = time[1 : velocity_len + 1]
-    measured_vel = measured_vel[:velocity_len]
-    odom_vel = odom_vel[1 : velocity_len + 1]
-    reference_vel = reference_vel[1 : velocity_len + 1]
+    velocity_time, measured_vel, odom_vel, reference_vel = _aligned_velocity_series(
+        time,
+        measured_vel,
+        odom_vel,
+        reference_vel,
+    )
 
     fig, axes = plt.subplots(2, 3, figsize=(18, 10))
-    fig.suptitle("Pololu Log Summary", fontsize=16)
+    fig.suptitle("Pololu Log Summary ({filename})".format(filename = out_prefix[7:]), fontsize=16)
 
     ax_traj = axes[0, 0]
     ax_traj.plot(
@@ -120,6 +121,13 @@ def plot_logged_summary(
             label=r"ref $\omega$",
             **marker_kwargs,
         )[0]
+    left_velocity_values = [measured_vel[:, 0], odom_vel[:, 0]]
+    right_velocity_values = [measured_vel[:, 1], odom_vel[:, 1]]
+    if show_reference_velocity:
+        left_velocity_values.append(reference_vel[:, 0])
+        right_velocity_values.append(reference_vel[:, 1])
+    _set_symmetric_ylim(ax_vel, np.concatenate(left_velocity_values))
+    _set_symmetric_ylim(ax_vel_omega, np.concatenate(right_velocity_values))
     ax_vel.set_xlabel("time [s]")
     ax_vel.set_ylabel("linear velocity [m/s]")
     ax_vel_omega.set_ylabel("angular velocity [rad/s]")
@@ -195,6 +203,90 @@ def plot_logged_summary(
     print(f"Log summary PDF saved at: {output_path}")
     return output_path
 
+
+def plot_velocity_difference(
+    log,
+    *,
+    out_prefix: str = "pololu_log",
+    out_dir: str | Path = "visualize",
+    show_markers: bool = False,
+    rejection_weights: np.ndarray | None = None,
+) -> Path:
+    plt = _plot_module()
+    marker_kwargs = _line_marker_kwargs(show_markers)
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    output_path = out_dir / f"{out_prefix}_velocity_difference.pdf"
+
+    velocity_time, measured_vel, odom_vel, _ = _aligned_velocity_series(
+        log.time_s,
+        log.actual_vel_omega(),
+        log.wheel_odometry_vel_omega(),
+        None,
+    )
+    velocity_error = measured_vel - odom_vel
+
+    fig, ax_v = plt.subplots(1, 1, figsize=(10, 4.5))
+    ax_w = ax_v.twinx()
+    _shade_rejected_intervals(ax_v, log.time_s, rejection_weights)
+    line_v = ax_v.plot(
+        velocity_time,
+        velocity_error[:, 0],
+        color="tab:blue",
+        linewidth=1.2,
+        label="mocap v - odom v",
+        **marker_kwargs,
+    )[0]
+    line_w = ax_w.plot(
+        velocity_time,
+        velocity_error[:, 1],
+        color="tab:purple",
+        linewidth=1.2,
+        label=r"mocap $\omega$ - odom $\omega$",
+        **marker_kwargs,
+    )[0]
+    _set_symmetric_ylim(ax_v, velocity_error[:, 0])
+    _set_symmetric_ylim(ax_w, velocity_error[:, 1])
+    ax_v.axhline(0.0, color="black", linewidth=0.8, alpha=0.5)
+    ax_v.set_xlabel("time [s]")
+    ax_v.set_ylabel("linear velocity difference [m/s]")
+    ax_w.set_ylabel("angular velocity difference [rad/s]")
+    ax_v.set_title("Mocap vs Odometry Velocity Difference")
+    ax_v.grid(True)
+    ax_v.legend(handles=[line_v, line_w], loc="best")
+
+    if show_markers:
+        _set_line_widths(fig, 1.0)
+
+    fig.tight_layout()
+    fig.savefig(output_path, bbox_inches="tight", transparent=False, facecolor="white")
+    plt.close(fig)
+    print(f"Velocity difference PDF saved at: {output_path}")
+    return output_path
+
+
+def _aligned_velocity_series(
+    time: np.ndarray,
+    measured_vel: np.ndarray,
+    odom_vel: np.ndarray,
+    reference_vel: np.ndarray | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None]:
+    time = np.asarray(time, dtype=float)
+    measured_vel = np.asarray(measured_vel, dtype=float)
+    odom_vel = np.asarray(odom_vel, dtype=float)
+    reference_vel = None if reference_vel is None else np.asarray(reference_vel, dtype=float)
+
+    velocity_len = min(len(time) - 1, len(measured_vel), max(len(odom_vel) - 1, 0))
+    if reference_vel is not None:
+        velocity_len = min(velocity_len, max(len(reference_vel) - 1, 0))
+    velocity_time = time[1 : velocity_len + 1]
+    measured_vel = measured_vel[:velocity_len]
+    odom_vel = odom_vel[1 : velocity_len + 1]
+    reference_vel = None if reference_vel is None else reference_vel[1 : velocity_len + 1]
+    return velocity_time, measured_vel, odom_vel, reference_vel
+
+
 def _plot_module():
     import matplotlib
 
@@ -218,3 +310,43 @@ def _set_line_widths(fig, linewidth: float) -> None:
     for ax in fig.axes:
         for line in ax.lines:
             line.set_linewidth(linewidth)
+
+
+def _set_symmetric_ylim(ax, values: np.ndarray) -> None:
+    values = np.asarray(values, dtype=float)
+    limit = np.nanmax(np.abs(values)) if values.size else 0.0
+    if not np.isfinite(limit) or limit <= 0.0:
+        limit = 1.0
+    ax.set_ylim(-1.05 * limit, 1.05 * limit)
+
+
+def _shade_rejected_intervals(ax, time: np.ndarray, weights: np.ndarray | None) -> None:
+    if weights is None:
+        return
+    time = np.asarray(time, dtype=float)
+    weights = np.asarray(weights, dtype=float)
+    rejected_indices = np.flatnonzero(weights[: len(time)] <= 0.0)
+    for index in rejected_indices:
+        if index < 0 or index >= len(time):
+            continue
+        if index > 0:
+            left = 0.5 * (time[index - 1] + time[index])
+        elif len(time) > 1:
+            left = time[index] - 0.5 * (time[index + 1] - time[index])
+        else:
+            left = time[index]
+
+        if index + 1 < len(time):
+            right = 0.5 * (time[index] + time[index + 1])
+        elif index > 0:
+            right = time[index] + 0.5 * (time[index] - time[index - 1])
+        else:
+            right = time[index]
+        ax.axvspan(
+            left,
+            right,
+            color="0.85",
+            alpha=0.7,
+            linewidth=0.0,
+            zorder=0,
+        )

@@ -29,7 +29,10 @@ class SystemIdentificationPipeline(SimulationPipeline):
         target_log: SimulationLog | None = None,
         target_time_s=None,
         target_reference_states=None,
+        target_odometry_vel_omega=None,
         replay_wheel_speed_source: str = "true",
+        max_linear_velocity_difference: float | None = None,
+        max_angular_velocity_difference: float | None = None,
     ):
         super().__init__(
             problem_path=problem_path,
@@ -42,6 +45,17 @@ class SystemIdentificationPipeline(SimulationPipeline):
         self.initial_params = initial_params
         self.deterministic_replay = bool(deterministic_replay)
         self.replay_wheel_speed_source = self._resolve_replay_wheel_speed_source(replay_wheel_speed_source)
+        self.target_odometry_vel_omega = (
+            None if target_odometry_vel_omega is None else jnp.asarray(target_odometry_vel_omega, dtype=jnp.float32)
+        )
+        self.max_linear_velocity_difference = self._resolve_optional_nonnegative(
+            max_linear_velocity_difference,
+            "max_linear_velocity_difference",
+        )
+        self.max_angular_velocity_difference = self._resolve_optional_nonnegative(
+            max_angular_velocity_difference,
+            "max_angular_velocity_difference",
+        )
         self.max_replay_dt = self.dt if max_replay_dt is None else self._resolve_max_replay_dt(max_replay_dt)
         self.uses_external_target_log = target_log is not None
         if target_log is None:
@@ -88,6 +102,15 @@ class SystemIdentificationPipeline(SimulationPipeline):
             raise ValueError("replay_wheel_speed_source must be 'true' or 'noisy'.")
         return source
 
+    @staticmethod
+    def _resolve_optional_nonnegative(value: float | None, label: str) -> float | None:
+        if value is None:
+            return None
+        value = float(value)
+        if value < 0.0:
+            raise ValueError(f"{label} must be nonnegative.")
+        return value
+
     def run_target_closed_loop(self, *args, **kwargs) -> SimulationLog:
         return self.run_closed_loop(*args, **kwargs)
 
@@ -95,6 +118,55 @@ class SystemIdentificationPipeline(SimulationPipeline):
         if self.replay_wheel_speed_source == "true":
             return target_log.robot_states.wheel_speeds
         return target_log.estimator_states.u_hat
+
+    def _target_odometry_vel_omega(self, target_log: SimulationLog):
+        if self.target_odometry_vel_omega is not None:
+            return self.target_odometry_vel_omega
+        wheel_speeds = self._target_replay_wheel_speeds(target_log)
+        linear_speed = 0.5 * self.hidden_params.wheel_radius * (wheel_speeds[:, 0] + wheel_speeds[:, 1])
+        angular_speed = (
+            self.hidden_params.wheel_radius
+            / self.hidden_params.base_diameter
+            * (wheel_speeds[:, 0] - wheel_speeds[:, 1])
+        )
+        return jnp.column_stack([linear_speed, angular_speed])
+
+    def target_loss_weights(self, target_log: SimulationLog):
+        if self.max_linear_velocity_difference is None and self.max_angular_velocity_difference is None:
+            return None
+
+        poses = target_log.robot_states.pose
+        num_target_steps = poses.shape[0]
+        if num_target_steps < 2:
+            return jnp.ones((num_target_steps,), dtype=jnp.float32)
+
+        interval_dts = self._target_interval_dts(target_log)
+        dx_dt = jnp.diff(poses[:, 0]) / interval_dts
+        dy_dt = jnp.diff(poses[:, 1]) / interval_dts
+        yaw_delta = jnp.diff(poses[:, 2])
+        yaw_delta = jnp.arctan2(jnp.sin(yaw_delta), jnp.cos(yaw_delta))
+        mocap_omega = yaw_delta / interval_dts
+        mocap_linear_speed = dx_dt * jnp.cos(poses[1:, 2]) + dy_dt * jnp.sin(poses[1:, 2])
+        mocap_vel = jnp.column_stack([mocap_linear_speed, mocap_omega])
+
+        odom_vel = self._target_odometry_vel_omega(target_log)
+        velocity_len = min(mocap_vel.shape[0], max(odom_vel.shape[0] - 1, 0))
+        mocap_vel = mocap_vel[:velocity_len]
+        odom_vel = odom_vel[1 : velocity_len + 1]
+        velocity_error = jnp.abs(jax.lax.stop_gradient(mocap_vel - odom_vel))
+
+        linear_threshold = (
+            jnp.inf if self.max_linear_velocity_difference is None else self.max_linear_velocity_difference
+        )
+        angular_threshold = (
+            jnp.inf if self.max_angular_velocity_difference is None else self.max_angular_velocity_difference
+        )
+        valid = jnp.logical_and(
+            velocity_error[:, 0] <= linear_threshold,
+            velocity_error[:, 1] <= angular_threshold,
+        ).astype(jnp.float32)
+        weights = jnp.ones((num_target_steps,), dtype=jnp.float32)
+        return weights.at[1 : velocity_len + 1].set(valid)
 
     def _target_interval_dts(self, target_log: SimulationLog, target_time_s=None):
         time_s = self.target_time_s if target_time_s is None else target_time_s
@@ -205,13 +277,12 @@ class SystemIdentificationPipeline(SimulationPipeline):
         init_u_true = target_u_true[window_start_indices]
         init_covariances = target_covariances[window_start_indices]
 
-        init_poses = init_poses.at[0].set(target_measurements[0])
-        init_wheel_speeds = init_wheel_speeds.at[0].set(target_wheel_speeds[0])
         init_u_hat = init_u_hat.at[0].set(target_u_hat[0])
         init_u_true = init_u_true.at[0].set(target_u_true[0])
         init_covariances = init_covariances.at[0].set(
             jnp.asarray(self.initial_estimator_covariance, dtype=jnp.float32)
         )
+        wheel_speed_windows = wheel_speed_windows.at[:, 0, :].set(init_wheel_speeds)
 
         window_robot_keys = jax.random.split(robot_key, num_windows)
         window_estimator_keys = jax.random.split(estimator_key, num_windows)
@@ -442,7 +513,10 @@ def run_single_experiment_identification(
     target_log: SimulationLog | None = None,
     target_time_s=None,
     target_reference_states=None,
+    target_odometry_vel_omega=None,
     replay_wheel_speed_source: str = "true",
+    max_linear_velocity_difference: float | None = None,
+    max_angular_velocity_difference: float | None = None,
 ):
     pipeline = SystemIdentificationPipeline(
         problem_path=problem_path,
@@ -455,7 +529,10 @@ def run_single_experiment_identification(
         target_log=target_log,
         target_time_s=target_time_s,
         target_reference_states=target_reference_states,
+        target_odometry_vel_omega=target_odometry_vel_omega,
         replay_wheel_speed_source=replay_wheel_speed_source,
+        max_linear_velocity_difference=max_linear_velocity_difference,
+        max_angular_velocity_difference=max_angular_velocity_difference,
     )
     init_target_log = pipeline.target_log
     init_replay_log = pipeline.replay_rollout(

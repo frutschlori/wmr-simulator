@@ -39,7 +39,7 @@ def __getattr__(name):
         "load_latest_reference_trajectory",
         "load_reference_trajectory",
     }:
-        from wmr_simulator.pololu import reference_formatter
+        from wmr_simulator.pololu import reference_exporter
 
         return getattr(reference_formatter, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -14,6 +14,7 @@ from wmr_simulator.robot import DiffDrive, DiffDriveState
 from wmr_simulator.trajectory_optimization.bezier import BezierTrajectoryGenerator
 from wmr_simulator.trajectory_optimization.constraints import (
     clamp_control_points,
+    constraint_loss_components_from_reference_states,
     constraint_loss_from_reference_states,
     constraint_weights,
     control_points_from_decision_variables,
@@ -462,8 +463,6 @@ class TrajectoryOptimizationPipeline:
         measurements = measurement_windows.reshape(-1, 3)[:num_intervals]
         actual_poses = jnp.concatenate([closed_loop_log.measurements[:1], actual_poses], axis=0)
         measurements = jnp.concatenate([closed_loop_log.measurements[:1], measurements], axis=0)
-        actual_poses = actual_poses.at[window_start_indices].set(closed_loop_log.measurements[window_start_indices])
-        measurements = measurements.at[window_start_indices].set(closed_loop_log.measurements[window_start_indices])
         return actual_poses, measurements
 
     def replay_measurement_sequence(
@@ -474,9 +473,9 @@ class TrajectoryOptimizationPipeline:
     ) -> jnp.ndarray:
         """
         Replays commands logged from closed-loop experiment on open-loop robot and records estimates
-        over window_length long sequences. Every window start pose is set to the measurement from the closed-loop
-        experiment (similar to the SI problem definition), thus the state sensitivity recursion length is limited to
-        the window_length (-> smaller windows will yield smaller FIM)
+        over window_length long sequences. Every window is initialized from the closed-loop estimate at its start,
+        but the replay log stores the integrated window endpoints. Thus the state sensitivity recursion length is
+        limited to the window_length (-> smaller windows will yield smaller FIM).
         """
         _, scanned_measurements = self.replay_rollout(
             params,
@@ -544,7 +543,6 @@ class TrajectoryOptimizationPipeline:
         constraint_weight: float = 1.0,
         constraint_component_weights: dict | None = None,
         constraint_smooth_max_beta: float = 20.0,
-        constraint_smooth_violation_alpha: float = 20.0,
     ) -> jnp.ndarray:
         control_points = self.clamp_control_points(control_points)
         reference_states = self.bezier_reference_sequence(control_points)
@@ -564,7 +562,6 @@ class TrajectoryOptimizationPipeline:
                 component_weights=constraint_component_weights,
             ),
             smooth_max_beta=constraint_smooth_max_beta,
-            smooth_violation_alpha=constraint_smooth_violation_alpha,
         )
 
     def objective_terms_from_control_points(
@@ -575,7 +572,6 @@ class TrajectoryOptimizationPipeline:
         constraint_weight: float = 1.0,
         constraint_component_weights: dict | None = None,
         constraint_smooth_max_beta: float = 20.0,
-        constraint_smooth_violation_alpha: float = 20.0,
     ) -> dict[str, jnp.ndarray]:
         control_points = self.clamp_control_points(control_points)
         reference_states = self.bezier_reference_sequence(control_points)
@@ -595,7 +591,6 @@ class TrajectoryOptimizationPipeline:
                 component_weights=constraint_component_weights,
             ),
             smooth_max_beta=constraint_smooth_max_beta,
-            smooth_violation_alpha=constraint_smooth_violation_alpha,
         )
         total = fim_term + constraint_term
         return {
@@ -604,6 +599,26 @@ class TrajectoryOptimizationPipeline:
             "total": total,
             "constraint_share": constraint_term / jnp.maximum(total, 1e-12),
         }
+
+    def constraint_components_from_control_points(
+        self,
+        control_points: jnp.ndarray,
+        constraint_weight: float = 1.0,
+        constraint_component_weights: dict | None = None,
+        constraint_smooth_max_beta: float = 20.0,
+    ) -> dict[str, jnp.ndarray]:
+        control_points = self.clamp_control_points(control_points)
+        reference_states = self.bezier_reference_sequence(control_points)
+        return constraint_loss_components_from_reference_states(
+            reference_states=reference_states,
+            dt=self.problem.dt,
+            limits=self.motion_limits(),
+            weights=self.constraint_weights(
+                scale=constraint_weight,
+                component_weights=constraint_component_weights,
+            ),
+            smooth_max_beta=constraint_smooth_max_beta,
+        )
 
     def optimize_bezier_trajectory(
         self,
@@ -617,7 +632,6 @@ class TrajectoryOptimizationPipeline:
         constraint_weight: float = 1.0,
         constraint_component_weights: dict | None = None,
         constraint_smooth_max_beta: float = 20.0,
-        constraint_smooth_violation_alpha: float = 20.0,
     ):
         return optimize_bezier_control_points(
             pipeline=self,
@@ -631,7 +645,6 @@ class TrajectoryOptimizationPipeline:
             constraint_weight=constraint_weight,
             constraint_component_weights=constraint_component_weights,
             constraint_smooth_max_beta=constraint_smooth_max_beta,
-            constraint_smooth_violation_alpha=constraint_smooth_violation_alpha,
         )
 
     def plot_trajectory(self, window_length=None, out_prefix="trajectory_plot", out_path=None):

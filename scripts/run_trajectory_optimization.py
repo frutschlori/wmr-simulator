@@ -6,25 +6,28 @@ def main():
     parser = argparse.ArgumentParser(description="Initialize trajectory optimization inputs.")
     parser.add_argument("--problem", default="problems/pololu.yaml")
     parser.add_argument("--jax-platform", choices=["default", "cpu"], default="cpu")
-    parser.add_argument("--window-length", type=int, default=10)
-    parser.add_argument("--replay-wheel-speeds", choices=["true", "noisy"], default="true")
-    parser.add_argument("--trajectory-generator", choices=["planner", "bezier"], default="bezier")
+    # Optimization Settings
+    parser.add_argument("--save-trajectory", action="store_true", default=False)
+    parser.add_argument("--window-length", type=int, default=1)
+    parser.add_argument("--opt-steps", type=int, default=10000)
+    parser.add_argument("--learning-rate", type=float, default=1e-3)
+    # Path settings
     parser.add_argument("--time-scaling", choices=["s-curve", "linear"], default="s-curve")
+    parser.add_argument("--trajectory-generator", choices=["planner", "bezier"], default="bezier")
     parser.add_argument("--bezier-order", type=int, default=20)
-    parser.add_argument("--opt-steps", type=int, default=5000)
-    parser.add_argument("--learning-rate", type=float, default=1e-2)
+    parser.add_argument("--replay-wheel-speeds", choices=["true", "noisy"], default="true")
+    # Constraints
     parser.add_argument("--constraint-weight", type=float, default=1.0)
     parser.add_argument("--constraint-v-weight", type=float, default=1.0)
     parser.add_argument("--constraint-a-weight", type=float, default=1.0)
     parser.add_argument("--constraint-lateral-weight", type=float, default=1.0)
     parser.add_argument("--constraint-omega-weight", type=float, default=1.0)
     parser.add_argument("--constraint-alpha-weight", type=float, default=1.0)
-    parser.add_argument("--constraint-smooth-max-beta", type=float, default=20.0)
-    parser.add_argument("--constraint-smooth-violation-alpha", type=float, default=20.0)
+    parser.add_argument("--constraint-smooth-max-beta", type=float, default=20.0) # barrier constant
+    # Visualization
     parser.add_argument("--save-opt-GIF", action="store_true", default=False)
     parser.add_argument("--export-opt-reference-states", action="store_true", default=False)
     parser.add_argument("--opt-trace-stride", type=int, default=500)
-    parser.add_argument("--save-trajectory", action="store_true", default=True)
     args = parser.parse_args()
 
     if args.jax_platform == "cpu":
@@ -83,7 +86,6 @@ def main():
             constraint_weight=args.constraint_weight,
             constraint_component_weights=constraint_component_weights,
             constraint_smooth_max_beta=args.constraint_smooth_max_beta,
-            constraint_smooth_violation_alpha=args.constraint_smooth_violation_alpha,
         )
         objective_terms = pipeline.objective_terms_from_control_points(
             optimized_control_points,
@@ -91,13 +93,21 @@ def main():
             constraint_weight=args.constraint_weight,
             constraint_component_weights=constraint_component_weights,
             constraint_smooth_max_beta=args.constraint_smooth_max_beta,
-            constraint_smooth_violation_alpha=args.constraint_smooth_violation_alpha,
+        )
+        constraint_components = pipeline.constraint_components_from_control_points(
+            optimized_control_points,
+            constraint_weight=args.constraint_weight,
+            constraint_component_weights=constraint_component_weights,
+            constraint_smooth_max_beta=args.constraint_smooth_max_beta,
         )
         print("Final optimization loss:")
         print(loss_history[-1])
         print("Final objective terms:")
         print(f"  FIM:         {float(objective_terms['fim']):.8e}")
         print(f"  Constraints: {float(objective_terms['constraints']):.8e}")
+        print("  Constraint components:")
+        for name in ("v", "a", "lateral", "omega", "alpha"):
+            print(f"    {name:<7}: {float(constraint_components[name]):.8e}")
         print(f"  Total:       {float(objective_terms['total']):.8e}")
         print(f"  Constraint share: {100.0 * float(objective_terms['constraint_share']):.2f}%")
         print("Optimized FIM:")

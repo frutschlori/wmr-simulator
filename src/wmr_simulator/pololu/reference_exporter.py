@@ -146,7 +146,7 @@ def _round_nested(values: np.ndarray, decimals: int):
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Format the latest synthesized trajectory pickle as a Pololu reference JSON."
+        description="Format the latest synthesized trajectory pickle as a Pololu reference JSN."
     )
     parser.add_argument("--input_dir", type=str, default="trajectory_exports")
     parser.add_argument("--output_dir", type=str, default="Pololu Data/References")

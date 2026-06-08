@@ -94,12 +94,12 @@ def _plot_trajectory_axes(
         label="Closed-Loop Estimate",
     )
     for window_idx, start_idx in enumerate(window_start_indices):
-        end_idx = min(start_idx + resolved_window_length, len(replay_actual))
+        end_idx = min(start_idx + resolved_window_length, num_replay_intervals)
         if end_idx <= start_idx:
             continue
         label = "Windowed Replay Actual" if window_idx == 0 else None
-        window_actual = replay_actual[start_idx:end_idx].copy()
-        window_actual[0] = closed_loop_estimates[start_idx]
+        window_start = closed_loop_estimates[start_idx : start_idx + 1]
+        window_actual = np.concatenate([window_start, replay_actual[start_idx + 1 : end_idx + 1]], axis=0)
         ax.plot(
             window_actual[:, 0],
             window_actual[:, 1],

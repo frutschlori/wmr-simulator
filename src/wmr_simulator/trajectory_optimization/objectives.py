@@ -16,7 +16,6 @@ def trajectory_objective(
     limits: dict,
     weights: dict,
     smooth_max_beta: float = 20.0,
-    smooth_violation_alpha: float = 20.0,
 ) -> jnp.ndarray:
     return fim_loss(fim) + constraint_loss_from_reference_states(
         reference_states=reference_states,
@@ -24,5 +23,4 @@ def trajectory_objective(
         limits=limits,
         weights=weights,
         smooth_max_beta=smooth_max_beta,
-        smooth_violation_alpha=smooth_violation_alpha,
     )

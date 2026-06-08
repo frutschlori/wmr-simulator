@@ -23,7 +23,6 @@ def main():
     parser.add_argument("--constraint-omega-weight", type=float, default=1.0)
     parser.add_argument("--constraint-alpha-weight", type=float, default=1.0)
     parser.add_argument("--constraint-smooth-max-beta", type=float, default=20.0)
-    parser.add_argument("--constraint-smooth-violation-alpha", type=float, default=20.0)
     parser.add_argument("--output", type=str, default="traj_opt")
     parser.add_argument("--frame-duration", type=float, default=0.2)
     parser.add_argument("--frames-root", type=str, default="visualize/Trajectory Optimization Frames")
@@ -65,7 +64,6 @@ def main():
             "alpha": args.constraint_alpha_weight,
         },
         constraint_smooth_max_beta=args.constraint_smooth_max_beta,
-        constraint_smooth_violation_alpha=args.constraint_smooth_violation_alpha,
         out_prefix=args.output,
         frame_duration=args.frame_duration,
         frames_root=args.frames_root,
