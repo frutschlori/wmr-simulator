@@ -46,8 +46,7 @@ def optimize_physical_params_adam(
             )
         )(params)
         updates, next_opt_state = optimizer.update(grads, opt_state, params)
-        next_params = optax.apply_updates(params, updates)
-        next_params = clip_physical_params(next_params)
+        next_params = clip_physical_params(optax.apply_updates(params, updates))
         parameter_mse = physical_params_mse(next_params, pipeline.hidden_params)
         return (next_params, next_opt_state), (loss_value, parameter_mse)
 

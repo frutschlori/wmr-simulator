@@ -154,9 +154,9 @@ State evolution:
 
 $$
 \begin{aligned}
-x_{k+1} &= x_k + v\cos\theta_k \,\Delta t \\
-y_{k+1} &= y_k + v\sin\theta_k \,\Delta t \\
-\theta_{k+1} &= \theta_k + \omega \,\Delta t
+x_{k+1} &= x_k + v\cos\theta_k  \Delta t \\
+y_{k+1} &= y_k + v\sin\theta_k  \Delta t \\
+\theta_{k+1} &= \theta_k + \omega  \Delta t
 \end{aligned}
 $$
 
@@ -214,10 +214,10 @@ $$
 and updates:
 
 $$
-u_r^{eff}[k+1] = \alpha\,u_r^{eff}[k] + (1-\alpha)\,u_r^{cmd}[k],
+u_r^{eff}[k+1] = \alpha u_r^{eff}[k] + (1-\alpha) u_r^{cmd}[k],
 $$
 $$
-u_l^{eff}[k+1] = \alpha\,u_l^{eff}[k] + (1-\alpha)\,u_l^{cmd}[k].
+u_l^{eff}[k+1] = \alpha u_l^{eff}[k] + (1-\alpha) u_l^{cmd}[k].
 $$
 
 If $\tau < 10^{-3}$ (as a special case), the code sets
@@ -351,7 +351,7 @@ $$
 Angular velocity:
 
 $$
-\omega_d = \kappa(u)\, v_d
+\omega_d = \kappa(u)  v_d
 $$
 
 ---
@@ -497,8 +497,8 @@ State prediction:
 
 $$
 \begin{aligned}
-\hat{x}_{k+1}^- &= \hat{x}_k + v_{hat}\cos\hat{\theta}_k\,\Delta t \\
-\hat{y}_{k+1}^- &= \hat{y}_k + v_{hat}\sin\hat{\theta}_k\,\Delta t \\
+\hat{x}_{k+1}^- &= \hat{x}_k + v_{hat}\cos\hat{\theta}_k \Delta t \\
+\hat{y}_{k+1}^- &= \hat{y}_k + v_{hat}\sin\hat{\theta}_k \Delta t \\
 \hat{\theta}_{k+1}^- &= \hat{\theta}_k + \omega_{hat}\Delta t
 \end{aligned}
 $$

@@ -12,6 +12,7 @@ from wmr_simulator.types import (
 from wmr_simulator.visualization.identification import (
     plot_loss_history,
     plot_system_id,
+    plot_velocity_difference,
 )
 
 
@@ -30,22 +31,24 @@ def main():
     # Problem configuration (contains hidden robot parameters, noise, optionally reference traj)
     parser.add_argument("--problem", type=str, default="problems/pololu.yaml")
     # Optimization hyper-parameters
-    parser.add_argument("--window-length", type=int, default=10)
-    parser.add_argument("--steps", type=int, default=500)
-    parser.add_argument("--learning-rate", type=float, default=1e-3) # Good for simulated id
+    parser.add_argument("--window-length", type=int, default=5)
+    parser.add_argument("--steps", type=int, default=5000)
+    parser.add_argument("--learning-rate", type=float, default=1e-5)
+    parser.add_argument("--max-linear-velocity-difference", type=float, default=0.1)
+    parser.add_argument("--max-angular-velocity-difference", type=float, default=1)
     # Initial guess robot parameters
     parser.add_argument("--init-wheel-radius", type=float, default=0.02)
     parser.add_argument("--init-base-diameter", type=float, default=0.1)
     # Noise settings
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--stochastic-replay", action="store_true", default=False)
-    parser.add_argument("--num-realizations", type=int, default=8)
+    parser.add_argument("--seed", type=int, default=2)
+    parser.add_argument("--stochastic-replay", action="store_true")
+    parser.add_argument("--num-realizations", type=int, default=1)
     parser.add_argument("--replay-wheel-speeds", choices=("true", "noisy"), default="noisy")
     # Optionally load target trajectory from disk
     parser.add_argument("--reference-trajectories-dir", type=str, default="trajectory_exports")
     # parser.add_argument("--reference-trajectories-dir", type=str, default=None)
     parser.add_argument("--bootstrap-samples", type=int, default=10000)
-    parser.add_argument("--show-markers", action="store_true", help="Show tiny markers on identification plot lines.")
+    parser.add_argument("--show-markers", action="store_true")
 
     args = parser.parse_args()
 
@@ -66,6 +69,8 @@ def main():
         bootstrap_samples=args.bootstrap_samples,
         deterministic_replay=not args.stochastic_replay,
         replay_wheel_speed_source=args.replay_wheel_speeds,
+        max_linear_velocity_difference=args.max_linear_velocity_difference,
+        max_angular_velocity_difference=args.max_angular_velocity_difference,
     )
     pipeline = result["pipeline"]
     print_param_block("Initial guess:", init_params)
@@ -103,6 +108,14 @@ def main():
         init_target_log=result["init_target_log"],
         init_log=result["init_replay_log"],
         predicted_log=result["final_replay_log"],
+        show_markers=args.show_markers,
+        out_prefix="identification_sim",
+    )
+    plot_velocity_difference(
+        pipeline=pipeline,
+        target_log=result["init_target_log"],
+        out_prefix="identification_sim",
+        wheel_speed_source=args.replay_wheel_speeds,
         show_markers=args.show_markers,
     )
     plot_loss_history(

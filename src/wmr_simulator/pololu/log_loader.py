@@ -192,13 +192,13 @@ def _finite_difference(values: np.ndarray, time_s: np.ndarray) -> np.ndarray:
 
 
 if __name__ == "__main__":
-    from wmr_simulator.visualization.pololu import plot_logged_summary
+    from wmr_simulator.visualization.pololu import plot_logged_summary, plot_velocity_difference
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--log", type=str, default="Pololu Data/Logs/20cp_constrained_scurve/TR12")
+    parser.add_argument("--log", type=str, default="Pololu Data/Logs/20cp_constrained_scurve/TR02")
     parser.add_argument("--output", type=str, default=None)
     parser.add_argument("--out-dir", type=str, default="visualize")
-    parser.add_argument("--hide-reference-velocity", action="store_true")
+    parser.add_argument("--hide-reference-velocity", action="store_true", default=True)
     parser.add_argument("--show-markers", action="store_true")
     args = parser.parse_args()
 
@@ -217,5 +217,11 @@ if __name__ == "__main__":
         out_prefix=out_prefix,
         out_dir=args.out_dir,
         show_reference_velocity=not args.hide_reference_velocity,
+        show_markers=args.show_markers,
+    )
+    plot_velocity_difference(
+        log,
+        out_prefix=out_prefix,
+        out_dir=args.out_dir,
         show_markers=args.show_markers,
     )
