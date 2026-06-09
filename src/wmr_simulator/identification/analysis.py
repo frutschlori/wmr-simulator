@@ -96,6 +96,8 @@ def build_physical_parameter_surface(
         params = PhysicalParams(
             wheel_radius=wheel_radius,
             base_diameter=base_diameter,
+            max_wheel_speed=pipeline.initial_params.max_wheel_speed,
+            time_constant=pipeline.initial_params.time_constant,
         )
         return pipeline.loss(params, robot_keys, estimator_keys)
 

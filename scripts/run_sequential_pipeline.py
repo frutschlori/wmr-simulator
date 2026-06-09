@@ -30,11 +30,15 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--init-wheel-radius", type=float, default=0.02)
     parser.add_argument("--init-base-diameter", type=float, default=0.2)
+    parser.add_argument("--init-max-wheel-speed", type=float, default=150.0)
+    parser.add_argument("--init-time-constant", type=float, default=0.1)
     args = parser.parse_args()
 
     init_params = PhysicalParams(
         wheel_radius=jnp.asarray(args.init_wheel_radius),
         base_diameter=jnp.asarray(args.init_base_diameter),
+        max_wheel_speed=jnp.asarray(args.init_max_wheel_speed),
+        time_constant=jnp.asarray(args.init_time_constant),
     )
     result = run_si_then_gain_tuning(
         problem_path=args.problem,
@@ -58,7 +62,7 @@ def main():
     print_physical_params("Initial robot parameters guess:", init_params)
     print_physical_params("Estimated robot parameters:", id_result["estimated_params"])
     print(f"Final system ID loss: {id_result['loss_history'][-1]:.8f}")
-    print(f"Final parameter RMSE: {np.sqrt(id_result['parameter_mse_history'][-1]):.2f} mm")
+    print(f"Final mixed-unit parameter RMSE: {np.sqrt(id_result['parameter_mse_history'][-1]):.4f}")
     print_controller_gains("Initial gains:", gain_pipeline.gains)
     print_controller_gains("Optimized gains:", gain_result["optimized_gains"])
     print(f"Final gain tuning loss: {gain_result['loss_history'][-1]:.8f}")

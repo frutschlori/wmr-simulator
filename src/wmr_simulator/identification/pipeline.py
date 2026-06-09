@@ -131,6 +131,48 @@ class SystemIdentificationPipeline(SimulationPipeline):
         )
         return jnp.column_stack([linear_speed, angular_speed])
 
+    def motor_wheel_speed_rollout(self, params: PhysicalParams, target_log: SimulationLog, target_time_s=None):
+        target_wheel_speeds = self._target_replay_wheel_speeds(target_log)
+        duty_cycles = target_log.robot_states.duty_cycle
+        if target_wheel_speeds.shape[0] < 2:
+            return target_wheel_speeds
+
+        interval_dts = self._target_interval_dts(target_log, target_time_s)
+        interval_duty_cycles = duty_cycles[1:]
+
+        def motor_step(wheel_speeds, inputs):
+            duty_cycle, interval_dt = inputs
+            safe_tau = jnp.maximum(params.time_constant, 1e-3)
+            alpha = jnp.where(params.time_constant >= 1e-3, jnp.exp(-interval_dt / safe_tau), 0.0)
+            duty_cycle = jnp.clip(duty_cycle, -1.0, 1.0)
+            next_wheel_speeds = alpha * wheel_speeds + (1.0 - alpha) * params.max_wheel_speed * duty_cycle
+            return next_wheel_speeds, next_wheel_speeds
+
+        initial_wheel_speeds = target_wheel_speeds[0]
+        _, predicted_intervals = jax.lax.scan(
+            motor_step,
+            initial_wheel_speeds,
+            (interval_duty_cycles, interval_dts),
+        )
+        return jnp.concatenate([initial_wheel_speeds[None, :], predicted_intervals], axis=0)
+
+    def motor_wheel_speed_mse(self, params: PhysicalParams, target_log: SimulationLog):
+        target_wheel_speeds = self._target_replay_wheel_speeds(target_log)
+        predicted_wheel_speeds = self.motor_wheel_speed_rollout(params, target_log)
+        error = predicted_wheel_speeds[1:] - target_wheel_speeds[1:]
+        squared_error = jnp.sum(error**2, axis=1)
+        target_power_samples = jnp.sum(target_wheel_speeds[1:] ** 2, axis=1)
+        loss_weights = self.target_loss_weights(target_log)
+        if loss_weights is None:
+            target_power = jnp.mean(target_power_samples)
+            return jnp.mean(squared_error) / jnp.maximum(target_power, 1.0)
+
+        interval_weights = jnp.asarray(loss_weights[1:], dtype=squared_error.dtype)
+        weight_sum = jnp.maximum(jnp.sum(interval_weights), 1.0)
+        weighted_error = jnp.sum(interval_weights * squared_error) / weight_sum
+        weighted_target_power = jnp.sum(interval_weights * target_power_samples) / weight_sum
+        return weighted_error / jnp.maximum(weighted_target_power, 1.0)
+
     def target_loss_weights(self, target_log: SimulationLog):
         if self.max_linear_velocity_difference is None and self.max_angular_velocity_difference is None:
             return None
@@ -206,7 +248,8 @@ class SystemIdentificationPipeline(SimulationPipeline):
             wheel_speeds=jnp.asarray(init_wheel_speeds, dtype=jnp.float32),
             key=robot_key,
             vel_omega=jnp.zeros(2, dtype=jnp.float32),
-            wheel_cmd=jnp.zeros(2, dtype=jnp.float32),
+            duty_cycle=jnp.zeros(2, dtype=jnp.float32),
+            wheel_speed_cmd=jnp.zeros(2, dtype=jnp.float32),
         )
         estimator_state = EstimatorState(
             pose_hat=jnp.asarray(init_pose, dtype=jnp.float32),
@@ -243,7 +286,8 @@ class SystemIdentificationPipeline(SimulationPipeline):
 
         target_wheel_speeds = self._target_replay_wheel_speeds(target_log)
         replay_wheel_speeds = target_wheel_speeds[1:]
-        logged_wheel_cmds = target_log.robot_states.wheel_cmd[1:]
+        logged_duty_cycles = target_log.robot_states.duty_cycle[1:]
+        logged_wheel_speed_cmds = target_log.robot_states.wheel_speed_cmd[1:]
         interval_dts = self._target_interval_dts(target_log, target_time_s)
         target_measurements = self._extract_estimated_pose_series(target_log)
         target_u_hat = target_log.estimator_states.u_hat
@@ -262,10 +306,12 @@ class SystemIdentificationPipeline(SimulationPipeline):
         pad_steps = padded_num_intervals - num_intervals
 
         padded_wheel_speeds = jnp.pad(replay_wheel_speeds, ((0, pad_steps), (0, 0)))
-        padded_wheel_cmds = jnp.pad(logged_wheel_cmds, ((0, pad_steps), (0, 0)))
+        padded_duty_cycles = jnp.pad(logged_duty_cycles, ((0, pad_steps), (0, 0)))
+        padded_wheel_speed_cmds = jnp.pad(logged_wheel_speed_cmds, ((0, pad_steps), (0, 0)))
         padded_interval_dts = jnp.pad(interval_dts, (0, pad_steps))
         wheel_speed_windows = padded_wheel_speeds.reshape(num_windows, window_length, 2)
-        wheel_cmd_windows = padded_wheel_cmds.reshape(num_windows, window_length, 2)
+        duty_cycle_windows = padded_duty_cycles.reshape(num_windows, window_length, 2)
+        wheel_speed_cmd_windows = padded_wheel_speed_cmds.reshape(num_windows, window_length, 2)
         interval_dt_windows = padded_interval_dts.reshape(num_windows, window_length)
 
         window_start_indices_np = np.arange(num_windows, dtype=np.int32) * window_length
@@ -282,13 +328,11 @@ class SystemIdentificationPipeline(SimulationPipeline):
         init_covariances = init_covariances.at[0].set(
             jnp.asarray(self.initial_estimator_covariance, dtype=jnp.float32)
         )
-        wheel_speed_windows = wheel_speed_windows.at[:, 0, :].set(init_wheel_speeds)
-
         window_robot_keys = jax.random.split(robot_key, num_windows)
         window_estimator_keys = jax.random.split(estimator_key, num_windows)
 
         def robot_replay_step(robot_state, inputs):
-            wheel_speeds, wheel_cmd, interval_dt = inputs
+            wheel_speeds, duty_cycle, wheel_speed_cmd, interval_dt = inputs
             substeps = jnp.ceil(interval_dt / self.max_replay_dt - 1e-4).astype(jnp.int32)
             safe_substeps = jnp.maximum(1, substeps)
             substep_dt = interval_dt / safe_substeps.astype(interval_dt.dtype)
@@ -301,7 +345,8 @@ class SystemIdentificationPipeline(SimulationPipeline):
                         wheel_radius=robot_params.wheel_radius,
                         base_diameter=robot_params.base_diameter,
                         dt=substep_dt,
-                        wheel_cmd=wheel_cmd,
+                        duty_cycle=duty_cycle,
+                        wheel_speed_cmd=wheel_speed_cmd,
                     )
 
                 state = jax.lax.cond(step_index < substeps, active_step, lambda _: state, operand=None)
@@ -315,7 +360,7 @@ class SystemIdentificationPipeline(SimulationPipeline):
             return next_robot_state, next_robot_state
 
         def estimator_replay_step(carry, inputs):
-            wheel_speeds, wheel_cmd, interval_dt = inputs
+            wheel_speeds, duty_cycle, wheel_speed_cmd, interval_dt = inputs
             substeps = jnp.ceil(interval_dt / self.max_replay_dt - 1e-4).astype(jnp.int32)
             safe_substeps = jnp.maximum(1, substeps)
             substep_dt = interval_dt / safe_substeps.astype(interval_dt.dtype)
@@ -330,7 +375,8 @@ class SystemIdentificationPipeline(SimulationPipeline):
                         wheel_radius=robot_params.wheel_radius,
                         base_diameter=robot_params.base_diameter,
                         dt=substep_dt,
-                        wheel_cmd=wheel_cmd,
+                        duty_cycle=duty_cycle,
+                        wheel_speed_cmd=wheel_speed_cmd,
                     )
                     ur_true, ul_true = wheel_speeds
                     next_est_state = self.estimator.update(
@@ -363,7 +409,8 @@ class SystemIdentificationPipeline(SimulationPipeline):
             window_robot_key,
             window_estimator_key,
             wheel_speed_window,
-            wheel_cmd_window,
+            duty_cycle_window,
+            wheel_speed_cmd_window,
             interval_dt_window,
         ):
             carry0 = self._initial_replay_states(
@@ -380,7 +427,7 @@ class SystemIdentificationPipeline(SimulationPipeline):
                 _, robot_state_window = jax.lax.scan(
                     robot_replay_step,
                     robot_state0,
-                    (wheel_speed_window, wheel_cmd_window, interval_dt_window),
+                    (wheel_speed_window, duty_cycle_window, wheel_speed_cmd_window, interval_dt_window),
                 )
                 estimator_state_window = EstimatorState(
                     pose_hat=robot_state_window.pose,
@@ -395,7 +442,7 @@ class SystemIdentificationPipeline(SimulationPipeline):
             _, outputs = jax.lax.scan(
                 estimator_replay_step,
                 carry0,
-                (wheel_speed_window, wheel_cmd_window, interval_dt_window),
+                (wheel_speed_window, duty_cycle_window, wheel_speed_cmd_window, interval_dt_window),
             )
             return outputs
 
@@ -408,7 +455,8 @@ class SystemIdentificationPipeline(SimulationPipeline):
             window_robot_keys,
             window_estimator_keys,
             wheel_speed_windows,
-            wheel_cmd_windows,
+            duty_cycle_windows,
+            wheel_speed_cmd_windows,
             interval_dt_windows,
         )
 
@@ -417,7 +465,8 @@ class SystemIdentificationPipeline(SimulationPipeline):
             wheel_speeds=robot_state_windows.wheel_speeds.reshape(-1, 2)[:num_intervals],
             key=robot_state_windows.key.reshape(-1, 2)[:num_intervals],
             vel_omega=robot_state_windows.vel_omega.reshape(-1, 2)[:num_intervals],
-            wheel_cmd=robot_state_windows.wheel_cmd.reshape(-1, 2)[:num_intervals],
+            duty_cycle=robot_state_windows.duty_cycle.reshape(-1, 2)[:num_intervals],
+            wheel_speed_cmd=robot_state_windows.wheel_speed_cmd.reshape(-1, 2)[:num_intervals],
         )
         interval_estimator_states = EstimatorState(
             pose_hat=estimator_state_windows.pose_hat.reshape(-1, 3)[:num_intervals],
@@ -445,7 +494,8 @@ class SystemIdentificationPipeline(SimulationPipeline):
             ),
             key=jnp.concatenate([initial_robot_state.key[None, :], interval_robot_states.key], axis=0),
             vel_omega=jnp.concatenate([initial_robot_state.vel_omega[None, :], interval_robot_states.vel_omega], axis=0),
-            wheel_cmd=jnp.concatenate([target_log.robot_states.wheel_cmd[:1], interval_robot_states.wheel_cmd], axis=0),
+            duty_cycle=jnp.concatenate([target_log.robot_states.duty_cycle[:1], interval_robot_states.duty_cycle], axis=0),
+            wheel_speed_cmd=jnp.concatenate([target_log.robot_states.wheel_speed_cmd[:1], interval_robot_states.wheel_speed_cmd], axis=0),
         )
         estimator_states = EstimatorState(
             pose_hat=jnp.concatenate([initial_estimator_state.pose_hat[None, :], interval_estimator_states.pose_hat], axis=0),
@@ -468,12 +518,20 @@ class SystemIdentificationPipeline(SimulationPipeline):
             window_length=self.window_length,
         )
 
-    def optimize(self, init_params: PhysicalParams, num_steps: int, learning_rate: float, num_realizations: int):
+    def optimize(
+        self,
+        init_params: PhysicalParams,
+        num_steps: int,
+        learning_rate: float,
+        motor_learning_rate: float,
+        num_realizations: int,
+    ):
         return optimize_physical_params_adam(
             pipeline=self,
             init_params=init_params,
             num_steps=num_steps,
             learning_rate=learning_rate,
+            motor_learning_rate=motor_learning_rate,
             num_realizations=num_realizations,
         )
 
@@ -482,6 +540,7 @@ class SystemIdentificationPipeline(SimulationPipeline):
         init_params: PhysicalParams,
         num_steps: int,
         learning_rate: float,
+        motor_learning_rate: float,
         num_realizations: int,
         bootstrap_samples: int,
         seed: int = 0,
@@ -491,6 +550,7 @@ class SystemIdentificationPipeline(SimulationPipeline):
             init_params=init_params,
             num_steps=num_steps,
             learning_rate=learning_rate,
+            motor_learning_rate=motor_learning_rate,
             num_realizations=num_realizations,
             bootstrap_samples=bootstrap_samples,
             seed=seed,
@@ -503,6 +563,7 @@ def run_single_experiment_identification(
     num_steps: int,
     learning_rate: float,
     num_realizations: int,
+    motor_learning_rate: float | None = None,
     seed: int = 0,
     reference_trajectories_dir: str | None = None,
     window_length: int | None = None,
@@ -518,6 +579,8 @@ def run_single_experiment_identification(
     max_linear_velocity_difference: float | None = None,
     max_angular_velocity_difference: float | None = None,
 ):
+    if motor_learning_rate is None:
+        motor_learning_rate = learning_rate
     pipeline = SystemIdentificationPipeline(
         problem_path=problem_path,
         initial_params=initial_params,
@@ -545,10 +608,11 @@ def run_single_experiment_identification(
     if pipeline.uses_external_target_log and bootstrap_samples > 1:
         raise NotImplementedError("Bootstrap identification is not implemented for externally loaded target logs.")
     if bootstrap_samples <= 1:
-        estimated_params, loss_history, parameter_mse_history = pipeline.optimize(
+        estimated_params, loss_history, motor_loss_history, parameter_mse_history = pipeline.optimize(
             init_params=initial_params,
             num_steps=num_steps,
             learning_rate=learning_rate,
+            motor_learning_rate=motor_learning_rate,
             num_realizations=num_realizations,
         )
     else:
@@ -556,12 +620,17 @@ def run_single_experiment_identification(
             init_params=initial_params,
             num_steps=num_steps,
             learning_rate=learning_rate,
+            motor_learning_rate=motor_learning_rate,
             num_realizations=num_realizations,
             bootstrap_samples=bootstrap_samples,
             seed=seed if bootstrap_seed is None else bootstrap_seed,
         )
         estimated_params = physical_params_from_array(bootstrap_result["parameter_mean"])
         loss_history = np.asarray(jnp.mean(bootstrap_result["loss_history"], axis=0), dtype=float).tolist()
+        motor_loss_history = np.asarray(
+            jnp.mean(bootstrap_result["motor_loss_history"], axis=0),
+            dtype=float,
+        ).tolist()
         parameter_mse_history = np.asarray(
             jnp.mean(bootstrap_result["parameter_mse_history"], axis=0),
             dtype=float,
@@ -572,6 +641,7 @@ def run_single_experiment_identification(
             use_hidden_robot=True,
             controller_gains=pipeline.gains,
         )
+    pipeline.estimated_params = estimated_params
     final_replay_log = pipeline.replay_rollout(
         estimated_params,
         target_log=pipeline.target_log,
@@ -584,6 +654,7 @@ def run_single_experiment_identification(
         "init_replay_log": init_replay_log,
         "estimated_params": estimated_params,
         "loss_history": loss_history,
+        "motor_loss_history": motor_loss_history,
         "parameter_mse_history": parameter_mse_history,
         "bootstrap": bootstrap_result,
         "final_replay_log": final_replay_log,

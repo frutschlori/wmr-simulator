@@ -60,7 +60,8 @@ class PololuTrajControlLog:
         pose = self.actual_pose().astype(np.float32)
         vel_omega = self.actual_vel_omega().astype(np.float32)
         wheel_speeds = self.measured_wheel_speeds().astype(np.float32)
-        wheel_cmd = self.commanded_wheel_speeds().astype(np.float32)
+        duty_cycle = self.duty_cycles().astype(np.float32)
+        wheel_speed_cmd = self.commanded_wheel_speeds().astype(np.float32)
 
         num_steps = pose.shape[0]
         keys = np.zeros((num_steps, 2), dtype=np.uint32)
@@ -71,7 +72,8 @@ class PololuTrajControlLog:
             wheel_speeds=jnp.asarray(wheel_speeds),
             key=jnp.asarray(keys),
             vel_omega=jnp.asarray(vel_omega),
-            wheel_cmd=jnp.asarray(wheel_cmd),
+            duty_cycle=jnp.asarray(duty_cycle),
+            wheel_speed_cmd=jnp.asarray(wheel_speed_cmd),
         )
         estimator_states = EstimatorState(
             pose_hat=jnp.asarray(pose),
@@ -129,6 +131,9 @@ class PololuTrajControlLog:
 
     def measured_wheel_speeds(self) -> np.ndarray:
         return np.stack([self.column("omega_r_meas"), self.column("omega_l_meas")], axis=1)
+
+    def duty_cycles(self) -> np.ndarray:
+        return np.stack([self.column("duty_r"), self.column("duty_l")], axis=1)
 
 def load_pololu_traj_control_log(path: str | Path) -> PololuTrajControlLog:
     path = Path(path)
@@ -200,6 +205,7 @@ if __name__ == "__main__":
     parser.add_argument("--out-dir", type=str, default="visualize")
     parser.add_argument("--hide-reference-velocity", action="store_true", default=True)
     parser.add_argument("--show-markers", action="store_true")
+    parser.add_argument("--hide-velocity-difference-plot", action="store_true", default=True)
     args = parser.parse_args()
 
     log_path = Path(args.log)
@@ -211,7 +217,6 @@ if __name__ == "__main__":
     print(f"Duration: {float(log.time_s[-1]):.3f} s")
     if log.dt is not None:
         print(f"Median dt: {log.dt:.3f} s")
-
     plot_logged_summary(
         log,
         out_prefix=out_prefix,
@@ -219,9 +224,10 @@ if __name__ == "__main__":
         show_reference_velocity=not args.hide_reference_velocity,
         show_markers=args.show_markers,
     )
-    plot_velocity_difference(
-        log,
-        out_prefix=out_prefix,
-        out_dir=args.out_dir,
-        show_markers=args.show_markers,
-    )
+    if not args.hide_velocity_difference_plot:
+        plot_velocity_difference(
+            log,
+            out_prefix=out_prefix,
+            out_dir=args.out_dir,
+            show_markers=args.show_markers,
+        )

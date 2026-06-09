@@ -70,9 +70,9 @@ class ProblemDefinition:
 
     def build_controller(self) -> Controller:
         return Controller(
-            robot_param=self.estimator_cfg,
+            robot_param=self.robot_cfg,
             gains=self.controller_cfg["gains"],
-            cmd_limits=[-self.robot_cfg["max_wheel_speed"], self.robot_cfg["max_wheel_speed"]],
+            duty_limits=[-1.0, 1.0],
             dt=self.dt,
         )
 
@@ -94,7 +94,7 @@ class ReplayInitializationLog(NamedTuple):
 
 class ClosedLoopLog(NamedTuple):
     poses: jax.Array
-    wheel_cmds: jax.Array
+    duty_cycles: jax.Array
     measurements: jax.Array
     replay_init: ReplayInitializationLog
 
@@ -204,7 +204,7 @@ class TrajectoryOptimizationPipeline:
     def _set_closed_loop_log(self, closed_loop_log: ClosedLoopLog):
         self.closed_loop_log = closed_loop_log
         self.closed_loop_poses = closed_loop_log.poses
-        self.closed_loop_wheel_cmds = closed_loop_log.wheel_cmds
+        self.closed_loop_duty_cycles = closed_loop_log.duty_cycles
         self.closed_loop_measurements = closed_loop_log.measurements
 
     def resolve_window_length(self, window_length: int | None) -> int:
@@ -272,7 +272,8 @@ class TrajectoryOptimizationPipeline:
             wheel_speeds=jnp.asarray(init_wheel_speeds, dtype=jnp.float32),
             key=robot_key,
             vel_omega=jnp.zeros(2, dtype=jnp.float32),
-            wheel_cmd=jnp.zeros(2, dtype=jnp.float32),
+            duty_cycle=jnp.zeros(2, dtype=jnp.float32),
+            wheel_speed_cmd=jnp.zeros(2, dtype=jnp.float32),
         )
         estimator_state = EstimatorState(
             pose_hat=jnp.asarray(init_pose, dtype=jnp.float32),
@@ -301,7 +302,7 @@ class TrajectoryOptimizationPipeline:
         pose_est = self.estimator.get_est_pose(next_estimator_state)
         wheel_est = self.estimator.get_est_wheel_speeds(next_estimator_state)
 
-        next_controller_state, wheel_cmd = self.controller.compute(
+        next_controller_state, duty_cycle = self.controller.compute(
             controller_state,
             ref_k,
             pose_est,
@@ -312,7 +313,7 @@ class TrajectoryOptimizationPipeline:
         )
         next_robot_state = self.robot.step(
             robot_state,
-            wheel_cmd,
+            duty_cycle,
             wheel_radius=params[0],
             base_diameter=params[1],
         )
@@ -326,7 +327,7 @@ class TrajectoryOptimizationPipeline:
         replay_init_covariance = next_estimator_state.P
         return next_carry, (
             next_pose_true,
-            wheel_cmd,
+            duty_cycle,
             measurement,
             replay_init_wheel_speeds,
             replay_init_u_hat,
@@ -346,7 +347,7 @@ class TrajectoryOptimizationPipeline:
             return self.closed_loop_step(carry, ref_k, params)
 
         _, outputs = jax.lax.scan(scan_step, initial_carry, reference_states)
-        poses, wheel_cmds, measurements, init_wheel_speeds, init_u_hat, init_u_true, init_covariances = outputs
+        poses, duty_cycles, measurements, init_wheel_speeds, init_u_hat, init_u_true, init_covariances = outputs
         replay_init = ReplayInitializationLog(
             wheel_speeds=init_wheel_speeds,
             estimator_u_hat=init_u_hat,
@@ -355,19 +356,19 @@ class TrajectoryOptimizationPipeline:
         )
         return ClosedLoopLog(
             poses=poses,
-            wheel_cmds=wheel_cmds,
+            duty_cycles=duty_cycles,
             measurements=measurements,
             replay_init=replay_init,
         )
 
     def open_loop_replay_step(self, carry, inputs, params: jnp.ndarray):
         robot_state, estimator_state = carry
-        wheel_speeds, wheel_cmd = inputs
+        wheel_speeds, duty_cycle = inputs
 
         next_robot_state = self.robot.step_kinematic(
             robot_state,
             wheel_speeds,
-            wheel_cmd,
+            duty_cycle,
             wheel_radius=params[0],
             base_diameter=params[1],
             dt=self.problem.dt,
@@ -398,7 +399,7 @@ class TrajectoryOptimizationPipeline:
             closed_loop_log = self.closed_loop_log
 
         replay_wheel_speeds = self.closed_loop_replay_wheel_speeds(closed_loop_log)[:-1]
-        replay_wheel_cmds = closed_loop_log.wheel_cmds[:-1]
+        replay_duty_cycles = closed_loop_log.duty_cycles[:-1]
 
         num_intervals = replay_wheel_speeds.shape[0]
         num_windows = int(np.ceil(num_intervals / window_length))
@@ -406,9 +407,9 @@ class TrajectoryOptimizationPipeline:
         pad_steps = padded_num_intervals - num_intervals
 
         padded_wheel_speeds = jnp.pad(replay_wheel_speeds, ((0, pad_steps), (0, 0)))
-        padded_wheel_cmds = jnp.pad(replay_wheel_cmds, ((0, pad_steps), (0, 0)))
+        padded_duty_cycles = jnp.pad(replay_duty_cycles, ((0, pad_steps), (0, 0)))
         wheel_speed_windows = padded_wheel_speeds.reshape(num_windows, window_length, 2)
-        wheel_cmd_windows = padded_wheel_cmds.reshape(num_windows, window_length, 2)
+        duty_cycle_windows = padded_duty_cycles.reshape(num_windows, window_length, 2)
 
         window_start_indices = jnp.arange(num_windows, dtype=jnp.int32) * window_length
         init_poses = closed_loop_log.measurements[window_start_indices]
@@ -429,7 +430,7 @@ class TrajectoryOptimizationPipeline:
             robot_key,
             estimator_key,
             wheel_speed_window,
-            wheel_cmd_window,
+            duty_cycle_window,
         ):
             initial_carry = self.initial_replay_carry(
                 init_pose,
@@ -443,7 +444,7 @@ class TrajectoryOptimizationPipeline:
             _, outputs = jax.lax.scan(
                 lambda carry, replay_inputs: self.open_loop_replay_step(carry, replay_inputs, params),
                 initial_carry,
-                (wheel_speed_window, wheel_cmd_window),
+                (wheel_speed_window, duty_cycle_window),
             )
             return outputs
 
@@ -456,7 +457,7 @@ class TrajectoryOptimizationPipeline:
             window_robot_keys,
             window_estimator_keys,
             wheel_speed_windows,
-            wheel_cmd_windows,
+            duty_cycle_windows,
         )
 
         actual_poses = actual_pose_windows.reshape(-1, 3)[:num_intervals]

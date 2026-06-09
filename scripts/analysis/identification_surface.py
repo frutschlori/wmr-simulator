@@ -17,6 +17,8 @@ def main():
     parser.add_argument("--seed", type=int, default=2)
     parser.add_argument("--init-wheel-radius", type=float, default=0.02)
     parser.add_argument("--init-base-diameter", type=float, default=0.2)
+    parser.add_argument("--init-max-wheel-speed", type=float, default=150.0)
+    parser.add_argument("--init-time-constant", type=float, default=0.1)
     parser.add_argument("--radius-min", type=float, default=0.01)
     parser.add_argument("--radius-max", type=float, default=0.1)
     parser.add_argument("--radius-points", type=int, default=100)
@@ -29,6 +31,8 @@ def main():
     init_params = PhysicalParams(
         wheel_radius=jnp.asarray(args.init_wheel_radius, dtype=jnp.float32),
         base_diameter=jnp.asarray(args.init_base_diameter, dtype=jnp.float32),
+        max_wheel_speed=jnp.asarray(args.init_max_wheel_speed, dtype=jnp.float32),
+        time_constant=jnp.asarray(args.init_time_constant, dtype=jnp.float32),
     )
     result = run_physical_parameter_surface(
         problem_path=args.problem,

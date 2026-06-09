@@ -122,7 +122,7 @@ def plot(traj, estimator, time, reference_states=None, out_prefix="plot_trajecto
     time = _as_numpy(time)
     poses = _as_numpy(robot_traj.pose)
     wheel_inputs_true = _as_numpy(robot_traj.wheel_speeds)
-    wheel_inputs_cmd = _as_numpy(robot_traj.wheel_cmd)
+    duty_cycles = _as_numpy(robot_traj.duty_cycle)
     vel_omega_ctrl = _as_numpy(robot_traj.vel_omega)  # [v, w] actual from robot
 
     # Extract estimator logs
@@ -183,20 +183,20 @@ def plot(traj, estimator, time, reference_states=None, out_prefix="plot_trajecto
         # ----------------------------------------
         fig2, axes2 = plt.subplots(2, 1, figsize=(10, 6))
 
-        axes2[0].plot(time, wheel_inputs_cmd[:, 0], 'g-', label='Commanded Right Wheel')
+        axes2[0].plot(time, duty_cycles[:, 0], 'g-', label='Right Duty Cycle')
         axes2[0].plot(time, wheel_inputs_true[:, 0], 'g--', label='True Right Wheel')
-        axes2[0].set_ylabel('Right Wheel Speed [rad/s]')
+        axes2[0].set_ylabel('Right Wheel Speed [rad/s] / Duty')
         axes2[0].legend()
         axes2[0].grid(True)
 
-        axes2[1].plot(time, wheel_inputs_cmd[:, 1], 'm-', label='Commanded Left Wheel')
+        axes2[1].plot(time, duty_cycles[:, 1], 'm-', label='Left Duty Cycle')
         axes2[1].plot(time, wheel_inputs_true[:, 1], 'm--', label='True Left Wheel')
-        axes2[1].set_ylabel('Left Wheel Speed [rad/s]')
+        axes2[1].set_ylabel('Left Wheel Speed [rad/s] / Duty')
         axes2[1].set_xlabel('Time Step')
         axes2[1].legend()
         axes2[1].grid(True)
 
-        fig2.suptitle("Wheel Speeds", fontsize=14)
+        fig2.suptitle("Wheel Speeds and Duty Cycles", fontsize=14)
         fig2.tight_layout(rect=[0, 0, 1, 0.96])
         pdf.savefig(fig2, bbox_inches='tight', transparent=True)
         plt.close(fig2)

@@ -55,9 +55,9 @@ class SimulationPipeline:
         self.robot = DiffDrive(robot_cfg=self.robot_cfg, dt=self.dt)
         self.estimator = DiffDriveEstimator(estimator_cfg=self.estimator_cfg, dt=self.dt)
         self.controller = Controller(
-            robot_param=self.estimator_cfg,
+            robot_param=self.robot_cfg,
             gains=self.controller_cfg["gains"],
-            cmd_limits=[-self.robot_cfg["max_wheel_speed"], self.robot_cfg["max_wheel_speed"]],
+            duty_limits=[-1.0, 1.0],
             dt=self.dt,
         )
         estimator_init_state = self.estimator.get_init_state(
@@ -69,6 +69,8 @@ class SimulationPipeline:
         self.hidden_params = PhysicalParams(
             wheel_radius=jnp.asarray(self.robot_cfg["wheel_radius"], dtype=jnp.float32),
             base_diameter=jnp.asarray(self.robot_cfg["base_diameter"], dtype=jnp.float32),
+            max_wheel_speed=jnp.asarray(self.robot_cfg["max_wheel_speed"], dtype=jnp.float32),
+            time_constant=jnp.asarray(self.robot_cfg["time_constant"], dtype=jnp.float32),
         )
         self.gains = jnp.array([jnp.asarray(value) for value in self.controller_cfg["gains"]])
 
@@ -174,7 +176,7 @@ class SimulationPipeline:
 
             pose_est = self.estimator.get_est_pose(est_state)
             wheel_est = self.estimator.get_est_wheel_speeds(est_state)
-            next_ctrl_state, wheel_cmd = self.controller.compute(
+            next_ctrl_state, duty_cycle = self.controller.compute(
                 ctrl_state,
                 ref_k,
                 pose_est,
@@ -182,15 +184,18 @@ class SimulationPipeline:
                 gains=controller_gains,
                 wheel_radius=robot_params.wheel_radius,
                 base_diameter=robot_params.base_diameter,
+                max_wheel_speed=robot_params.max_wheel_speed,
             )
             if use_hidden_robot:
-                next_robot_state = self.robot.step(robot_state, wheel_cmd)
+                next_robot_state = self.robot.step(robot_state, duty_cycle)
             else:
                 next_robot_state = self.robot.step(
                     robot_state,
-                    wheel_cmd,
+                    duty_cycle,
                     wheel_radius=robot_params.wheel_radius,
                     base_diameter=robot_params.base_diameter,
+                    max_wheel_speed=robot_params.max_wheel_speed,
+                    time_constant=robot_params.time_constant,
                 )
 
             next_est_state = self.estimator.update(
@@ -215,7 +220,8 @@ class SimulationPipeline:
             ),
             key=jnp.concatenate([initial_robot_state.key[None, :], interval_robot_states.key], axis=0),
             vel_omega=jnp.concatenate([initial_robot_state.vel_omega[None, :], interval_robot_states.vel_omega], axis=0),
-            wheel_cmd=jnp.concatenate([initial_robot_state.wheel_cmd[None, :], interval_robot_states.wheel_cmd], axis=0),
+            duty_cycle=jnp.concatenate([initial_robot_state.duty_cycle[None, :], interval_robot_states.duty_cycle], axis=0),
+            wheel_speed_cmd=jnp.concatenate([initial_robot_state.wheel_speed_cmd[None, :], interval_robot_states.wheel_speed_cmd], axis=0),
         )
         estimator_states = EstimatorState(
             pose_hat=jnp.concatenate([initial_estimator_state.pose_hat[None, :], interval_estimator_states.pose_hat], axis=0),
@@ -230,7 +236,7 @@ class SimulationPipeline:
     def run_open_loop_replay(
         self,
         robot_params: PhysicalParams,
-        wheel_cmds,
+        duty_cycles,
         est_params: PhysicalParams | None = None,
         robot_key=None,
         estimator_key=None,
@@ -238,26 +244,28 @@ class SimulationPipeline:
         robot_key = self.robot_key if robot_key is None else robot_key
         estimator_key = self.estimator_key if estimator_key is None else estimator_key
         carry0 = self._init_states(robot_key, estimator_key)
-        wheel_cmds = jnp.asarray(wheel_cmds, dtype=jnp.float32)
+        duty_cycles = jnp.asarray(duty_cycles, dtype=jnp.float32)
         num_intervals = self.reference_states.shape[0] - 1
-        if wheel_cmds.shape[0] == num_intervals + 1:
-            interval_wheel_cmds = wheel_cmds[:-1]
-        elif wheel_cmds.shape[0] == num_intervals:
-            interval_wheel_cmds = wheel_cmds
+        if duty_cycles.shape[0] == num_intervals + 1:
+            interval_duty_cycles = duty_cycles[:-1]
+        elif duty_cycles.shape[0] == num_intervals:
+            interval_duty_cycles = duty_cycles
         else:
             raise ValueError(
-                f"wheel_cmds length ({wheel_cmds.shape[0]}) must match either the number of "
+                f"duty_cycles length ({duty_cycles.shape[0]}) must match either the number of "
                 f"samples ({num_intervals + 1}) or intervals ({num_intervals})."
             )
         model_params = robot_params if est_params is None else est_params
 
-        def sim_step(carry, wheel_cmd):
+        def sim_step(carry, duty_cycle):
             robot_state, est_state, ctrl_state = carry
             next_robot_state = self.robot.step(
                 robot_state,
-                wheel_cmd,
+                duty_cycle,
                 wheel_radius=robot_params.wheel_radius,
                 base_diameter=robot_params.base_diameter,
+                max_wheel_speed=robot_params.max_wheel_speed,
+                time_constant=robot_params.time_constant,
             )
             next_est_state = self.estimator.update(
                 est_state,
@@ -269,7 +277,7 @@ class SimulationPipeline:
             )
             return (next_robot_state, next_est_state, ctrl_state), (next_robot_state, next_est_state)
 
-        _, logs = jax.lax.scan(sim_step, carry0, interval_wheel_cmds)
+        _, logs = jax.lax.scan(sim_step, carry0, interval_duty_cycles)
         interval_robot_states, interval_estimator_states = logs
         initial_robot_state, initial_estimator_state, _ = carry0
         robot_states = DiffDriveState(
@@ -280,7 +288,8 @@ class SimulationPipeline:
             ),
             key=jnp.concatenate([initial_robot_state.key[None, :], interval_robot_states.key], axis=0),
             vel_omega=jnp.concatenate([initial_robot_state.vel_omega[None, :], interval_robot_states.vel_omega], axis=0),
-            wheel_cmd=jnp.concatenate([initial_robot_state.wheel_cmd[None, :], interval_robot_states.wheel_cmd], axis=0),
+            duty_cycle=jnp.concatenate([initial_robot_state.duty_cycle[None, :], interval_robot_states.duty_cycle], axis=0),
+            wheel_speed_cmd=jnp.concatenate([initial_robot_state.wheel_speed_cmd[None, :], interval_robot_states.wheel_speed_cmd], axis=0),
         )
         estimator_states = EstimatorState(
             pose_hat=jnp.concatenate([initial_estimator_state.pose_hat[None, :], interval_estimator_states.pose_hat], axis=0),
@@ -298,11 +307,11 @@ class SimulationPipeline:
         est_params=None,
         use_hidden_robot=False,
         controller_gains=None,
-        wheel_cmds=None,
+        duty_cycles=None,
         robot_key=None,
         estimator_key=None,
     ):
-        if wheel_cmds is None:
+        if duty_cycles is None:
             return self.run_closed_loop(
                 robot_params=robot_params,
                 est_params=est_params,
@@ -314,7 +323,7 @@ class SimulationPipeline:
 
         return self.run_open_loop_replay(
             robot_params=robot_params,
-            wheel_cmds=wheel_cmds,
+            duty_cycles=duty_cycles,
             est_params=est_params,
             robot_key=robot_key,
             estimator_key=estimator_key,

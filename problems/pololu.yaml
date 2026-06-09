@@ -1,4 +1,4 @@
-sim_time: 10.0 # seconds
+sim_time: 5.0 # seconds
 time_step: 0.05 # seconds
 environment:
   min: [-1.5, -2.5]
@@ -18,20 +18,20 @@ robot:
   type: differential_drive
   wheel_radius: 0.016  # m
   base_diameter: 0.0842  # m
-  max_wheel_speed: 150 # rad/s
+  max_wheel_speed: 250 # rad/s
   time_constant:  0.15  # time constant for first-order wheel dynamics (set to 0 for ideal actuation)
-  slip_r: 0.10          # std of fractional slip on ur (40%) [0 -> 1.0]
-  slip_l: 0.10          # std of fractional slip on ul (50%) [0 -> 1.0]
+  slip_r: 0.1          # std of fractional slip on ur (40%) [0 -> 1.0]
+  slip_l: 0.1          # std of fractional slip on ul (50%) [0 -> 1.0]
   v_max: 2.0          # m/s
   a_max: 3.0         # m/s^2
   a_max_lateral: 8.0 # m/s^2
   omega_max: 10.0    # rad/s
-  alpha_max: 10.0    # rad/s^2
+  alpha_max: 5.0    # rad/s^2
 
 estimator:
   type: "kf"              # estimator type: "kf" (Kalman Filter) or "dr" (Dead Reckoning)
-  wheel_radius: 0.015     # estimator's wheel_radius [m]
-  base_diameter: 0.09     # estimator's base_diameter [m]
+  wheel_radius: 0.016     # estimator's wheel_radius [m]
+  base_diameter: 0.0842   # estimator's base_diameter [m]
   noise_pos: 0.01         # position measurement noise [m] (from mocap almost no noise)
   noise_angle: 0.05       # orientation noise [rad] ~  4 degrees
   enc_angle_noise: 0.03   # encoder noise

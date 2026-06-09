@@ -185,7 +185,7 @@ def plot_logged_summary(
 
     state_labels = ("x [m]", "y [m]", "theta [rad]")
     state_names = ("x", "y", "theta")
-    for index, ax in enumerate(axes[1]):
+    for index, ax in enumerate(axes[1, :]):
         ax.plot(time, reference[:, index], "r--", linewidth=1.3, label="Reference", **marker_kwargs)
         ax.plot(time, measured[:, index], color="tab:blue", linewidth=1.2, label="Measured", **marker_kwargs)
         ax.set_xlabel("time [s]")
@@ -193,7 +193,6 @@ def plot_logged_summary(
         ax.set_title(f"{state_names[index]} State")
         ax.grid(True)
         ax.legend()
-
     if show_markers:
         _set_line_widths(fig, 1.0)
 
@@ -202,6 +201,93 @@ def plot_logged_summary(
     plt.close(fig)
     print(f"Log summary PDF saved at: {output_path}")
     return output_path
+
+
+def _plot_motor_model_axes(
+    ax_duty,
+    time: np.ndarray,
+    duty_cycle: np.ndarray,
+    encoder_wheel_speeds: np.ndarray,
+    model_wheel_speeds: np.ndarray | None,
+    marker_kwargs: dict[str, object],
+):
+    ax_speed = ax_duty.twinx()
+    model_wheel_speeds = (
+        np.full_like(encoder_wheel_speeds, np.nan)
+        if model_wheel_speeds is None
+        else np.asarray(model_wheel_speeds, dtype=float)
+    )
+    model_wheel_speeds = model_wheel_speeds[: len(time)]
+
+    line_dc_l = ax_duty.plot(
+        time,
+        duty_cycle[:, 1],
+        color="tab:orange",
+        linestyle="--",
+        linewidth=1.1,
+        label="DC left",
+        **marker_kwargs,
+    )[0]
+    line_enc_l = ax_speed.plot(
+        time,
+        encoder_wheel_speeds[:, 1],
+        color="tab:orange",
+        linestyle=":",
+        linewidth=1.2,
+        label="enc left",
+        **marker_kwargs,
+    )[0]
+    line_model_l = ax_speed.plot(
+        time,
+        model_wheel_speeds[:, 1],
+        color="tab:orange",
+        linestyle="-",
+        linewidth=1.2,
+        label="model left",
+        **marker_kwargs,
+    )[0]
+    line_dc_r = ax_duty.plot(
+        time,
+        duty_cycle[:, 0],
+        color="tab:green",
+        linestyle="--",
+        linewidth=1.1,
+        label="DC right",
+        **marker_kwargs,
+    )[0]
+    line_enc_r = ax_speed.plot(
+        time,
+        encoder_wheel_speeds[:, 0],
+        color="tab:green",
+        linestyle=":",
+        linewidth=1.2,
+        label="enc right",
+        **marker_kwargs,
+    )[0]
+    line_model_r = ax_speed.plot(
+        time,
+        model_wheel_speeds[:, 0],
+        color="tab:green",
+        linestyle="-",
+        linewidth=1.2,
+        label="model right",
+        **marker_kwargs,
+    )[0]
+
+    _set_symmetric_ylim(ax_duty, duty_cycle)
+    speed_values = [encoder_wheel_speeds]
+    if model_wheel_speeds.size:
+        speed_values.append(model_wheel_speeds)
+    _set_symmetric_ylim(ax_speed, np.concatenate(speed_values, axis=0))
+    ax_duty.set_xlabel("time [s]")
+    ax_duty.set_ylabel("duty cycle")
+    ax_speed.set_ylabel("wheel speed [rad/s]")
+    ax_duty.set_title("Motor Model")
+    ax_duty.grid(True)
+    ax_duty.legend(
+        handles=[line_dc_l, line_enc_l, line_model_l, line_dc_r, line_enc_r, line_model_r],
+        loc="best",
+    )
 
 
 def plot_velocity_difference(
