@@ -15,7 +15,7 @@ def pose_mse(predicted_poses, target_poses, weights=None):
     return jnp.mean(squared_error)
 
 
-def window_replay_mse(
+def pose_window_replay_mse(
     pipeline,
     params: PhysicalParams,
     target_log: SimulationLog,
@@ -41,6 +41,28 @@ def window_replay_mse(
 
     losses = jax.vmap(replay_loss)(replay_robot_keys, replay_estimator_keys)
     return jnp.mean(losses)
+
+
+def window_replay_mse(
+    pipeline,
+    params: PhysicalParams,
+    target_log: SimulationLog,
+    replay_robot_keys: jax.Array,
+    replay_estimator_keys: jax.Array,
+    est_params: PhysicalParams | None = None,
+    window_length: int | None = None,
+):
+    pose_loss = pose_window_replay_mse(
+        pipeline=pipeline,
+        params=params,
+        target_log=target_log,
+        replay_robot_keys=replay_robot_keys,
+        replay_estimator_keys=replay_estimator_keys,
+        est_params=est_params,
+        window_length=window_length,
+    )
+    motor_loss = pipeline.motor_wheel_speed_mse(params, target_log)
+    return pose_loss + motor_loss
 
 
 def multi_experiment_window_replay_loss(

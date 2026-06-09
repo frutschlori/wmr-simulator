@@ -63,6 +63,7 @@ def run_window_replay_identification(
     seed: int = 0,
     reference_trajectories_dir: str | None = None,
     deterministic_replay: bool = True,
+    motor_learning_rate: float | None = None,
 ):
     pipeline = SystemIdentificationPipeline(
         problem_path=problem_path,
@@ -72,16 +73,18 @@ def run_window_replay_identification(
         window_length=window_length,
         deterministic_replay=deterministic_replay,
     )
-    estimated_params, loss_history, parameter_mse_history = pipeline.optimize(
+    estimated_params, loss_history, motor_loss_history, parameter_mse_history = pipeline.optimize(
         init_params=initial_params,
         num_steps=num_steps,
         learning_rate=learning_rate,
+        motor_learning_rate=learning_rate if motor_learning_rate is None else motor_learning_rate,
         num_realizations=num_realizations,
     )
     return {
         "pipeline": pipeline,
         "estimated_params": estimated_params,
         "loss_history": loss_history,
+        "motor_loss_history": motor_loss_history,
         "parameter_mse_history": parameter_mse_history,
     }
 

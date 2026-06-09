@@ -8,6 +8,8 @@ from matplotlib.lines import Line2D
 from matplotlib.ticker import FormatStrFormatter
 import numpy as np
 
+from wmr_simulator.visualization.pololu import _plot_motor_model_axes
+
 
 def plot_trajectory(
     pipeline,
@@ -433,8 +435,10 @@ def plot_system_id(
         odom_vel,
         reference_vel,
     )
-    wheel_cmd = np.asarray(target_log.robot_states.wheel_cmd)[:plot_len]
+    wheel_cmd = np.asarray(target_log.robot_states.wheel_speed_cmd)[:plot_len]
+    duty_cycle = np.asarray(target_log.robot_states.duty_cycle)[:plot_len]
     wheel_actual = np.asarray(target_log.robot_states.wheel_speeds)[:plot_len]
+    motor_model_wheel_speeds = _motor_model_wheel_speeds_for_pipeline(pipeline, target_log, plot_len)
     estimates = None if is_real_experiment else replay_window_starts
 
     window_starts = _window_start_indices(pipeline, plot_len, getattr(pipeline, "window_length", None))
@@ -442,10 +446,19 @@ def plot_system_id(
     os.makedirs("visualize", exist_ok=True)
     output_path = os.path.join("visualize", f"{out_prefix}.pdf")
 
-    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+    fig = plt.figure(figsize=(24, 10))
     fig.suptitle("Identification Summary ({source})".format(source=out_prefix[15:]), fontsize=16)
 
-    ax_traj = axes[0, 0]
+    ax_traj = plt.subplot2grid((2, 10), (0, 0), colspan=1, fig=fig)
+    ax_vel = plt.subplot2grid((2, 10), (0, 1), colspan=3, fig=fig)
+    ax_wheels = plt.subplot2grid((2, 10), (0, 4), colspan=3, fig=fig)
+    ax_motor = plt.subplot2grid((2, 10), (0, 7), colspan=3, fig=fig)
+    state_axes = [
+        plt.subplot2grid((2, 10), (1, 0), colspan=3, fig=fig),
+        plt.subplot2grid((2, 10), (1, 3), colspan=4, fig=fig),
+        plt.subplot2grid((2, 10), (1, 7), colspan=3, fig=fig),
+    ]
+
     if reference is not None:
         ax_traj.plot(
             reference[:, 0],
@@ -479,10 +492,10 @@ def plot_system_id(
     ax_traj.set_ylabel("y [m]")
     ax_traj.set_title("Trajectory")
     ax_traj.set_aspect("equal", adjustable="box")
+    ax_traj.margins(x=0.02, y=0.02)
     ax_traj.grid(True)
-    ax_traj.legend(loc="upper left", bbox_to_anchor=(1.02, 1.0), borderaxespad=0.0)
+    ax_traj.legend(loc="upper left", fontsize="small")
 
-    ax_vel = axes[0, 1]
     ax_vel_omega = ax_vel.twinx()
     _shade_rejected_intervals(ax_vel, plot_time, rejection_weights)
     line_meas_v = ax_vel.plot(
@@ -561,7 +574,6 @@ def plot_system_id(
         loc="best",
     )
 
-    ax_wheels = axes[0, 2]
     _shade_rejected_intervals(ax_wheels, plot_time, rejection_weights)
     line_cmd_right = ax_wheels.plot(
         plot_time,
@@ -603,9 +615,19 @@ def plot_system_id(
     ax_wheels.grid(True)
     ax_wheels.legend(handles=[line_cmd_right, line_meas_right, line_cmd_left, line_meas_left])
 
+    _shade_rejected_intervals(ax_motor, plot_time, rejection_weights)
+    _plot_motor_model_axes(
+        ax_motor,
+        plot_time,
+        duty_cycle,
+        wheel_actual,
+        motor_model_wheel_speeds,
+        marker_kwargs,
+    )
+
     state_labels = ("x [m]", "y [m]", "theta [rad]")
     state_names = ("x", "y", "theta")
-    for index, ax in enumerate(axes[1]):
+    for index, ax in enumerate(state_axes):
         _shade_rejected_intervals(ax, plot_time, rejection_weights)
         if reference is not None:
             ax.plot(plot_time, reference[:, index], "r--", linewidth=1.3, label="Reference", **marker_kwargs)
@@ -704,6 +726,15 @@ def _loss_weights_for_plot(pipeline, target_log, plot_len: int) -> np.ndarray | 
     if weights is None:
         return None
     return np.asarray(weights, dtype=float)[:plot_len]
+
+
+def _motor_model_wheel_speeds_for_pipeline(pipeline, target_log, plot_len: int) -> np.ndarray | None:
+    if not hasattr(pipeline, "motor_wheel_speed_rollout"):
+        return None
+    params = getattr(pipeline, "estimated_params", getattr(pipeline, "initial_params", None))
+    if params is None:
+        return None
+    return np.asarray(pipeline.motor_wheel_speed_rollout(params, target_log), dtype=float)[:plot_len]
 
 
 def _shade_rejected_intervals(ax, plot_time: np.ndarray, weights: np.ndarray | None) -> None:
@@ -973,8 +1004,14 @@ def _set_symmetric_ylim(ax, values: np.ndarray) -> None:
     ax.set_ylim(-1.05 * limit, 1.05 * limit)
 
 
-def plot_loss_history(loss_history, validation_loss_history=None, hidden_loss_history=None,
-                      parameter_error_history=None, out_prefix="system_id"):
+def plot_loss_history(
+    loss_history,
+    validation_loss_history=None,
+    hidden_loss_history=None,
+    parameter_error_history=None,
+    motor_loss_history=None,
+    out_prefix="system_id",
+):
     os.makedirs("visualize", exist_ok=True)
     pdf_filename = os.path.join("visualize/", f"loss_{out_prefix}.pdf")
 
@@ -982,8 +1019,12 @@ def plot_loss_history(loss_history, validation_loss_history=None, hidden_loss_hi
 
     fig, ax = plt.subplots(1, 1, figsize=(8, 4.5))
     legend_handles = []
-    ax.plot(steps, np.asarray(loss_history), 'b-', linewidth=2, label='Tracking Error')
+    ax.plot(steps, np.asarray(loss_history), 'b-', linewidth=2, label='Normalized Geometry Error')
     legend_handles.extend(ax.get_lines()[-1:])
+    if motor_loss_history is not None and len(motor_loss_history) > 0:
+        motor_steps = np.arange(1, len(motor_loss_history) + 1)
+        ax.plot(motor_steps, np.asarray(motor_loss_history), color='C1', linewidth=2, label='Normalized Motor Error')
+        legend_handles.extend(ax.get_lines()[-1:])
     if validation_loss_history is not None and len(validation_loss_history) > 0:
         validation_steps = np.arange(1, len(validation_loss_history) + 1)
         ax.plot(validation_steps, np.asarray(validation_loss_history), 'r-', linewidth=2, label='Validation')
@@ -998,7 +1039,7 @@ def plot_loss_history(loss_history, validation_loss_history=None, hidden_loss_hi
         legend_handles.extend(hidden_ax.get_lines()[-1:])
     ax.set_yscale('log')
     ax.set_xlabel('Optimization Step')
-    ax.set_ylabel('Tracking MSE', color='black')
+    ax.set_ylabel('Loss', color='black')
     ax.tick_params(axis='y', colors='black')
     ax.spines['left'].set_color('black')
     ax.spines['right'].set_color('black')

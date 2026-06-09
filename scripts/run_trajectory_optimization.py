@@ -7,7 +7,7 @@ def main():
     parser.add_argument("--problem", default="problems/pololu.yaml")
     parser.add_argument("--jax-platform", choices=["default", "cpu"], default="cpu")
     # Optimization Settings
-    parser.add_argument("--save-trajectory", action="store_true", default=False)
+    parser.add_argument("--save-trajectory", action="store_true", default=True)
     parser.add_argument("--window-length", type=int, default=1)
     parser.add_argument("--opt-steps", type=int, default=10000)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
