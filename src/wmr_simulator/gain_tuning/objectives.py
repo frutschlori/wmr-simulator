@@ -12,7 +12,7 @@ def closed_loop_tracking_mse(
     replay_robot_keys: jax.Array,
     replay_estimator_keys: jax.Array,
 ):
-    reference_poses = pipeline.reference_states[:, :3]
+    reference_poses = pipeline.reference_states[:-1, :3]
 
     def realization_loss(robot_key, estimator_key):
         predicted_log = pipeline.run_closed_loop(
@@ -21,7 +21,7 @@ def closed_loop_tracking_mse(
             robot_key=robot_key,
             estimator_key=estimator_key,
         )
-        predicted_poses = predicted_log.robot_states.pose
+        predicted_poses = predicted_log.robot_states.pose[1:]
         return pipeline.pose_mse(predicted_poses, reference_poses)
 
     losses = jax.vmap(realization_loss)(replay_robot_keys, replay_estimator_keys)

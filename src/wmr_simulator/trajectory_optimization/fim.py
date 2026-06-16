@@ -23,6 +23,7 @@ def compute_fim_matrix(
     measurement_vector = measurement_vector_fn(params)
     measurement_sensitivity = jax.jacfwd(measurement_vector_fn)(params)
     parameter_scaling = jnp.diag(params)
+    # parameter_scaling = jnp.eye(2)
     weighted_measurement_sensitivity = measurement_sensitivity @ parameter_scaling
 
     num_measurements = measurement_vector.shape[0] // 3

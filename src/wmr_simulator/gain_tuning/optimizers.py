@@ -10,6 +10,14 @@ from wmr_simulator.gain_tuning.objectives import (
 )
 
 
+def _controller_gains_to_optimizer_values(gains: jax.Array):
+    return clip_controller_gains(gains)
+
+
+def _controller_gains_from_optimizer_values(values: jax.Array):
+    return jnp.clip(values, min=0)
+
+
 def optimize_controller_gains(
     pipeline,
     init_gains: jax.Array,
@@ -18,35 +26,40 @@ def optimize_controller_gains(
     num_realizations: int,
 ):
     optimizer = optax.adam(learning_rate)
-    current_gains = clip_controller_gains(init_gains)
-    current_opt_state = optimizer.init(current_gains)
+    current_values = _controller_gains_to_optimizer_values(init_gains)
+    current_opt_state = optimizer.init(current_values)
 
     replay_robot_keys = jax.random.split(pipeline.robot_key, num_realizations)
     replay_estimator_keys = jax.random.split(pipeline.estimator_key, num_realizations)
 
     if num_steps <= 0:
-        return current_gains, []
+        return _controller_gains_from_optimizer_values(current_values), []
 
     @scan_tqdm(num_steps, desc="Optimization")
     def train_step(carry, step):
-        gains, opt_state = carry
-        loss_value, grads = jax.value_and_grad(
-            lambda current_gains: closed_loop_tracking_mse(
+        values, opt_state = carry
+
+        def loss_for_optimizer_values(current_values):
+            current_gains = _controller_gains_from_optimizer_values(current_values)
+            return closed_loop_tracking_mse(
                 pipeline,
                 current_gains,
                 replay_robot_keys,
                 replay_estimator_keys,
             )
-        )(gains)
-        updates, next_opt_state = optimizer.update(grads, opt_state, gains)
-        next_gains = optax.apply_updates(gains, updates)
-        next_gains = clip_controller_gains(next_gains)
-        return (next_gains, next_opt_state), loss_value
 
-    (current_gains, _), loss_history = jax.lax.scan(
+        loss_value, grads = jax.value_and_grad(
+            loss_for_optimizer_values
+        )(values)
+        updates, next_opt_state = optimizer.update(grads, opt_state, values)
+        next_values = jnp.clip(optax.apply_updates(values, updates), min=0)
+        return (next_values, next_opt_state), loss_value
+
+    (current_values, _), loss_history = jax.lax.scan(
         train_step,
-        (current_gains, current_opt_state),
+        (current_values, current_opt_state),
         jnp.arange(num_steps),
     )
 
+    current_gains = _controller_gains_from_optimizer_values(current_values)
     return current_gains, np.asarray(loss_history, dtype=float).tolist()
