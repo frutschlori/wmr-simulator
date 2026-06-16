@@ -30,7 +30,7 @@ class Controller:
 
         # 1) wheel references -> (reference traj - > (v_ref, w_ref) -> (ur_ref, ul_ref))
         wheel_ref = self._pose_control(ref_state, pose_state, r, L, gain_values)
-        # 2) Wheel-speed control (PI) in duty-cycle units
+        # 2) Wheel-speed control (PI) in wheel-speed units, then normalize to duty.
         ir, il, duty_r, duty_l = self._wheel_speed_control(ctrl_state, wheel_ref, wheel_meas, gain_values, motor_gain)
         # 3) saturation on duty cycles here
         if self.duty_limits is not None:
@@ -76,9 +76,12 @@ class Controller:
         ir, il = ctrl_state
         ir += er * self.dt
         il += el * self.dt
-        # PI control in duty-cycle units. Feed-forward maps desired wheel speed to duty.
-        duty_r = ur_ref / motor_gain + kprmotor * er + kirmotor * ir
-        duty_l = ul_ref / motor_gain + kplmotor * el + kilmotor * il
+        # Keep motor PI gains in wheel-speed units for numerically stable gradients.
+        ur_cmd = ur_ref + kprmotor * er + kirmotor * ir
+        ul_cmd = ul_ref + kplmotor * el + kilmotor * il
+        # Map to duty cycles for the motor model.
+        duty_r = ur_cmd / motor_gain
+        duty_l = ul_cmd / motor_gain
         return ir, il, duty_r, duty_l
 
     @staticmethod

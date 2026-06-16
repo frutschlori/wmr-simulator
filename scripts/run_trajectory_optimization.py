@@ -4,20 +4,20 @@ import os
 
 def main():
     parser = argparse.ArgumentParser(description="Initialize trajectory optimization inputs.")
-    parser.add_argument("--problem", default="problems/pololu.yaml")
+    parser.add_argument("--problem", default="problems/problem_hidden.yaml")
     parser.add_argument("--jax-platform", choices=["default", "cpu"], default="cpu")
     # Optimization Settings
-    parser.add_argument("--save-trajectory", action="store_true", default=True)
-    parser.add_argument("--window-length", type=int, default=1)
-    parser.add_argument("--opt-steps", type=int, default=10000)
-    parser.add_argument("--learning-rate", type=float, default=1e-3)
+    parser.add_argument("--save-trajectory", action="store_true", default=False)
+    parser.add_argument("--window-length", type=int, default=50)
+    parser.add_argument("--opt-steps", type=int, default=4000)
+    parser.add_argument("--learning-rate", type=float, default=1e-2)
     # Path settings
     parser.add_argument("--time-scaling", choices=["s-curve", "linear"], default="s-curve")
     parser.add_argument("--trajectory-generator", choices=["planner", "bezier"], default="bezier")
     parser.add_argument("--bezier-order", type=int, default=20)
     parser.add_argument("--replay-wheel-speeds", choices=["true", "noisy"], default="true")
     # Constraints
-    parser.add_argument("--constraint-weight", type=float, default=1.0)
+    parser.add_argument("--constraint-weight", type=float, default=0.0)
     parser.add_argument("--constraint-v-weight", type=float, default=1.0)
     parser.add_argument("--constraint-a-weight", type=float, default=1.0)
     parser.add_argument("--constraint-lateral-weight", type=float, default=1.0)

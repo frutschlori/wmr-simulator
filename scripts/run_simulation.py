@@ -1,7 +1,5 @@
 import argparse
 
-import numpy as np
-
 from wmr_simulator.simulation import SimulationPipeline
 from wmr_simulator.visualization.simulation import plot, visualize
 
@@ -13,7 +11,7 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output", type=str, default="simulation")
     parser.add_argument("--skip-pdf", action="store_true")
-    parser.add_argument("--skip-meshcat", action="store_true")
+    parser.add_argument("--skip-ref-meshcat", action="store_true", default=False)
     args = parser.parse_args()
 
     pipeline = SimulationPipeline(
@@ -36,15 +34,10 @@ def main():
             out_prefix=args.output,
         )
 
-    if not args.skip_meshcat:
-        meshcat_poses = np.vstack([
-            np.asarray(pipeline.reference_states[0, :3]),
-            np.asarray(log.robot_states.pose[:-1]),
-        ])
+    if not args.skip_ref_meshcat:
         visualize(
             pipeline.problem_path,
-            meshcat_poses,
-            reference_states=pipeline.reference_states,
+            log.robot_states.pose,
             out_prefix=args.output,
             dt=pipeline.dt,
         )

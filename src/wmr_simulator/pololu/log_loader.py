@@ -200,11 +200,11 @@ if __name__ == "__main__":
     from wmr_simulator.visualization.pololu import plot_logged_summary, plot_velocity_difference
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--log", type=str, default="Pololu Data/Logs/20cp_constrained_scurve/TR02")
+    parser.add_argument("--log", type=str, default="Pololu Data/Logs/20cp_constrained_scurve/TR47")
     parser.add_argument("--output", type=str, default=None)
     parser.add_argument("--out-dir", type=str, default="visualize")
     parser.add_argument("--hide-reference-velocity", action="store_true", default=True)
-    parser.add_argument("--show-markers", action="store_true")
+    parser.add_argument("--show-markers", action="store_true", default=True)
     parser.add_argument("--hide-velocity-difference-plot", action="store_true", default=True)
     args = parser.parse_args()
 
