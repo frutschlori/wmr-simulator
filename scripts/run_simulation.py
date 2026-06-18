@@ -1,7 +1,8 @@
 import argparse
 
 from wmr_simulator.simulation import SimulationPipeline
-from wmr_simulator.visualization.simulation import plot, visualize
+from wmr_simulator.visualization.pololu import plot_logged_summary
+from wmr_simulator.visualization.simulation import visualize
 
 
 def main():
@@ -26,20 +27,14 @@ def main():
     )
 
     if not args.skip_pdf:
-        plot(
-            (log.robot_states, log.estimator_states),
-            pipeline.estimator,
-            pipeline.sim_time_grid,
-            reference_states=pipeline.reference_states,
-            out_prefix=args.output,
-        )
+        plot_logged_summary(log, out_prefix=args.output)
 
     if not args.skip_ref_meshcat:
         visualize(
             pipeline.problem_path,
-            log.robot_states.pose,
+            log.pose.states,
             out_prefix=args.output,
-            dt=pipeline.dt,
+            dt=pipeline.wheel_dt,
         )
 
 

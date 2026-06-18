@@ -27,21 +27,10 @@ def plot_trajectory(
 
     reference_states = np.asarray(pipeline.reference_states)
     full_reference_states = np.asarray(getattr(pipeline, "full_reference_states", pipeline.reference_states))
-    estimator_filter_type = pipeline.estimator.filter_type
-
-    def _extract_estimated_poses(sim_log):
+    def _extract_poses(sim_log):
         if sim_log is None:
             return None
-        if estimator_filter_type == "dr":
-            poses = np.asarray(sim_log.estimator_states.pose_meas)
-        else:
-            poses = np.asarray(sim_log.estimator_states.pose_hat)
-        return poses[:, :3]
-
-    def _extract_actual_poses(sim_log):
-        if sim_log is None:
-            return None
-        poses = np.asarray(sim_log.robot_states.pose)
+        poses = np.asarray(sim_log.pose.states)
         return poses[:, :3]
 
     def _draw_theta_arrows(ax, poses, color):
@@ -69,10 +58,8 @@ def plot_trajectory(
             width=theta_arrow_width,
         )
 
-    tuned_poses = _extract_estimated_poses(tuned_log)
-    untuned_poses = _extract_estimated_poses(untuned_log)
-    tuned_actual_poses = _extract_actual_poses(tuned_log)
-    untuned_actual_poses = _extract_actual_poses(untuned_log)
+    tuned_poses = _extract_poses(tuned_log)
+    untuned_poses = _extract_poses(untuned_log)
 
     fig, ax = plt.subplots(1, 1, figsize=(8, 8))
     ax.plot(
@@ -96,42 +83,24 @@ def plot_trajectory(
         _draw_theta_arrows(ax, reference_states, "blue")
 
     if untuned_poses is not None:
-        if untuned_actual_poses is not None:
-            ax.plot(
-                untuned_actual_poses[:, 0],
-                untuned_actual_poses[:, 1],
-                linewidth=trajectory_linewidth,
-                linestyle="-",
-                color="blue",
-                label="Initial actual",
-            )
         ax.plot(
             untuned_poses[:, 0],
             untuned_poses[:, 1],
             linewidth=trajectory_linewidth,
-            linestyle="--",
+            linestyle="-",
             color="blue",
-            label="Initial estimated",
+            label="Initial",
         )
         _draw_theta_arrows(ax, untuned_poses, "blue")
 
     if tuned_poses is not None:
-        if tuned_actual_poses is not None:
-            ax.plot(
-                tuned_actual_poses[:, 0],
-                tuned_actual_poses[:, 1],
-                linewidth=trajectory_linewidth,
-                linestyle="-",
-                color="orange",
-                label="Tuned actual",
-            )
         ax.plot(
             tuned_poses[:, 0],
             tuned_poses[:, 1],
             linewidth=trajectory_linewidth,
-            linestyle="--",
+            linestyle="-",
             color="orange",
-            label="Tuned estimated",
+            label="Tuned",
         )
         _draw_theta_arrows(ax, tuned_poses, "orange")
 
@@ -413,42 +382,41 @@ def plot_system_id(
     show_markers: bool = False,
 ):
     target_log = pipeline.target_log
-    is_real_experiment = getattr(pipeline, "uses_external_target_log", False)
     marker_kwargs = _line_marker_kwargs(show_markers)
 
-    plot_len = min(
-        target_log.robot_states.pose.shape[0],
-        predicted_log.robot_states.pose.shape[0],
+    plot_time = np.asarray(target_log.pose.time_s, dtype=float)
+    reference_time = np.asarray(target_log.reference.time_s, dtype=float)
+    wheel_time = np.asarray(target_log.wheel.time_s, dtype=float)
+    command_time = np.asarray(target_log.pose.command_time_s, dtype=float)
+    reference = np.asarray(target_log.reference.states, dtype=float)
+    measurements = np.asarray(target_log.pose.states, dtype=float)
+    true_measurements = np.asarray(target_log.pose.true_states, dtype=float)
+    replay = np.asarray(predicted_log.pose.states, dtype=float)
+    wheel_actual = np.asarray(target_log.wheel.speeds, dtype=float)
+    duty_cycle = np.asarray(target_log.wheel.duty_cycle, dtype=float)
+    wheel_cmd = np.asarray(target_log.pose.wheel_cmd, dtype=float)
+    motor_model_wheel_speeds = np.asarray(
+        pipeline.motor_wheel_speed_rollout(
+            pipeline.estimated_params,
+            target_log,
+            window_length=getattr(pipeline, "window_length", None),
+        ),
+        dtype=float,
     )
-    plot_time = _plot_time_for_pipeline(pipeline, plot_len)
-    rejection_weights = _loss_weights_for_plot(pipeline, target_log, plot_len)
-    reference = _reference_states_for_time(pipeline, plot_time)
-    reference_vel = _reference_vel_omega_for_time(pipeline, plot_time)
-    measurements = _measurement_pose_series(pipeline, target_log)[:plot_len]
-    replay_window_starts = _estimated_pose_series(pipeline, target_log)[:plot_len]
-    replay = np.asarray(predicted_log.robot_states.pose)[:plot_len]
-    measured_vel = np.asarray(target_log.robot_states.vel_omega)
-    odom_vel = np.asarray(predicted_log.robot_states.vel_omega)
-    velocity_time, measured_vel, odom_vel, reference_vel = _aligned_velocity_series(
-        plot_time,
-        measured_vel,
-        odom_vel,
-        reference_vel,
-    )
-    wheel_cmd = np.asarray(target_log.robot_states.wheel_speed_cmd)[:plot_len]
-    duty_cycle = np.asarray(target_log.robot_states.duty_cycle)[:plot_len]
-    wheel_actual = np.asarray(target_log.robot_states.wheel_speeds)[:plot_len]
-    motor_model_wheel_speeds = _motor_model_wheel_speeds_for_pipeline(pipeline, target_log, plot_len)
-    estimates = None if is_real_experiment else replay_window_starts
 
+    plot_len = min(len(plot_time), len(measurements), len(true_measurements))
+    plot_time = plot_time[:plot_len]
+    measurements = measurements[:plot_len]
+    true_measurements = true_measurements[:plot_len]
+    replay = replay[: max(plot_len - 1, 0)]
     window_starts = _window_start_indices(pipeline, plot_len, getattr(pipeline, "window_length", None))
+    wheel_window_starts = _window_start_indices(pipeline, len(wheel_time), getattr(pipeline, "window_length", None))
 
     os.makedirs("visualize", exist_ok=True)
     output_path = os.path.join("visualize", f"{out_prefix}.pdf")
 
     fig = plt.figure(figsize=(24, 10))
-    fig.suptitle("Identification Summary ({source})".format(source=out_prefix[15:]), fontsize=16)
-
+    fig.suptitle(f"Identification Summary ({out_prefix})", fontsize=16)
     ax_traj = plt.subplot2grid((2, 10), (0, 0), colspan=1, fig=fig)
     ax_vel = plt.subplot2grid((2, 10), (0, 1), colspan=3, fig=fig)
     ax_wheels = plt.subplot2grid((2, 10), (0, 4), colspan=3, fig=fig)
@@ -459,183 +427,68 @@ def plot_system_id(
         plt.subplot2grid((2, 10), (1, 7), colspan=3, fig=fig),
     ]
 
-    if reference is not None:
-        ax_traj.plot(
-            reference[:, 0],
-            reference[:, 1],
-            color="tab:red",
-            linestyle="--",
-            linewidth=1.3,
-            label="Reference",
-            **marker_kwargs,
-        )
-    ax_traj.plot(
-        measurements[:, 0],
-        measurements[:, 1],
-        color="tab:blue",
-        linewidth=1.2,
-        label="Measured",
-        **marker_kwargs,
-    )
-    if estimates is not None:
-        ax_traj.scatter(estimates[:, 0], estimates[:, 1], s=2, color="tab:blue", alpha=0.45)
-    _plot_replay_windows_xy(ax_traj, replay_window_starts, replay, window_starts, marker_kwargs)
-    ax_traj.scatter(
-        replay_window_starts[window_starts, 0],
-        replay_window_starts[window_starts, 1],
-        marker="x",
-        s=32,
-        linewidths=1.0,
-        color="black",
-    )
+    measurement_label = "Measured" if getattr(pipeline, "uses_external_target_log", False) else "True"
+    show_estimate_dots = not getattr(pipeline, "uses_external_target_log", False)
+    ax_traj.plot(reference[:, 0], reference[:, 1], color="tab:red", linestyle="--", linewidth=1.3, label="Reference", **marker_kwargs)
+    ax_traj.plot(true_measurements[:, 0], true_measurements[:, 1], color="tab:blue", linewidth=1.2, label=measurement_label, **marker_kwargs)
+    if show_estimate_dots:
+        ax_traj.scatter(measurements[:, 0], measurements[:, 1], color="tab:blue", marker=".", s=5, linewidths=0.0)
+    _plot_replay_windows_xy(ax_traj, measurements, replay, window_starts, marker_kwargs)
+    ax_traj.scatter(measurements[window_starts, 0], measurements[window_starts, 1], marker="x", s=32, linewidths=1.0, color="black")
     ax_traj.set_xlabel("x [m]")
     ax_traj.set_ylabel("y [m]")
     ax_traj.set_title("Trajectory")
     ax_traj.set_aspect("equal", adjustable="box")
-    ax_traj.margins(x=0.02, y=0.02)
     ax_traj.grid(True)
-    ax_traj.legend(loc="upper left", fontsize="small")
+    ax_traj.legend(loc="upper left", bbox_to_anchor=(1.02, 1.0), borderaxespad=0.0, fontsize="small")
 
     ax_vel_omega = ax_vel.twinx()
-    _shade_rejected_intervals(ax_vel, plot_time, rejection_weights)
-    line_meas_v = ax_vel.plot(
-        velocity_time,
-        measured_vel[:, 0],
-        color="tab:blue",
-        linewidth=1.2,
-        label="mocap v" if is_real_experiment else "meas v",
-        **marker_kwargs,
-    )[0]
-    line_meas_w = ax_vel_omega.plot(
-        velocity_time,
-        measured_vel[:, 1],
-        color="tab:purple",
-        linewidth=1.2,
-        label=r"mocap $\omega$" if is_real_experiment else r"meas $\omega$",
-        **marker_kwargs,
-    )[0]
-    line_odom_v = ax_vel.plot(
-        velocity_time,
-        odom_vel[:, 0],
-        color="tab:blue",
-        linestyle=":",
-        linewidth=1.4,
-        label="odom v",
-        **marker_kwargs,
-    )[0]
-    line_odom_w = ax_vel_omega.plot(
-        velocity_time,
-        odom_vel[:, 1],
-        color="tab:purple",
-        linestyle=":",
-        linewidth=1.4,
-        label=r"odom $\omega$",
-        **marker_kwargs,
-    )[0]
-    line_ref_v = None
-    line_ref_w = None
-    if reference_vel is not None:
-        line_ref_v = ax_vel.plot(
-            velocity_time,
-            reference_vel[:, 0],
-            color="tab:blue",
-            linestyle="--",
-            linewidth=1.2,
-            label="ref v",
-            **marker_kwargs,
-        )[0]
-        line_ref_w = ax_vel_omega.plot(
-            velocity_time,
-            reference_vel[:, 1],
-            color="tab:purple",
-            linestyle="--",
-            linewidth=1.2,
-            label=r"ref $\omega$",
-            **marker_kwargs,
-        )[0]
-    left_velocity_values = [measured_vel[:, 0], odom_vel[:, 0]]
-    right_velocity_values = [measured_vel[:, 1], odom_vel[:, 1]]
-    if reference_vel is not None:
-        left_velocity_values.append(reference_vel[:, 0])
-        right_velocity_values.append(reference_vel[:, 1])
-    _set_symmetric_ylim(ax_vel, np.concatenate(left_velocity_values))
-    _set_symmetric_ylim(ax_vel_omega, np.concatenate(right_velocity_values))
+    ref_speed = np.linalg.norm(reference[:, 3:5], axis=1)
+    true_vel_time, true_vel = _pose_vel_omega(plot_time, true_measurements)
+    line_ref_v = ax_vel.plot(reference_time, ref_speed, color="tab:blue", linestyle="--", linewidth=1.0, label="ref v")[0]
+    line_true_v = ax_vel.plot(true_vel_time, true_vel[:, 0], color="tab:blue", linewidth=1.0, label="true v")[0]
+    line_model_v, line_model_w = _plot_windowed_velocity(ax_vel, ax_vel_omega, plot_time, measurements, replay, window_starts)
+    line_ref_w = ax_vel_omega.plot(reference_time, reference[:, 5], color="tab:purple", linestyle="--", linewidth=1.0, label=r"ref $\omega$")[0]
+    line_true_w = ax_vel_omega.plot(true_vel_time, true_vel[:, 1], color="tab:purple", linewidth=1.0, label=r"true $\omega$")[0]
     ax_vel.set_xlabel("time [s]")
     ax_vel.set_ylabel("linear velocity [m/s]")
     ax_vel_omega.set_ylabel("angular velocity [rad/s]")
-    ax_vel.set_title("Velocity Tracking")
+    ax_vel.set_title("Velocity")
     ax_vel.grid(True)
-    ax_vel.legend(
-        handles=[
-            handle
-            for handle in [line_ref_v, line_meas_v, line_odom_v, line_ref_w, line_meas_w, line_odom_w]
-            if handle is not None
-        ],
-        loc="best",
-    )
+    velocity_handles = [line_ref_v, line_true_v, line_model_v, line_ref_w, line_true_w, line_model_w]
+    ax_vel.legend(handles=[handle for handle in velocity_handles if handle is not None], loc="best")
 
-    _shade_rejected_intervals(ax_wheels, plot_time, rejection_weights)
-    line_cmd_right = ax_wheels.plot(
-        plot_time,
-        wheel_cmd[:, 0],
-        color="tab:green",
-        linestyle="--",
-        linewidth=1.1,
-        label="cmd right",
-        **marker_kwargs,
-    )[0]
-    line_cmd_left = ax_wheels.plot(
-        plot_time,
-        wheel_cmd[:, 1],
-        color="tab:orange",
-        linestyle="--",
-        linewidth=1.1,
-        label="cmd left",
-        **marker_kwargs,
-    )[0]
-    line_meas_right = ax_wheels.plot(
-        plot_time,
-        wheel_actual[:, 0],
-        color="tab:green",
-        linewidth=1.2,
-        label="actual right",
-        **marker_kwargs,
-    )[0]
-    line_meas_left = ax_wheels.plot(
-        plot_time,
-        wheel_actual[:, 1],
-        color="tab:orange",
-        linewidth=1.2,
-        label="actual left",
-        **marker_kwargs,
-    )[0]
+    cmd_time, cmd_right = _stair_series(command_time, wheel_cmd[:, 0], wheel_time[-1] if len(wheel_time) else None)
+    _, cmd_left = _stair_series(command_time, wheel_cmd[:, 1], wheel_time[-1] if len(wheel_time) else None)
+    line_cmd_right = ax_wheels.step(cmd_time, cmd_right, where="post", color="tab:green", linestyle="--", linewidth=0.8, label="cmd right", **marker_kwargs)[0]
+    line_meas_right = ax_wheels.plot(wheel_time, wheel_actual[:, 0], color="tab:green", linewidth=0.9, label="meas right", **marker_kwargs)[0]
+    line_cmd_left = ax_wheels.step(cmd_time, cmd_left, where="post", color="tab:orange", linestyle="--", linewidth=0.8, label="cmd left", **marker_kwargs)[0]
+    line_meas_left = ax_wheels.plot(wheel_time, wheel_actual[:, 1], color="tab:orange", linewidth=0.9, label="meas left", **marker_kwargs)[0]
     ax_wheels.set_xlabel("time [s]")
     ax_wheels.set_ylabel("wheel speed [rad/s]")
     ax_wheels.set_title("Wheel Speeds")
     ax_wheels.grid(True)
     ax_wheels.legend(handles=[line_cmd_right, line_meas_right, line_cmd_left, line_meas_left])
 
-    _shade_rejected_intervals(ax_motor, plot_time, rejection_weights)
-    _plot_motor_model_axes(
+    _plot_windowed_motor_model_axes(
         ax_motor,
-        plot_time,
+        wheel_time,
         duty_cycle,
         wheel_actual,
         motor_model_wheel_speeds,
+        wheel_window_starts,
         marker_kwargs,
     )
 
     state_labels = ("x [m]", "y [m]", "theta [rad]")
     state_names = ("x", "y", "theta")
     for index, ax in enumerate(state_axes):
-        _shade_rejected_intervals(ax, plot_time, rejection_weights)
-        if reference is not None:
-            ax.plot(plot_time, reference[:, index], "r--", linewidth=1.3, label="Reference", **marker_kwargs)
-        ax.plot(plot_time, measurements[:, index], color="tab:blue", linewidth=1.2, label="Measured", **marker_kwargs)
-        if estimates is not None:
-            ax.scatter(plot_time, estimates[:, index], s=2, color="tab:blue", alpha=0.45)
-        _plot_replay_windows_state(ax, plot_time, replay_window_starts, replay, window_starts, index, marker_kwargs)
-        _plot_window_start_markers(ax, plot_time, replay_window_starts[:, index], window_starts)
+        ax.plot(reference_time, reference[:, index], "r--", linewidth=1.3, label="Reference", **marker_kwargs)
+        ax.plot(plot_time, true_measurements[:, index], color="tab:blue", linewidth=1.2, label=measurement_label, **marker_kwargs)
+        if show_estimate_dots:
+            ax.scatter(plot_time, measurements[:, index], color="tab:blue", marker=".", s=5, linewidths=0.0)
+        _plot_replay_windows_state(ax, plot_time, measurements, replay, window_starts, index, marker_kwargs)
+        _plot_window_start_markers(ax, plot_time, measurements[:, index], window_starts)
         ax.set_xlabel("time [s]")
         ax.set_ylabel(state_labels[index])
         ax.set_title(f"{state_names[index]} State")
@@ -644,256 +497,35 @@ def plot_system_id(
 
     if show_markers:
         _set_line_widths(fig, 1.0)
-
     fig.tight_layout(rect=[0, 0, 1, 0.96])
     fig.savefig(output_path, bbox_inches="tight", transparent=False, facecolor="white")
     plt.close(fig)
-
     print(f"System ID summary PDF saved at: {output_path}")
-
-
-def plot_velocity_difference(
-    pipeline,
-    target_log,
-    *,
-    out_prefix: str = "identification_sim",
-    wheel_speed_source: str = "true",
-    show_markers: bool = False,
-):
-    plot_len = target_log.robot_states.pose.shape[0]
-    plot_time = _plot_time_for_pipeline(pipeline, plot_len)
-    rejection_weights = _loss_weights_for_plot(pipeline, target_log, plot_len)
-    pose = np.asarray(target_log.robot_states.pose)[:plot_len]
-    mocap_vel = _finite_difference_vel_omega(pose, plot_time)
-    odom_vel = _wheel_odometry_vel_omega(pipeline, target_log, wheel_speed_source)[:plot_len]
-
-    velocity_len = min(len(mocap_vel), max(len(odom_vel) - 1, 0), len(plot_time) - 1)
-    velocity_time = plot_time[1 : velocity_len + 1]
-    velocity_error = mocap_vel[:velocity_len] - odom_vel[1 : velocity_len + 1]
-
-    marker_kwargs = _line_marker_kwargs(show_markers)
-    os.makedirs("visualize", exist_ok=True)
-    output_path = os.path.join("visualize", f"{out_prefix}_velocity_difference.pdf")
-
-    fig, ax_v = plt.subplots(1, 1, figsize=(10, 4.5))
-    ax_w = ax_v.twinx()
-    _shade_rejected_intervals(ax_v, plot_time, rejection_weights)
-    line_v = ax_v.plot(
-        velocity_time,
-        velocity_error[:, 0],
-        color="tab:blue",
-        linewidth=1.2,
-        label="mocap v - odom v",
-        **marker_kwargs,
-    )[0]
-    line_w = ax_w.plot(
-        velocity_time,
-        velocity_error[:, 1],
-        color="tab:purple",
-        linewidth=1.2,
-        label=r"mocap $\omega$ - odom $\omega$",
-        **marker_kwargs,
-    )[0]
-    _set_symmetric_ylim(ax_v, velocity_error[:, 0])
-    _set_symmetric_ylim(ax_w, velocity_error[:, 1])
-    ax_v.axhline(0.0, color="black", linewidth=0.8, alpha=0.5)
-    ax_v.set_xlabel("time [s]")
-    ax_v.set_ylabel("linear velocity difference [m/s]")
-    ax_w.set_ylabel("angular velocity difference [rad/s]")
-    ax_v.set_title("Mocap vs Odometry Velocity Difference")
-    ax_v.grid(True)
-    ax_v.legend(handles=[line_v, line_w], loc="best")
-
-    if show_markers:
-        _set_line_widths(fig, 1.0)
-
-    fig.tight_layout()
-    fig.savefig(output_path, bbox_inches="tight", transparent=False, facecolor="white")
-    plt.close(fig)
-    print(f"Velocity difference PDF saved at: {output_path}")
-
-
-def _plot_time_for_pipeline(pipeline, plot_len: int) -> np.ndarray:
-    if getattr(pipeline, "target_time_s", None) is not None:
-        return np.asarray(pipeline.target_time_s, dtype=float)[:plot_len]
-    return np.asarray(pipeline.sim_time_grid, dtype=float)[:plot_len]
-
-
-def _loss_weights_for_plot(pipeline, target_log, plot_len: int) -> np.ndarray | None:
-    if not hasattr(pipeline, "target_loss_weights"):
-        return None
-    weights = pipeline.target_loss_weights(target_log)
-    if weights is None:
-        return None
-    return np.asarray(weights, dtype=float)[:plot_len]
-
-
-def _motor_model_wheel_speeds_for_pipeline(pipeline, target_log, plot_len: int) -> np.ndarray | None:
-    if not hasattr(pipeline, "motor_wheel_speed_rollout"):
-        return None
-    params = getattr(pipeline, "estimated_params", getattr(pipeline, "initial_params", None))
-    if params is None:
-        return None
-    return np.asarray(pipeline.motor_wheel_speed_rollout(params, target_log), dtype=float)[:plot_len]
-
-
-def _shade_rejected_intervals(ax, plot_time: np.ndarray, weights: np.ndarray | None) -> None:
-    if weights is None:
-        return
-    plot_time = np.asarray(plot_time, dtype=float)
-    weights = np.asarray(weights, dtype=float)
-    rejected_indices = np.flatnonzero(weights[: len(plot_time)] <= 0.0)
-    for index in rejected_indices:
-        if index < 0 or index >= len(plot_time):
-            continue
-        if index > 0:
-            left = 0.5 * (plot_time[index - 1] + plot_time[index])
-        elif len(plot_time) > 1:
-            left = plot_time[index] - 0.5 * (plot_time[index + 1] - plot_time[index])
-        else:
-            left = plot_time[index]
-
-        if index + 1 < len(plot_time):
-            right = 0.5 * (plot_time[index] + plot_time[index + 1])
-        elif index > 0:
-            right = plot_time[index] + 0.5 * (plot_time[index] - plot_time[index - 1])
-        else:
-            right = plot_time[index]
-        ax.axvspan(
-            left,
-            right,
-            color="0.85",
-            alpha=0.7,
-            linewidth=0.0,
-            zorder=0,
-        )
-
-
-def _reference_states_for_time(pipeline, plot_time: np.ndarray) -> np.ndarray | None:
-    reference_states = getattr(pipeline, "reference_states", None)
-    if reference_states is None:
-        return None
-    reference_states = np.asarray(reference_states)
-    if reference_states.size == 0:
-        return None
-
-    if getattr(pipeline, "target_time_s", None) is None:
-        return _pad_or_trim_reference(reference_states, len(plot_time))
-
-    if getattr(pipeline, "uses_external_target_log", False):
-        return _pad_or_trim_reference(reference_states, len(plot_time))
-
-    ref_indices = np.rint(plot_time / pipeline.dt).astype(int)
-    ref_indices = np.clip(ref_indices, 0, len(reference_states) - 1)
-    return reference_states[ref_indices, :3]
-
-
-def _reference_vel_omega_for_time(pipeline, plot_time: np.ndarray) -> np.ndarray | None:
-    reference_states = getattr(pipeline, "reference_states", None)
-    if reference_states is None:
-        return None
-    reference_states = np.asarray(reference_states)
-    if reference_states.ndim != 2 or reference_states.shape[1] < 6:
-        return None
-
-    if getattr(pipeline, "target_time_s", None) is None or getattr(pipeline, "uses_external_target_log", False):
-        reference_states = _pad_or_trim_full_reference(reference_states, len(plot_time))
-    else:
-        ref_indices = np.rint(plot_time / pipeline.dt).astype(int)
-        ref_indices = np.clip(ref_indices, 0, len(reference_states) - 1)
-        reference_states = reference_states[ref_indices]
-
-    linear_speed = np.linalg.norm(reference_states[:, 3:5], axis=1)
-    angular_speed = reference_states[:, 5]
-    return np.column_stack([linear_speed, angular_speed])
-
-
-def _aligned_velocity_series(
-    plot_time: np.ndarray,
-    measured_vel: np.ndarray,
-    odom_vel: np.ndarray,
-    reference_vel: np.ndarray | None,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None]:
-    measured_vel = np.asarray(measured_vel, dtype=float)
-    odom_vel = np.asarray(odom_vel, dtype=float)
-    reference_vel = None if reference_vel is None else np.asarray(reference_vel, dtype=float)
-
-    if len(measured_vel) == len(plot_time) - 1:
-        velocity_len = min(len(measured_vel), max(len(odom_vel) - 1, 0), len(plot_time) - 1)
-        if reference_vel is not None:
-            velocity_len = min(velocity_len, max(len(reference_vel) - 1, 0))
-        velocity_time = plot_time[1 : velocity_len + 1]
-        measured_vel = measured_vel[:velocity_len]
-        odom_vel = odom_vel[1 : velocity_len + 1]
-        reference_vel = None if reference_vel is None else reference_vel[1 : velocity_len + 1]
-        return velocity_time, measured_vel, odom_vel, reference_vel
-
-    velocity_len = min(len(measured_vel), len(odom_vel), len(plot_time))
-    if reference_vel is not None:
-        velocity_len = min(velocity_len, len(reference_vel))
-    velocity_time = plot_time[:velocity_len]
-    measured_vel = measured_vel[:velocity_len]
-    odom_vel = odom_vel[:velocity_len]
-    reference_vel = None if reference_vel is None else reference_vel[:velocity_len]
-    return velocity_time, measured_vel, odom_vel, reference_vel
-
-
-def _finite_difference_vel_omega(pose: np.ndarray, plot_time: np.ndarray) -> np.ndarray:
-    interval_dt = np.diff(plot_time)
-    dx_dt = np.diff(pose[:, 0]) / interval_dt
-    dy_dt = np.diff(pose[:, 1]) / interval_dt
-    yaw_delta = np.diff(pose[:, 2])
-    yaw_delta = np.arctan2(np.sin(yaw_delta), np.cos(yaw_delta))
-    omega = yaw_delta / interval_dt
-    linear_speed = dx_dt * np.cos(pose[1:, 2]) + dy_dt * np.sin(pose[1:, 2])
-    return np.stack([linear_speed, omega], axis=1)
-
-
-def _wheel_odometry_vel_omega(pipeline, target_log, wheel_speed_source: str) -> np.ndarray:
-    source = str(wheel_speed_source).lower()
-    if source == "true":
-        wheel_speeds = np.asarray(target_log.robot_states.wheel_speeds, dtype=float)
-    elif source == "noisy":
-        wheel_speeds = np.asarray(target_log.estimator_states.u_hat, dtype=float)
-    else:
-        raise ValueError("wheel_speed_source must be 'true' or 'noisy'.")
-
-    wheel_radius = float(np.asarray(pipeline.hidden_params.wheel_radius))
-    base_diameter = float(np.asarray(pipeline.hidden_params.base_diameter))
-    linear_speed = 0.5 * wheel_radius * (wheel_speeds[:, 0] + wheel_speeds[:, 1])
-    angular_speed = (wheel_radius / base_diameter) * (wheel_speeds[:, 0] - wheel_speeds[:, 1])
-    return np.column_stack([linear_speed, angular_speed])
-
-
-def _pad_or_trim_reference(reference_states: np.ndarray, length: int) -> np.ndarray:
-    reference_states = reference_states[:, :3]
-    if len(reference_states) >= length:
-        return reference_states[:length]
-    tail = np.tile(reference_states[-1], (length - len(reference_states), 1))
-    return np.vstack([reference_states, tail])
-
-
-def _pad_or_trim_full_reference(reference_states: np.ndarray, length: int) -> np.ndarray:
-    if len(reference_states) >= length:
-        return reference_states[:length]
-    tail = np.tile(reference_states[-1], (length - len(reference_states), 1))
-    return np.vstack([reference_states, tail])
-
-
-def _measurement_pose_series(pipeline, sim_log) -> np.ndarray:
-    return np.asarray(sim_log.robot_states.pose)
-
-
-def _estimated_pose_series(pipeline, sim_log) -> np.ndarray:
-    if pipeline.estimator.filter_type == "dr":
-        return np.asarray(sim_log.estimator_states.pose_meas)
-    return np.asarray(sim_log.estimator_states.pose_hat)
 
 
 def _window_start_indices(pipeline, plot_len: int, window_length: int | None) -> np.ndarray:
     num_intervals = max(plot_len - 1, 1)
     resolved_window_length = pipeline.resolve_window_length(window_length)
     return np.arange(0, num_intervals, resolved_window_length, dtype=int)
+
+
+def _stair_series(time: np.ndarray, values: np.ndarray, end_time: float | None) -> tuple[np.ndarray, np.ndarray]:
+    if end_time is None or len(time) == 0 or end_time <= time[-1]:
+        return time, values
+    return np.concatenate([time, [end_time]]), np.concatenate([values, values[-1:]])
+
+
+def _pose_vel_omega(time_s: np.ndarray, pose: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    if len(time_s) < 2:
+        return time_s, np.zeros((len(time_s), 2), dtype=float)
+
+    dt = np.diff(time_s)
+    delta_xy = np.diff(pose[:, :2], axis=0)
+    theta = np.unwrap(pose[:, 2])
+    heading = theta[1:]
+    linear_velocity = (delta_xy[:, 0] * np.cos(heading) + delta_xy[:, 1] * np.sin(heading)) / dt
+    angular_velocity = np.diff(theta) / dt
+    return time_s[1:], np.column_stack([linear_velocity, angular_velocity])
 
 
 def _plot_replay_windows_xy(
@@ -927,25 +559,171 @@ def _plot_replay_windows_state(
     state_index: int,
     marker_kwargs: dict[str, object],
 ):
-    for window_index, start_idx in enumerate(window_starts):
-        segment_time, segment_poses = _model_window_segment(
+    _plot_replay_windows_series(
+        ax,
+        plot_time,
+        measurements,
+        replay,
+        window_starts,
+        state_index,
+        color="tab:orange",
+        label="Model",
+        linewidth=1.0,
+        marker_kwargs=marker_kwargs,
+    )
+
+
+def _plot_windowed_motor_model_axes(
+    ax_duty,
+    time: np.ndarray,
+    duty_cycle: np.ndarray,
+    encoder_wheel_speeds: np.ndarray,
+    model_wheel_speeds: np.ndarray,
+    window_starts: np.ndarray,
+    marker_kwargs: dict[str, object],
+):
+    ax_speed = ax_duty.twinx()
+
+    line_dc_l = ax_duty.plot(
+        time,
+        duty_cycle[:, 1],
+        color="#f2c14e",
+        linewidth=0.3,
+        label="DC left",
+        **marker_kwargs,
+    )[0]
+    line_enc_l = ax_speed.plot(
+        time,
+        encoder_wheel_speeds[:, 1],
+        color="#f28e2b",
+        linewidth=0.9,
+        label="enc left",
+        **marker_kwargs,
+    )[0]
+    line_dc_r = ax_duty.plot(
+        time,
+        duty_cycle[:, 0],
+        color="#59a14f",
+        linewidth=0.3,
+        label="DC right",
+        **marker_kwargs,
+    )[0]
+    line_enc_r = ax_speed.plot(
+        time,
+        encoder_wheel_speeds[:, 0],
+        color="#1b7f3a",
+        linewidth=0.9,
+        label="enc right",
+        **marker_kwargs,
+    )[0]
+
+    model_left = _plot_replay_windows_series(
+        ax_speed,
+        time,
+        encoder_wheel_speeds,
+        model_wheel_speeds,
+        window_starts,
+        1,
+        color="#b85c00",
+        label="model left",
+        linewidth=0.9,
+        marker_kwargs=marker_kwargs,
+    )
+    model_right = _plot_replay_windows_series(
+        ax_speed,
+        time,
+        encoder_wheel_speeds,
+        model_wheel_speeds,
+        window_starts,
+        0,
+        color="#0b5d1e",
+        label="model right",
+        linewidth=0.9,
+        marker_kwargs=marker_kwargs,
+    )
+    _set_symmetric_ylim(ax_duty, duty_cycle)
+    speed_values = [encoder_wheel_speeds]
+    if model_wheel_speeds.size:
+        speed_values.append(model_wheel_speeds)
+    _set_symmetric_ylim(ax_speed, np.concatenate(speed_values, axis=0))
+    ax_duty.set_xlabel("time [s]")
+    ax_duty.set_ylabel("duty cycle")
+    ax_speed.set_ylabel("wheel speed [rad/s]")
+    ax_duty.set_title("Motor Model")
+    ax_duty.grid(True)
+    ax_duty.legend(
+        handles=[line_dc_l, line_enc_l, model_left, line_dc_r, line_enc_r, model_right],
+        loc="best",
+    )
+
+
+def _plot_replay_windows_series(
+    ax,
+    time: np.ndarray,
+    measurements: np.ndarray,
+    replay: np.ndarray,
+    window_starts: np.ndarray,
+    value_index: int,
+    color: str,
+    label: str,
+    linewidth: float,
+    marker_kwargs: dict[str, object],
+):
+    first_line = None
+    for window_index, _ in enumerate(window_starts):
+        segment_time, segment_values = _model_window_segment(
             measurements,
             replay,
-            plot_time,
+            time,
             window_starts,
             window_index,
         )
+        if len(segment_values) < 2:
+            continue
+        line = ax.plot(
+            segment_time,
+            segment_values[:, value_index],
+            color=color,
+            linewidth=linewidth,
+            label=label if first_line is None else None,
+            **marker_kwargs,
+        )[0]
+        first_line = line if first_line is None else first_line
+    return first_line
+
+
+def _plot_windowed_velocity(
+    ax_v,
+    ax_w,
+    time: np.ndarray,
+    measurements: np.ndarray,
+    replay: np.ndarray,
+    window_starts: np.ndarray,
+):
+    first_v = None
+    first_w = None
+    for window_index, _ in enumerate(window_starts):
+        segment_time, segment_poses = _model_window_segment(measurements, replay, time, window_starts, window_index)
         if len(segment_poses) < 2:
             continue
-        label = "Model" if window_index == 0 else None
-        ax.plot(
-            segment_time,
-            segment_poses[:, state_index],
+        vel_time, velocity = _pose_vel_omega(segment_time, segment_poses)
+        line_v = ax_v.plot(
+            vel_time,
+            velocity[:, 0],
             color="tab:orange",
             linewidth=1.0,
-            label=label,
-            **marker_kwargs,
-        )
+            label="model v" if first_v is None else None,
+        )[0]
+        line_w = ax_w.plot(
+            vel_time,
+            velocity[:, 1],
+            color="tab:red",
+            linewidth=1.0,
+            label=r"model $\omega$" if first_w is None else None,
+        )[0]
+        first_v = line_v if first_v is None else first_v
+        first_w = line_w if first_w is None else first_w
+    return first_v, first_w
 
 
 def _model_window_segment(
@@ -955,13 +733,13 @@ def _model_window_segment(
     window_starts: np.ndarray,
     window_index: int,
 ) -> tuple[np.ndarray | None, np.ndarray]:
-    start_idx = min(int(window_starts[window_index]), len(replay) - 1)
+    start_idx = min(int(window_starts[window_index]), len(measurements) - 1)
     if window_index + 1 < len(window_starts):
-        end_idx = min(int(window_starts[window_index + 1]), len(replay) - 1)
+        end_idx = min(int(window_starts[window_index + 1]), len(measurements) - 1)
     else:
-        end_idx = len(replay) - 1
+        end_idx = len(measurements) - 1
 
-    replay_segment = replay[start_idx + 1 : end_idx + 1]
+    replay_segment = replay[start_idx:end_idx]
     poses = np.vstack([measurements[start_idx], replay_segment])
     if plot_time is None:
         return None, poses
@@ -969,14 +747,20 @@ def _model_window_segment(
     return times, poses
 
 
-def _plot_window_start_markers(ax, plot_time: np.ndarray, values: np.ndarray, window_starts: np.ndarray):
+def _plot_window_start_markers(
+    ax,
+    plot_time: np.ndarray,
+    values: np.ndarray,
+    window_starts: np.ndarray,
+    color: str = "black",
+):
     ax.scatter(
         plot_time[window_starts],
         values[window_starts],
         marker="x",
         s=32,
         linewidths=1.0,
-        color="black",
+        color=color,
     )
 
 

@@ -5,8 +5,11 @@ __all__ = [
     "DiffDriveState",
     "EstimatorState",
     "PhysicalParams",
+    "PoseLog",
+    "ReferenceLog",
     "SimulationLog",
     "SimulationPipeline",
+    "WheelLog",
 ]
 
 
@@ -27,8 +30,14 @@ def __getattr__(name):
         from wmr_simulator.simulation import SimulationPipeline
 
         return SimulationPipeline
-    if name in {"PhysicalParams", "SimulationLog"}:
-        from wmr_simulator.types import PhysicalParams, SimulationLog
+    if name in {"PhysicalParams", "PoseLog", "ReferenceLog", "SimulationLog", "WheelLog"}:
+        from wmr_simulator.types import PhysicalParams, PoseLog, ReferenceLog, SimulationLog, WheelLog
 
-        return {"PhysicalParams": PhysicalParams, "SimulationLog": SimulationLog}[name]
+        return {
+            "PhysicalParams": PhysicalParams,
+            "PoseLog": PoseLog,
+            "ReferenceLog": ReferenceLog,
+            "SimulationLog": SimulationLog,
+            "WheelLog": WheelLog,
+        }[name]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

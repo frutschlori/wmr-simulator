@@ -1,24 +1,19 @@
+import os
+os.environ["JAX_PLATFORMS"] = "cpu"
 import argparse
-
-from wmr_simulator.gain_tuning.pipeline import (
-    resolve_gain_robot_params,
-    run_gain_tuning_experiment,
-)
+from wmr_simulator.gain_tuning.pipeline import (resolve_gain_robot_params, run_gain_tuning_experiment)
 from wmr_simulator.types import print_controller_gains, print_physical_params
 from wmr_simulator.visualization.gain_tuning import plot_controller_tuning_errors
-from wmr_simulator.visualization.identification import (
-    plot_loss_history,
-    plot_trajectory,
-)
+from wmr_simulator.visualization.identification import (plot_loss_history, plot_trajectory)
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--problem", type=str, default="problems/problem_hidden.yaml")
-    parser.add_argument("--reference-trajectories-dir", type=str, default=None)
+    parser.add_argument("--problem", type=str, default="problems/pololu_gains.yaml")
+    parser.add_argument("--reference-trajectories-dir", type=str, default="trajectory_exports")
     parser.add_argument("--steps", type=int, default=2000)
     parser.add_argument("--learning-rate", type=float, default=1e-2)
-    parser.add_argument("--num-realizations", type=int, default=16)
+    parser.add_argument("--num-realizations", type=int, default=8)
     parser.add_argument("--seed", type=int, default=2)
     parser.add_argument("--fixed-wheel-radius", type=float, default=None)
     parser.add_argument("--fixed-base-diameter", type=float, default=None)

@@ -1,4 +1,6 @@
 import argparse
+import os
+os.environ["JAX_PLATFORMS"] = "cpu"
 
 import jax.numpy as jnp
 import numpy as np
@@ -6,13 +8,12 @@ import numpy as np
 from wmr_simulator.identification.pipeline import run_single_experiment_identification
 from wmr_simulator.types import (
     PhysicalParams,
-    physical_params_to_array,
     physical_params_from_array,
+    physical_params_to_array,
 )
 from wmr_simulator.visualization.identification import (
     plot_loss_history,
     plot_system_id,
-    plot_velocity_difference,
 )
 
 
@@ -26,7 +27,7 @@ def print_param_block(label: str, params: PhysicalParams, signed: bool = False, 
         print(f"  average geometry error = {np.mean(np.abs(values_mm[:2])):.2f} mm")
 
     print(f"  max_wheel_speed = {float(params.max_wheel_speed):{value_format}} rad/s")
-    print(f"  time_constant  = {float(params.time_constant):{value_format}} s")
+    print(f"  time_constant  = {float(params.time_constant):{".3f"}} s")
 
 
 def main():
@@ -34,29 +35,20 @@ def main():
     # Problem configuration (contains hidden robot parameters, noise, optionally reference traj)
     parser.add_argument("--problem", type=str, default="problems/pololu.yaml")
     # Optimization hyper-parameters
-    parser.add_argument("--bootstrap-samples", type=int, default=1000)
-    parser.add_argument("--window-length", type=int, default=1)
+    parser.add_argument("--bootstrap-samples", type=int, default=None)
+    parser.add_argument("--window-length", type=int, default=50)
     parser.add_argument("--steps", type=int, default=1000)
-    parser.add_argument("--learning-rate", type=float, default=1e-4)
-    parser.add_argument("--motor-learning-rate", type=float, default=1e-3)
-    # Ignore slippy measurements where mocap and odometry velocities mismatch too much
-    parser.add_argument("--max-linear-velocity-difference", type=float, default=None)
-    parser.add_argument("--max-angular-velocity-difference", type=float, default=None)
+    parser.add_argument("--learning-rate", type=float, default=2e-3)
     # Initial guess robot parameters
     parser.add_argument("--init-wheel-radius", type=float, default=0.02)
     parser.add_argument("--init-base-diameter", type=float, default=0.1)
     parser.add_argument("--init-max-wheel-speed", type=float, default=300.0)
-    parser.add_argument("--init-time-constant", type=float, default=0.2)
-    # Noise settings
+    parser.add_argument("--init-time-constant", type=float, default=0.3)
     parser.add_argument("--seed", type=int, default=2)
-    parser.add_argument("--stochastic-replay", action="store_true")
-    parser.add_argument("--num-realizations", type=int, default=1)
-    parser.add_argument("--replay-wheel-speeds", choices=("true", "noisy"), default="noisy")
     # Optionally load target trajectory from disk
     parser.add_argument("--reference-trajectories-dir", type=str, default="trajectory_exports")
-    # parser.add_argument("--reference-trajectories-dir", type=str, default=None)
+    parser.add_argument("--replay-wheel-speeds", choices=("estimated", "true"), default="estimated")
     parser.add_argument("--show-markers", action="store_true")
-    parser.add_argument("--hide-velocity-difference-plot", action="store_true", default=False)
 
     args = parser.parse_args()
 
@@ -72,16 +64,11 @@ def main():
         initial_params=init_params,
         num_steps=args.steps,
         learning_rate=args.learning_rate,
-        motor_learning_rate=args.motor_learning_rate,
-        num_realizations=args.num_realizations,
         seed=args.seed,
         reference_trajectories_dir=args.reference_trajectories_dir,
         window_length=args.window_length,
         bootstrap_samples=args.bootstrap_samples,
-        deterministic_replay=not args.stochastic_replay,
         replay_wheel_speed_source=args.replay_wheel_speeds,
-        max_linear_velocity_difference=args.max_linear_velocity_difference,
-        max_angular_velocity_difference=args.max_angular_velocity_difference,
     )
     pipeline = result["pipeline"]
     print_param_block("Initial guess:", init_params)
@@ -89,7 +76,6 @@ def main():
     print_param_block("Hidden parameters:", pipeline.hidden_params)
     if result["bootstrap"] is not None:
         bootstrap = result["bootstrap"]
-        mean_params = physical_params_from_array(bootstrap["parameter_mean"])
         bias = physical_params_from_array(
             bootstrap["parameter_mean"] - physical_params_to_array(pipeline.hidden_params)
         )
@@ -107,11 +93,9 @@ def main():
         print(f"Mean normalized geometry loss: {result['loss_history'][-1]:.8f}")
         print(f"Mean normalized motor loss:    {result['motor_loss_history'][-1]:.8f}")
         print()
-        print_param_block("Mean estimated parameters:", mean_params)
+        print_param_block("Mean estimated parameters:", result["estimated_params"])
         print_param_block("Bias of mean estimate:", bias, signed=True, show_mean=True)
         print_param_block("Standard deviation:", std_params, show_mean=True)
-        # print("Parameter covariance [mm, mm, rad/s, s]:")
-        # print(np.array2string(covariance_scaled, precision=4, suppress_small=False))
     else:
         print()
         print_param_block("Estimated parameters:", result["estimated_params"])
@@ -128,14 +112,6 @@ def main():
         show_markers=args.show_markers,
         out_prefix="identification_sim",
     )
-    if not args.hide_velocity_difference_plot:
-        plot_velocity_difference(
-            pipeline=pipeline,
-            target_log=result["init_target_log"],
-            out_prefix="identification_sim",
-            wheel_speed_source=args.replay_wheel_speeds,
-            show_markers=args.show_markers,
-        )
     plot_loss_history(
         loss_history=result["loss_history"],
         motor_loss_history=result["motor_loss_history"],

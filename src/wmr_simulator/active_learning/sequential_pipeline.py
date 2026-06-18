@@ -52,7 +52,6 @@ def run_si_then_gain_tuning(
         initial_params=initial_params,
         num_steps=steps_si,
         learning_rate=learning_rate_si,
-        num_realizations=num_realizations,
         seed=seed,
         reference_trajectories_dir=reference_trajectories_dir,
         window_length=window_length,

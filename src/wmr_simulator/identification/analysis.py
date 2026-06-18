@@ -82,13 +82,9 @@ def build_physical_parameter_surface(
     base_min: float,
     base_max: float,
     base_points: int,
-    num_realizations: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    num_replay_realizations = pipeline.resolve_replay_realizations(num_realizations)
     wheel_radius_values = build_parameter_grid(radius_min, radius_max, radius_points)
     base_diameter_values = build_parameter_grid(base_min, base_max, base_points)
-    robot_keys = jax.random.split(pipeline.robot_key, num_replay_realizations)
-    estimator_keys = jax.random.split(pipeline.estimator_key, num_replay_realizations)
     wheel_radius_values_jax = jnp.asarray(wheel_radius_values, dtype=jnp.float32)
     base_diameter_values_jax = jnp.asarray(base_diameter_values, dtype=jnp.float32)
 
@@ -99,7 +95,7 @@ def build_physical_parameter_surface(
             max_wheel_speed=pipeline.initial_params.max_wheel_speed,
             time_constant=pipeline.initial_params.time_constant,
         )
-        return pipeline.loss(params, robot_keys, estimator_keys)
+        return pipeline.loss(params)
 
     batched_loss_for_row = jax.vmap(loss_for_params, in_axes=(0, None))
 
@@ -117,7 +113,6 @@ def make_surface_pipeline(
     initial_params: PhysicalParams,
     seed: int = 0,
     window_length: int | None = None,
-    deterministic_replay: bool = True,
 ) -> SystemIdentificationPipeline:
     return SystemIdentificationPipeline(
         problem_path=problem_path,
@@ -125,7 +120,6 @@ def make_surface_pipeline(
         seed=seed,
         reference_trajectories_dir=None,
         window_length=window_length,
-        deterministic_replay=deterministic_replay,
     )
 
 
@@ -138,7 +132,6 @@ def run_physical_parameter_surface(
     base_min: float = 0.01,
     base_max: float = 0.5,
     base_points: int = 100,
-    num_realizations: int = 1,
     seed: int = 0,
     window_length: int | None = None,
     reference_trajectory_path: str | None = None,
@@ -169,7 +162,6 @@ def run_physical_parameter_surface(
         base_min=base_min,
         base_max=base_max,
         base_points=base_points,
-        num_realizations=num_realizations,
     )
 
     if save_plots:
@@ -180,7 +172,7 @@ def run_physical_parameter_surface(
             tracking_error_surface=tracking_error_surface,
             hidden_params=pipeline.hidden_params,
             init_params=initial_params,
-            num_realizations=num_realizations,
+            num_realizations=1,
             seed=seed,
             out_prefix=out_prefix,
         )

@@ -13,7 +13,6 @@ def main():
     parser.add_argument("--reference-trajectories-dir", type=str, default=None)
     parser.add_argument("--reference-trajectory", type=str, default=None)
     parser.add_argument("--window-length", type=int, default=50)
-    parser.add_argument("--num-realizations", type=int, default=1)
     parser.add_argument("--seed", type=int, default=2)
     parser.add_argument("--init-wheel-radius", type=float, default=0.02)
     parser.add_argument("--init-base-diameter", type=float, default=0.2)
@@ -43,7 +42,6 @@ def main():
         base_min=args.base_min,
         base_max=args.base_max,
         base_points=args.base_points,
-        num_realizations=args.num_realizations,
         seed=args.seed,
         window_length=args.window_length,
         reference_trajectory_path=args.reference_trajectory,
