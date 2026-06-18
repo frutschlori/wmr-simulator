@@ -5,8 +5,8 @@ from wmr_simulator.trajectory_optimization.fim import max_inverse_eigenvalue, tr
 
 
 def fim_loss(fim: jnp.ndarray) -> jnp.ndarray:
-    return max_inverse_eigenvalue(fim)
-    # return trace_inverse_criterion(fim)
+    # return max_inverse_eigenvalue(fim)
+    return trace_inverse_criterion(fim)
     # return logdet_criterion(fim)
 
 def trajectory_objective(

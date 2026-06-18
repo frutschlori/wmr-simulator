@@ -6,7 +6,7 @@ import yaml
 from jax_tqdm import scan_tqdm
 
 from wmr_simulator.identification.pipeline import SystemIdentificationPipeline
-from wmr_simulator.identification.losses import multi_experiment_window_replay_loss
+from wmr_simulator.identification.losses import window_replay_mse
 from wmr_simulator.planner import compute_reference_trajectory
 from wmr_simulator.types import PhysicalParams, clip_physical_params, physical_params_mse
 
@@ -58,12 +58,9 @@ def run_window_replay_identification(
     initial_params: PhysicalParams,
     num_steps: int,
     learning_rate: float,
-    num_realizations: int,
     window_length: int,
     seed: int = 0,
     reference_trajectories_dir: str | None = None,
-    deterministic_replay: bool = True,
-    motor_learning_rate: float | None = None,
 ):
     pipeline = SystemIdentificationPipeline(
         problem_path=problem_path,
@@ -71,14 +68,11 @@ def run_window_replay_identification(
         seed=seed,
         reference_trajectories_dir=reference_trajectories_dir,
         window_length=window_length,
-        deterministic_replay=deterministic_replay,
     )
     estimated_params, loss_history, motor_loss_history, parameter_mse_history = pipeline.optimize(
         init_params=initial_params,
         num_steps=num_steps,
         learning_rate=learning_rate,
-        motor_learning_rate=learning_rate if motor_learning_rate is None else motor_learning_rate,
-        num_realizations=num_realizations,
     )
     return {
         "pipeline": pipeline,
@@ -95,14 +89,12 @@ def build_configured_pipeline(
     seed: int,
     trajectory_cfg: dict | None,
     window_length: int | None,
-    deterministic_replay: bool = True,
 ):
     pipeline = SystemIdentificationPipeline(
         problem_path=problem_path,
         initial_params=initial_params,
         seed=seed,
         window_length=window_length,
-        deterministic_replay=deterministic_replay,
     )
     if trajectory_cfg is not None:
         apply_reference_config(pipeline, trajectory_cfg)
@@ -120,11 +112,9 @@ def run_multi_experiment_identification(
     experiments_path: str,
     num_steps: int,
     learning_rate: float,
-    num_realizations: int,
     seed: int = 0,
     window_length: int | None = None,
     validation_section: str | None = None,
-    deterministic_replay: bool = True,
 ):
     experiment_configs = load_trajectory_configs(experiments_path, section_name="experiments", required=True)
     pipelines = [
@@ -134,7 +124,6 @@ def run_multi_experiment_identification(
             seed=seed + idx,
             trajectory_cfg=config,
             window_length=window_length,
-            deterministic_replay=deterministic_replay,
         )
         for idx, config in enumerate(experiment_configs)
     ]
@@ -149,37 +138,9 @@ def run_multi_experiment_identification(
                 seed=seed + len(pipelines) + idx,
                 trajectory_cfg=config,
                 window_length=window_length,
-                deterministic_replay=deterministic_replay,
             )
             for idx, config in enumerate(validation_configs)
         ]
-
-    replay_key_sets = [
-        (
-            jax.random.split(
-                pipeline.robot_key,
-                pipeline.resolve_replay_realizations(num_realizations),
-            ),
-            jax.random.split(
-                pipeline.estimator_key,
-                pipeline.resolve_replay_realizations(num_realizations),
-            ),
-        )
-        for pipeline in pipelines
-    ]
-    validation_key_sets = [
-        (
-            jax.random.split(
-                pipeline.robot_key,
-                pipeline.resolve_replay_realizations(num_realizations),
-            ),
-            jax.random.split(
-                pipeline.estimator_key,
-                pipeline.resolve_replay_realizations(num_realizations),
-            ),
-        )
-        for pipeline in validation_pipelines
-    ]
 
     optimizer = optax.adam(learning_rate)
     current_params = clip_physical_params(initial_params)
@@ -197,13 +158,17 @@ def run_multi_experiment_identification(
         }
 
     def training_loss(params):
-        return multi_experiment_window_replay_loss(
-            pipelines,
-            params=params,
-            replay_key_sets=replay_key_sets,
-            est_params=initial_params,
-            window_length=window_length,
-        )
+        losses = [
+            window_replay_mse(
+                pipeline=pipeline,
+                params=params,
+                target_log=pipeline.target_log,
+                est_params=initial_params,
+                window_length=window_length,
+            )
+            for pipeline in pipelines
+        ]
+        return jnp.mean(jnp.asarray(losses))
 
     @scan_tqdm(num_steps, desc="Optimization")
     def train_step(carry, step):
@@ -214,13 +179,17 @@ def run_multi_experiment_identification(
         next_params = clip_physical_params(next_params)
 
         if has_validation:
-            validation_loss = multi_experiment_window_replay_loss(
-                validation_pipelines,
-                params=next_params,
-                replay_key_sets=validation_key_sets,
-                est_params=initial_params,
-                window_length=window_length,
-            )
+            validation_losses = [
+                window_replay_mse(
+                    pipeline=pipeline,
+                    params=next_params,
+                    target_log=pipeline.target_log,
+                    est_params=initial_params,
+                    window_length=window_length,
+                )
+                for pipeline in validation_pipelines
+            ]
+            validation_loss = jnp.mean(jnp.asarray(validation_losses))
         else:
             validation_loss = jnp.asarray(jnp.nan, dtype=loss_value.dtype)
 

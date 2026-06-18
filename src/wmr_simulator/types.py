@@ -3,9 +3,6 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
-from wmr_simulator.estimator import EstimatorState
-from wmr_simulator.robot import DiffDriveState
-
 
 class PhysicalParams(NamedTuple):
     wheel_radius: jax.Array
@@ -14,9 +11,30 @@ class PhysicalParams(NamedTuple):
     time_constant: jax.Array = jnp.asarray(0.0, dtype=jnp.float32)
 
 
+class ReferenceLog(NamedTuple):
+    time_s: jax.Array
+    states: jax.Array  # [x, y, theta, vx, vy, omega, ax, ay]
+
+
+class WheelLog(NamedTuple):
+    time_s: jax.Array
+    speeds: jax.Array      # [omega_right, omega_left]
+    vel_omega: jax.Array   # [v, omega]
+    duty_cycle: jax.Array  # [duty_right, duty_left]
+
+
+class PoseLog(NamedTuple):
+    time_s: jax.Array         # pose measurement times
+    states: jax.Array         # [x, y, theta]
+    true_states: jax.Array    # [x, y, theta]
+    command_time_s: jax.Array # geometry-controller command times
+    wheel_cmd: jax.Array      # [omega_right_cmd, omega_left_cmd]
+
+
 class SimulationLog(NamedTuple):
-    robot_states: DiffDriveState
-    estimator_states: EstimatorState
+    reference: ReferenceLog
+    wheel: WheelLog
+    pose: PoseLog
 
 
 def print_physical_params(label: str, params: PhysicalParams):

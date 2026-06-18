@@ -1,23 +1,23 @@
 import argparse
 import os
+os.environ["JAX_PLATFORMS"] = "cpu"
+from wmr_simulator.trajectory_optimization.pipeline import TrajectoryOptimizationPipeline
 
 
 def main():
     parser = argparse.ArgumentParser(description="Initialize trajectory optimization inputs.")
-    parser.add_argument("--problem", default="problems/problem_hidden.yaml")
-    parser.add_argument("--jax-platform", choices=["default", "cpu"], default="cpu")
+    parser.add_argument("--problem", default="problems/pololu.yaml")
     # Optimization Settings
     parser.add_argument("--save-trajectory", action="store_true", default=False)
-    parser.add_argument("--window-length", type=int, default=50)
-    parser.add_argument("--opt-steps", type=int, default=4000)
-    parser.add_argument("--learning-rate", type=float, default=1e-2)
+    parser.add_argument("--window-length", type=int, default=20)
+    parser.add_argument("--opt-steps", type=int, default=5000)
+    parser.add_argument("--learning-rate", type=float, default=2e-3)
     # Path settings
     parser.add_argument("--time-scaling", choices=["s-curve", "linear"], default="s-curve")
     parser.add_argument("--trajectory-generator", choices=["planner", "bezier"], default="bezier")
-    parser.add_argument("--bezier-order", type=int, default=20)
-    parser.add_argument("--replay-wheel-speeds", choices=["true", "noisy"], default="true")
+    parser.add_argument("--bezier-order", type=int, default=7)
     # Constraints
-    parser.add_argument("--constraint-weight", type=float, default=0.0)
+    parser.add_argument("--constraint-weight", type=float, default=1.0)
     parser.add_argument("--constraint-v-weight", type=float, default=1.0)
     parser.add_argument("--constraint-a-weight", type=float, default=1.0)
     parser.add_argument("--constraint-lateral-weight", type=float, default=1.0)
@@ -30,16 +30,10 @@ def main():
     parser.add_argument("--opt-trace-stride", type=int, default=500)
     args = parser.parse_args()
 
-    if args.jax_platform == "cpu":
-        os.environ["JAX_PLATFORMS"] = "cpu"
-
-    from wmr_simulator.trajectory_optimization.pipeline import TrajectoryOptimizationPipeline
-
     pipeline = TrajectoryOptimizationPipeline(
         args.problem,
         trajectory_generator_type=args.trajectory_generator,
         time_scaling=args.time_scaling,
-        replay_wheel_speed_source=args.replay_wheel_speeds,
     )
 
     print(f"Loaded problem: {pipeline.problem.path}")
@@ -48,7 +42,6 @@ def main():
     if args.trajectory_generator == "bezier":
         print(f"Time scaling: {pipeline.time_scaling}")
     print(f"Trajectory samples: {len(pipeline.trajectory.time)}")
-    print(f"Replay wheel speeds: {pipeline.replay_wheel_speed_source}")
     print(f"Start pose: {pipeline.trajectory.poses[0]}")
     print(f"Goal pose:  {pipeline.trajectory.poses[-1]}")
     print(f"Window length: {pipeline.resolve_window_length(args.window_length)}")

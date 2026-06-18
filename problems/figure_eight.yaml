@@ -1,5 +1,6 @@
 sim_time: 5.0 # seconds
-time_step: 0.01 # seconds
+geometry_controller_dt: 0.01 # seconds
+wheel_controller_dt: 0.01 # seconds
 environment:
   min: [-5, -5]
   max: [5, 5]

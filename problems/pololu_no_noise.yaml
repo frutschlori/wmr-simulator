@@ -1,5 +1,6 @@
 sim_time: 5.0 # seconds
-time_step: 0.05 # seconds
+geometry_controller_dt: 0.05 # seconds
+wheel_controller_dt: 0.01 # seconds
 environment:
   min: [-1.5, -2.5]
   max: [1.5, 2.5]
@@ -18,8 +19,8 @@ robot:
   type: differential_drive
   wheel_radius: 0.016   # m
   base_diameter: 0.0842 # m
-  max_wheel_speed: 250  # rad/s
-  time_constant:  0.15  # time constant for first-order wheel dynamics (set to 0 for ideal actuation)
+  max_wheel_speed: 250 # rad/s
+  time_constant:  0.18  # time constant for first-order wheel dynamics (set to 0 for ideal actuation)
   slip_r: 0.0         # std of fractional slip on ur (40%) [0 -> 1.0]
   slip_l: 0.0         # std of fractional slip on ul (50%) [0 -> 1.0]
   v_max: 2.0          # m/s

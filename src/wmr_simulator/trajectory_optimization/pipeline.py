@@ -45,7 +45,10 @@ class ProblemDefinition:
             self.raw = yaml.safe_load(file)
 
         self.path = problem_path
-        self.dt = float(self.raw["time_step"])
+        self.geometry_dt = float(self.raw["geometry_controller_dt"])
+        self.wheel_dt = float(self.raw["wheel_controller_dt"])
+        self.dt = self.geometry_dt
+        self.inner_steps_per_geometry_step = self._inner_steps(self.geometry_dt, self.wheel_dt)
         self.sim_time = float(self.raw["sim_time"])
         self.planner_cfg = self.raw["planner"]
         self.planner_time = float(self.planner_cfg["time"])
@@ -63,26 +66,33 @@ class ProblemDefinition:
         robot_type = self.robot_cfg.get("type")
         if robot_type != "differential_drive":
             raise ValueError(f"Unsupported robot type '{robot_type}'")
-        return DiffDrive(robot_cfg=self.robot_cfg, dt=self.dt)
+        return DiffDrive(robot_cfg=self.robot_cfg, dt=self.wheel_dt)
 
     def build_estimator(self) -> DiffDriveEstimator:
-        return DiffDriveEstimator(estimator_cfg=self.estimator_cfg, dt=self.dt)
+        return DiffDriveEstimator(estimator_cfg=self.estimator_cfg, dt=self.wheel_dt)
 
     def build_controller(self) -> Controller:
         return Controller(
             robot_param=self.robot_cfg,
             gains=self.controller_cfg["gains"],
             duty_limits=[-1.0, 1.0],
-            dt=self.dt,
+            dt=self.geometry_dt,
         )
 
     def planner_time_grid(self) -> np.ndarray:
-        num_steps = int(self.planner_time / self.dt)
-        return np.linspace(0.0, num_steps * self.dt, num_steps + 1)
+        num_steps = int(self.planner_time / self.geometry_dt)
+        return np.linspace(0.0, num_steps * self.geometry_dt, num_steps + 1)
 
     def sim_time_grid(self) -> np.ndarray:
-        num_steps = int(self.sim_time / self.dt)
-        return np.linspace(0.0, num_steps * self.dt, num_steps + 1)
+        num_steps = int(self.sim_time / self.geometry_dt)
+        return np.linspace(0.0, num_steps * self.geometry_dt, num_steps + 1)
+
+    @staticmethod
+    def _inner_steps(outer_dt: float, inner_dt: float) -> int:
+        steps = int(np.round(outer_dt / inner_dt))
+        if steps <= 0 or not np.isclose(steps * inner_dt, outer_dt):
+            raise ValueError("geometry_controller_dt must be an integer multiple of wheel_controller_dt")
+        return steps
 
 
 class ReplayInitializationLog(NamedTuple):
@@ -123,10 +133,8 @@ class TrajectoryOptimizationPipeline:
         trajectory_generator: TrajectoryGenerator | None = None,
         trajectory_generator_type: str | None = None,
         time_scaling: str | None = None,
-        replay_wheel_speed_source: str = "true",
     ):
         self.problem = ProblemDefinition(problem_path)
-        self.replay_wheel_speed_source = self.resolve_replay_wheel_speed_source(replay_wheel_speed_source)
         self.robot = self.problem.build_robot()
         self.controller = self.problem.build_controller()
         self.controller_gains = jnp.asarray(self.problem.controller_cfg["gains"], dtype=jnp.float32)
@@ -166,18 +174,6 @@ class TrajectoryOptimizationPipeline:
 
     def default_measurement_variances(self) -> np.ndarray:
         return default_measurement_variances(self.problem.estimator_cfg)
-
-    @staticmethod
-    def resolve_replay_wheel_speed_source(source: str) -> str:
-        source = source.lower()
-        if source not in {"true", "noisy"}:
-            raise ValueError("replay_wheel_speed_source must be 'true' or 'noisy'.")
-        return source
-
-    def closed_loop_replay_wheel_speeds(self, closed_loop_log: ClosedLoopLog) -> jax.Array:
-        if self.replay_wheel_speed_source == "true":
-            return closed_loop_log.replay_init.wheel_speeds
-        return closed_loop_log.replay_init.estimator_u_hat
 
     def motion_limits(self) -> dict[str, jnp.ndarray]:
         return motion_limits_from_robot_config(self.problem.robot_cfg)
@@ -246,7 +242,8 @@ class TrajectoryOptimizationPipeline:
             estimator_key,
         )
         controller_state = jnp.zeros(2, dtype=jnp.float32)
-        return robot_state, estimator_state, controller_state
+        delayed_duty_cycle = jnp.zeros(2, dtype=jnp.float32)
+        return robot_state, estimator_state, controller_state, delayed_duty_cycle
 
     def initial_replay_carry(
         self,
@@ -286,22 +283,10 @@ class TrajectoryOptimizationPipeline:
         return robot_state, estimator_state
 
     def closed_loop_step(self, carry, ref_k: jnp.ndarray, params: jnp.ndarray):
-        robot_state, estimator_state, controller_state = carry
+        robot_state, estimator_state, controller_state, delayed_duty_cycle = carry
 
-        ur_true, ul_true = self.robot.get_wheel_speeds(robot_state)
-        pose_true = self.robot.get_pose(robot_state)
-
-        next_estimator_state = self.estimator.update(
-            estimator_state,
-            ur_true,
-            ul_true,
-            pose_true,
-            wheel_radius=params[0],
-            base_diameter=params[1],
-        )
-        pose_est = self.estimator.get_est_pose(next_estimator_state)
-        wheel_est = self.estimator.get_est_wheel_speeds(next_estimator_state)
-
+        pose_est = self.estimator.get_est_pose(estimator_state)
+        wheel_est = self.estimator.get_est_wheel_speeds(estimator_state)
         next_controller_state, duty_cycle = self.controller.compute(
             controller_state,
             ref_k,
@@ -311,15 +296,36 @@ class TrajectoryOptimizationPipeline:
             wheel_radius=params[0],
             base_diameter=params[1],
         )
-        next_robot_state = self.robot.step(
-            robot_state,
-            duty_cycle,
-            wheel_radius=params[0],
-            base_diameter=params[1],
+
+        def wheel_step(inner_carry, inner_index):
+            inner_robot_state, inner_estimator_state = inner_carry
+            applied_duty_cycle = jnp.where(inner_index == 0, delayed_duty_cycle, duty_cycle)
+            next_robot_state = self.robot.step(
+                inner_robot_state,
+                applied_duty_cycle,
+                wheel_radius=params[0],
+                base_diameter=params[1],
+                dt=self.problem.wheel_dt,
+            )
+            next_estimator_state = self.estimator.update(
+                inner_estimator_state,
+                next_robot_state.wheel_speeds[0],
+                next_robot_state.wheel_speeds[1],
+                self.robot.get_pose(next_robot_state),
+                wheel_radius=params[0],
+                base_diameter=params[1],
+                dt=self.problem.wheel_dt,
+            )
+            return (next_robot_state, next_estimator_state), None
+
+        (next_robot_state, next_estimator_state), _ = jax.lax.scan(
+            wheel_step,
+            (robot_state, estimator_state),
+            jnp.arange(self.problem.inner_steps_per_geometry_step),
         )
 
         next_pose_true = self.robot.get_pose(next_robot_state)
-        next_carry = (next_robot_state, next_estimator_state, next_controller_state)
+        next_carry = (next_robot_state, next_estimator_state, next_controller_state, duty_cycle)
         measurement = self.estimator.get_est_pose(next_estimator_state)
         replay_init_wheel_speeds = robot_state.wheel_speeds
         replay_init_u_hat = next_estimator_state.u_hat
@@ -398,7 +404,7 @@ class TrajectoryOptimizationPipeline:
         if closed_loop_log is None:
             closed_loop_log = self.closed_loop_log
 
-        replay_wheel_speeds = self.closed_loop_replay_wheel_speeds(closed_loop_log)[:-1]
+        replay_wheel_speeds = closed_loop_log.replay_init.wheel_speeds[:-1]
         replay_duty_cycles = closed_loop_log.duty_cycles[:-1]
 
         num_intervals = replay_wheel_speeds.shape[0]

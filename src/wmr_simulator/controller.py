@@ -16,28 +16,41 @@ class Controller:
                 wheel_radius=None, base_diameter=None, max_wheel_speed=None):
         """
         ctrl_state: (ir, il)
-        ref_state: [px_d, py_d, vx_d, vy_d, ax_d, ay_d]
-        pose_state: (px, py, th)
+        ref_state: [x, y, theta, vx, vy, omega, a, alpha]
+        pose_state: (x, y, theta)
         wheel_meas: (ur_meas, ul_meas) from encoders
         Returns: motor duty cycles (right, left) in [-1, 1]
         """
 
-        # resolve robot parameters and gains
+        wheel_ref = self.compute_wheel_reference(
+            ref_state,
+            pose_state,
+            gains=gains,
+            wheel_radius=wheel_radius,
+            base_diameter=base_diameter,
+        )
+        return self.compute_duty(
+            ctrl_state,
+            wheel_ref,
+            wheel_meas,
+            gains=gains,
+            max_wheel_speed=max_wheel_speed,
+        )
+
+    def compute_wheel_reference(self, ref_state, pose_state, gains=None, wheel_radius=None, base_diameter=None):
         r = self.r if wheel_radius is None else wheel_radius
         L = self.L if base_diameter is None else base_diameter
+        gain_values = self.gains if gains is None else gains
+        return np.asarray(self._pose_control(ref_state, pose_state, r, L, gain_values))
+
+    def compute_duty(self, ctrl_state, wheel_ref, wheel_meas, gains=None, max_wheel_speed=None):
         motor_gain = self.robot_param_max_wheel_speed(robot_param_max=max_wheel_speed)
         gain_values = self.gains if gains is None else gains
-
-        # 1) wheel references -> (reference traj - > (v_ref, w_ref) -> (ur_ref, ul_ref))
-        wheel_ref = self._pose_control(ref_state, pose_state, r, L, gain_values)
-        # 2) Wheel-speed control (PI) in wheel-speed units, then normalize to duty.
         ir, il, duty_r, duty_l = self._wheel_speed_control(ctrl_state, wheel_ref, wheel_meas, gain_values, motor_gain)
-        # 3) saturation on duty cycles here
         if self.duty_limits is not None:
             umin, umax = self.duty_limits
             duty_r = np.clip(duty_r, min=umin, max=umax)
             duty_l = np.clip(duty_l, min=umin, max=umax)
-
         return np.asarray((ir, il)), np.asarray((duty_r, duty_l))
 
     def robot_param_max_wheel_speed(self, robot_param_max=None):

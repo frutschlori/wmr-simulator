@@ -1,6 +1,5 @@
 __all__ = [
     "POLOLU_TRAJ_CONTROL_COLUMNS",
-    "PololuTrajControlLog",
     "PololuReference",
     "ReferenceTrajectory",
     "export_latest_reference",
@@ -17,7 +16,6 @@ __all__ = [
 def __getattr__(name):
     if name in {
         "POLOLU_TRAJ_CONTROL_COLUMNS",
-        "PololuTrajControlLog",
         "load_pololu_traj_control_log",
     }:
         from wmr_simulator.pololu import log_loader
