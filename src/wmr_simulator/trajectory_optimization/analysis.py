@@ -60,7 +60,6 @@ def render_tracking_surface_frames_for_optimization_trace(
             base_min=base_min,
             base_max=base_max,
             base_points=base_points,
-            num_realizations=num_realizations,
         )
         frame_data.append(
             {
@@ -137,7 +136,6 @@ def create_stacked_tracking_surface_trace_gif(
 def run_trajectory_optimization_trace(
     problem_path: str,
     window_length: int | None = 50,
-    trajectory_generator_type: str = "bezier",
     time_scaling: str | None = None,
     bezier_order: int = 7,
     num_steps: int = 2000,
@@ -165,11 +163,8 @@ def run_trajectory_optimization_trace(
 ):
     pipeline = TrajectoryOptimizationPipeline(
         problem_path,
-        trajectory_generator_type=trajectory_generator_type,
         time_scaling=time_scaling,
     )
-    if trajectory_generator_type != "bezier":
-        raise ValueError("Trajectory optimization trace export currently expects --trajectory-generator bezier.")
 
     initial_control_points = pipeline.initial_bezier_control_points(bezier_order)
     pipeline.set_bezier_control_points(initial_control_points)

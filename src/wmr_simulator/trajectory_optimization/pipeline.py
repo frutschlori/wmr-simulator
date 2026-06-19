@@ -11,14 +11,17 @@ import yaml
 from wmr_simulator.controller import Controller
 from wmr_simulator.estimator import DiffDriveEstimator, EstimatorState
 from wmr_simulator.robot import DiffDrive, DiffDriveState
-from wmr_simulator.trajectory_optimization.bezier import BezierTrajectoryGenerator
-from wmr_simulator.trajectory_optimization.constraints import (
+from wmr_simulator.trajectory_optimization.bezier import (
     clamp_control_points,
+    compute_bezier_reference,
+    control_points_from_decision_variables,
+    decision_variables_from_control_points,
+    initial_bezier_control_points,
+)
+from wmr_simulator.trajectory_optimization.constraints import (
     constraint_loss_components_from_reference_states,
     constraint_loss_from_reference_states,
     constraint_weights,
-    control_points_from_decision_variables,
-    initial_bezier_control_points,
     motion_limits_from_robot_config,
 )
 from wmr_simulator.trajectory_optimization.fim import (
@@ -27,12 +30,7 @@ from wmr_simulator.trajectory_optimization.fim import (
 )
 from wmr_simulator.trajectory_optimization.objectives import fim_loss, trajectory_objective
 from wmr_simulator.trajectory_optimization.optimizers import optimize_bezier_control_points
-from wmr_simulator.trajectory_optimization.parametrization import (
-    Trajectory,
-    TrajectoryGenerator,
-    build_trajectory_generator,
-    normalize_time_scaling,
-)
+from wmr_simulator.trajectory_optimization.parametrization import normalize_time_scaling
 from wmr_simulator.visualization.trajectories import (
     plot_loss_history as plot_loss_history_figure,
     plot_trajectory as plot_trajectory_figure,
@@ -130,8 +128,6 @@ class TrajectoryOptimizationPipeline:
     def __init__(
         self,
         problem_path: str,
-        trajectory_generator: TrajectoryGenerator | None = None,
-        trajectory_generator_type: str | None = None,
         time_scaling: str | None = None,
     ):
         self.problem = ProblemDefinition(problem_path)
@@ -148,23 +144,9 @@ class TrajectoryOptimizationPipeline:
         target_key, replay_key = jax.random.split(master_key, 2)
         self.target_robot_key, self.target_estimator_key = jax.random.split(target_key, 2)
         self.replay_robot_key, self.replay_estimator_key = jax.random.split(replay_key, 2)
-        if trajectory_generator is None:
-            self.trajectory_generator = build_trajectory_generator(
-                self.problem,
-                generator_type=trajectory_generator_type,
-                time_scaling=time_scaling,
-            )
-        else:
-            self.trajectory_generator = trajectory_generator
-
-        if isinstance(self.trajectory_generator, BezierTrajectoryGenerator):
-            self.time_scaling = self.trajectory_generator.time_scaling
-        else:
-            self.time_scaling = normalize_time_scaling(time_scaling)
-        self.bezier_generator = BezierTrajectoryGenerator(time_scaling=self.time_scaling)
-
-        self.reference_states = self.reference_sequence()
-        self.trajectory = self.trajectory_generator.generate(self.problem)
+        self.time_scaling = normalize_time_scaling(time_scaling)
+        self.control_points = initial_bezier_control_points(self.problem, order=2)
+        self.reference_states = self.reference_states_from_control_points(self.control_points)
         self._set_closed_loop_log(self.run_closed_loop_deployment(reference_states=self.reference_states))
         self.loss_history = None
         self.optimization_snapshots = None
@@ -181,21 +163,11 @@ class TrajectoryOptimizationPipeline:
     def constraint_weights(self, scale: float = 1.0, component_weights: dict | None = None) -> dict[str, jnp.ndarray]:
         return constraint_weights(scale=scale, component_weights=component_weights)
 
-    def reference_sequence(self) -> jnp.ndarray:
-        return jnp.asarray(self.trajectory_generator.reference_states(self.problem), dtype=jnp.float32)
-
-    def bezier_reference_sequence(self, control_points: jnp.ndarray) -> jnp.ndarray:
-        return self.bezier_generator.reference_states_from_control_points(self.problem, control_points)
+    def reference_states_from_control_points(self, control_points: jnp.ndarray) -> jnp.ndarray:
+        return compute_bezier_reference(self.problem, control_points, time_scaling=self.time_scaling)
 
     def current_bezier_control_points(self):
-        if not isinstance(self.trajectory_generator, BezierTrajectoryGenerator):
-            return None
-        return np.asarray(self.trajectory_generator.resolve_control_points(self.problem), dtype=float)
-
-    def trajectory_from_reference_states(self, reference_states: jnp.ndarray) -> Trajectory:
-        reference_states_np = np.asarray(reference_states, dtype=float)
-        time_grid = self.problem.sim_time_grid()
-        return Trajectory(time_grid, reference_states_np[:, :3], reference_states_np[:, 3:6])
+        return np.asarray(self.control_points, dtype=float)
 
     def _set_closed_loop_log(self, closed_loop_log: ClosedLoopLog):
         self.closed_loop_log = closed_loop_log
@@ -205,12 +177,17 @@ class TrajectoryOptimizationPipeline:
 
     def resolve_window_length(self, window_length: int | None) -> int:
         if window_length is None:
-            return len(self.trajectory.time)
+            return len(self.reference_states)
 
         window_length = int(window_length)
         if window_length <= 0:
             raise ValueError("window_length must be a positive integer.")
         return window_length
+
+    def resolve_replay_window_length(self, window_length: int | None, num_intervals: int) -> int:
+        if window_length is None:
+            return max(int(num_intervals), 1)
+        return self.resolve_window_length(window_length)
 
     def initial_estimator_state(self, init_pose: jnp.ndarray, estimator_key: jax.Array):
         return EstimatorState(
@@ -316,30 +293,30 @@ class TrajectoryOptimizationPipeline:
                 base_diameter=params[1],
                 dt=self.problem.wheel_dt,
             )
-            return (next_robot_state, next_estimator_state), None
+            next_pose_true = self.robot.get_pose(next_robot_state)
+            measurement = self.estimator.get_est_pose(next_estimator_state)
+            replay_init_wheel_speeds = inner_robot_state.wheel_speeds
+            replay_init_u_hat = inner_estimator_state.u_hat
+            replay_init_u_true = inner_estimator_state.u_true
+            replay_init_covariance = inner_estimator_state.P
+            return (next_robot_state, next_estimator_state), (
+                next_pose_true,
+                applied_duty_cycle,
+                measurement,
+                replay_init_wheel_speeds,
+                replay_init_u_hat,
+                replay_init_u_true,
+                replay_init_covariance,
+            )
 
-        (next_robot_state, next_estimator_state), _ = jax.lax.scan(
+        (next_robot_state, next_estimator_state), inner_outputs = jax.lax.scan(
             wheel_step,
             (robot_state, estimator_state),
             jnp.arange(self.problem.inner_steps_per_geometry_step),
         )
 
-        next_pose_true = self.robot.get_pose(next_robot_state)
         next_carry = (next_robot_state, next_estimator_state, next_controller_state, duty_cycle)
-        measurement = self.estimator.get_est_pose(next_estimator_state)
-        replay_init_wheel_speeds = robot_state.wheel_speeds
-        replay_init_u_hat = next_estimator_state.u_hat
-        replay_init_u_true = next_estimator_state.u_true
-        replay_init_covariance = next_estimator_state.P
-        return next_carry, (
-            next_pose_true,
-            duty_cycle,
-            measurement,
-            replay_init_wheel_speeds,
-            replay_init_u_hat,
-            replay_init_u_true,
-            replay_init_covariance,
-        )
+        return next_carry, inner_outputs
 
     def run_closed_loop_deployment(self, reference_states: jnp.ndarray):
         params = self.nominal_parameters()
@@ -354,6 +331,22 @@ class TrajectoryOptimizationPipeline:
 
         _, outputs = jax.lax.scan(scan_step, initial_carry, reference_states)
         poses, duty_cycles, measurements, init_wheel_speeds, init_u_hat, init_u_true, init_covariances = outputs
+        poses = poses.reshape(-1, 3)
+        duty_cycles = duty_cycles.reshape(-1, 2)
+        measurements = measurements.reshape(-1, 3)
+        init_wheel_speeds = init_wheel_speeds.reshape(-1, 2)
+        init_u_hat = init_u_hat.reshape(-1, 2)
+        init_u_true = init_u_true.reshape(-1, 2)
+        init_covariances = init_covariances.reshape(
+            -1,
+            init_covariances.shape[-2],
+            init_covariances.shape[-1],
+        )
+        initial_robot_state, initial_estimator_state, _, _ = initial_carry
+        initial_pose = self.robot.get_pose(initial_robot_state)[None, :]
+        initial_measurement = self.estimator.get_est_pose(initial_estimator_state)[None, :]
+        poses = jnp.concatenate([initial_pose, poses], axis=0)
+        measurements = jnp.concatenate([initial_measurement, measurements], axis=0)
         replay_init = ReplayInitializationLog(
             wheel_speeds=init_wheel_speeds,
             estimator_u_hat=init_u_hat,
@@ -377,7 +370,7 @@ class TrajectoryOptimizationPipeline:
             duty_cycle,
             wheel_radius=params[0],
             base_diameter=params[1],
-            dt=self.problem.dt,
+            dt=self.problem.wheel_dt,
         )
         ur_true, ul_true = wheel_speeds
         pose_true = self.robot.get_pose(next_robot_state)
@@ -388,7 +381,7 @@ class TrajectoryOptimizationPipeline:
             pose_true,
             wheel_radius=params[0],
             base_diameter=params[1],
-            dt=self.problem.dt,
+            dt=self.problem.wheel_dt,
         )
         measurement = self.estimator.get_est_pose(next_estimator_state)
         actual_pose = self.robot.get_pose(next_robot_state)
@@ -400,14 +393,14 @@ class TrajectoryOptimizationPipeline:
         window_length: int | None = None,
         closed_loop_log: ClosedLoopLog | None = None,
     ):
-        window_length = self.resolve_window_length(window_length)
         if closed_loop_log is None:
             closed_loop_log = self.closed_loop_log
 
-        replay_wheel_speeds = closed_loop_log.replay_init.wheel_speeds[:-1]
-        replay_duty_cycles = closed_loop_log.duty_cycles[:-1]
+        replay_wheel_speeds = closed_loop_log.replay_init.wheel_speeds
+        replay_duty_cycles = closed_loop_log.duty_cycles
 
         num_intervals = replay_wheel_speeds.shape[0]
+        window_length = self.resolve_replay_window_length(window_length, num_intervals)
         num_windows = int(np.ceil(num_intervals / window_length))
         padded_num_intervals = num_windows * window_length
         pad_steps = padded_num_intervals - num_intervals
@@ -468,7 +461,7 @@ class TrajectoryOptimizationPipeline:
 
         actual_poses = actual_pose_windows.reshape(-1, 3)[:num_intervals]
         measurements = measurement_windows.reshape(-1, 3)[:num_intervals]
-        actual_poses = jnp.concatenate([closed_loop_log.measurements[:1], actual_poses], axis=0)
+        actual_poses = jnp.concatenate([closed_loop_log.poses[:1], actual_poses], axis=0)
         measurements = jnp.concatenate([closed_loop_log.measurements[:1], measurements], axis=0)
         return actual_poses, measurements
 
@@ -532,14 +525,13 @@ class TrajectoryOptimizationPipeline:
     def control_points_from_decision_variables(self, decision_variables: jnp.ndarray) -> jnp.ndarray:
         return control_points_from_decision_variables(self.problem, decision_variables)
 
+    def decision_variables_from_control_points(self, control_points: jnp.ndarray) -> jnp.ndarray:
+        return decision_variables_from_control_points(self.problem, control_points)
+
     def set_bezier_control_points(self, control_points: jnp.ndarray):
         control_points = self.clamp_control_points(control_points)
-        self.trajectory_generator = BezierTrajectoryGenerator(
-            control_points=np.asarray(control_points),
-            time_scaling=self.time_scaling,
-        )
-        self.reference_states = self.bezier_reference_sequence(control_points)
-        self.trajectory = self.trajectory_from_reference_states(self.reference_states)
+        self.control_points = control_points
+        self.reference_states = self.reference_states_from_control_points(control_points)
         self._set_closed_loop_log(self.run_closed_loop_deployment(reference_states=self.reference_states))
 
     def fim_loss_from_control_points(
@@ -552,7 +544,7 @@ class TrajectoryOptimizationPipeline:
         constraint_smooth_max_beta: float = 20.0,
     ) -> jnp.ndarray:
         control_points = self.clamp_control_points(control_points)
-        reference_states = self.bezier_reference_sequence(control_points)
+        reference_states = self.reference_states_from_control_points(control_points)
         closed_loop_log = self.run_closed_loop_deployment(reference_states=reference_states)
         fim = self.compute_fim_matrix(
             measurement_variances=measurement_variances,
@@ -581,7 +573,7 @@ class TrajectoryOptimizationPipeline:
         constraint_smooth_max_beta: float = 20.0,
     ) -> dict[str, jnp.ndarray]:
         control_points = self.clamp_control_points(control_points)
-        reference_states = self.bezier_reference_sequence(control_points)
+        reference_states = self.reference_states_from_control_points(control_points)
         closed_loop_log = self.run_closed_loop_deployment(reference_states=reference_states)
         fim = self.compute_fim_matrix(
             measurement_variances=measurement_variances,
@@ -615,7 +607,7 @@ class TrajectoryOptimizationPipeline:
         constraint_smooth_max_beta: float = 20.0,
     ) -> dict[str, jnp.ndarray]:
         control_points = self.clamp_control_points(control_points)
-        reference_states = self.bezier_reference_sequence(control_points)
+        reference_states = self.reference_states_from_control_points(control_points)
         return constraint_loss_components_from_reference_states(
             reference_states=reference_states,
             dt=self.problem.dt,
