@@ -48,7 +48,6 @@ def main():
     # Optionally load target trajectory from disk
     parser.add_argument("--reference-trajectories-dir", type=str, default="trajectory_exports")
     parser.add_argument("--replay-wheel-speeds", choices=("estimated", "true"), default="estimated")
-    parser.add_argument("--show-markers", action="store_true")
 
     args = parser.parse_args()
 
@@ -109,7 +108,6 @@ def main():
         init_target_log=result["init_target_log"],
         init_log=result["init_replay_log"],
         predicted_log=result["final_replay_log"],
-        show_markers=args.show_markers,
         out_prefix="identification_sim",
     )
     plot_loss_history(

@@ -6,7 +6,6 @@ from wmr_simulator.types import PhysicalParams
 
 def optimize_informative_trajectory(
     problem_path: str,
-    trajectory_generator_type: str = "bezier",
     time_scaling: str | None = None,
     bezier_order: int = 7,
     num_steps: int = 0,
@@ -17,21 +16,19 @@ def optimize_informative_trajectory(
 ):
     pipeline = TrajectoryOptimizationPipeline(
         problem_path,
-        trajectory_generator_type=trajectory_generator_type,
         time_scaling=time_scaling,
     )
-    if trajectory_generator_type == "bezier":
-        initial_control_points = pipeline.initial_bezier_control_points(bezier_order)
-        pipeline.set_bezier_control_points(initial_control_points)
-        if num_steps:
-            pipeline.optimize_bezier_trajectory(
-                order=bezier_order,
-                num_steps=num_steps,
-                learning_rate=learning_rate,
-                window_length=window_length,
-                save_trace=save_trace,
-                trace_stride=trace_stride,
-            )
+    initial_control_points = pipeline.initial_bezier_control_points(bezier_order)
+    pipeline.set_bezier_control_points(initial_control_points)
+    if num_steps:
+        pipeline.optimize_bezier_trajectory(
+            order=bezier_order,
+            num_steps=num_steps,
+            learning_rate=learning_rate,
+            window_length=window_length,
+            save_trace=save_trace,
+            trace_stride=trace_stride,
+        )
     return pipeline
 
 

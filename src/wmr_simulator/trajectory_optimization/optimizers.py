@@ -34,7 +34,7 @@ def optimize_bezier_control_points(
     from wmr_simulator.trajectory_optimization.pipeline import OptimizationSnapshot
 
     initial_control_points = pipeline.initial_bezier_control_points(order)
-    initial_decision_variables = initial_control_points[1:]
+    initial_decision_variables = pipeline.decision_variables_from_control_points(initial_control_points)
     optimizer = optax.adam(learning_rate)
     opt_state = optimizer.init(initial_decision_variables)
 
@@ -62,7 +62,7 @@ def optimize_bezier_control_points(
         updates, next_optimizer_state = optimizer.update(grads, optimizer_state, decision_variables)
         next_decision_variables = optax.apply_updates(decision_variables, updates)
         next_control_points = pipeline.control_points_from_decision_variables(next_decision_variables)
-        next_decision_variables = next_control_points[1:]
+        next_decision_variables = pipeline.decision_variables_from_control_points(next_control_points)
         return next_decision_variables, next_optimizer_state, loss_value
 
     decision_variables = initial_decision_variables
@@ -71,14 +71,14 @@ def optimize_bezier_control_points(
 
     if save_trace:
         initial_closed_loop_log = pipeline.run_closed_loop_deployment(
-            reference_states=pipeline.bezier_reference_sequence(initial_control_points)
+            reference_states=pipeline.reference_states_from_control_points(initial_control_points)
         )
         snapshots.append(
             OptimizationSnapshot(
                 step=0,
                 loss_value=float(loss_fn(initial_decision_variables)),
                 control_points=np.asarray(initial_control_points),
-                reference_states=np.asarray(pipeline.bezier_reference_sequence(initial_control_points)),
+                reference_states=np.asarray(pipeline.reference_states_from_control_points(initial_control_points)),
                 closed_loop_log=initial_closed_loop_log,
             )
         )
@@ -98,7 +98,7 @@ def optimize_bezier_control_points(
         print_progress(step + 1, num_steps, float(loss_value))
         if save_trace and ((step + 1) % trace_stride == 0 or step + 1 == num_steps):
             control_points = pipeline.control_points_from_decision_variables(decision_variables)
-            reference_states = pipeline.bezier_reference_sequence(control_points)
+            reference_states = pipeline.reference_states_from_control_points(control_points)
             closed_loop_log = pipeline.run_closed_loop_deployment(reference_states=reference_states)
             snapshots.append(
                 OptimizationSnapshot(

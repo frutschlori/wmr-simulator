@@ -1,4 +1,3 @@
-import numpy as np
 import jax
 import jax.numpy as jnp
 
@@ -10,31 +9,6 @@ DEFAULT_CONSTRAINT_WEIGHTS = {
     "omega": 1.0,
     "alpha": 1.0,
 }
-
-
-def initial_bezier_control_points(problem, order: int) -> jnp.ndarray:
-    if order < 1:
-        raise ValueError("Bezier order must be at least 1.")
-    num_control_points = order + 1
-    line_samples = np.linspace(0.0, 1.0, num_control_points)[:, None]
-    start = problem.start[:2][None, :]
-    goal = problem.goal[:2][None, :]
-    control_points = start + line_samples * (goal - start)
-    return jnp.asarray(control_points, dtype=jnp.float32)
-
-
-def clamp_control_points(problem, control_points: jnp.ndarray) -> jnp.ndarray:
-    env_min = jnp.asarray(problem.environment_min, dtype=jnp.float32)
-    env_max = jnp.asarray(problem.environment_max, dtype=jnp.float32)
-    clamped = jnp.clip(control_points, env_min, env_max)
-    clamped = clamped.at[0].set(jnp.asarray(problem.start[:2], dtype=jnp.float32))
-    return clamped.at[-1].set(jnp.asarray(problem.goal[:2], dtype=jnp.float32))
-
-
-def control_points_from_decision_variables(problem, decision_variables: jnp.ndarray) -> jnp.ndarray:
-    start_point = jnp.asarray(problem.start[:2], dtype=jnp.float32)[None, :]
-    control_points = jnp.concatenate([start_point, decision_variables], axis=0)
-    return clamp_control_points(problem, control_points)
 
 
 def smooth_max(x: jnp.ndarray, beta: float = 20.0) -> jnp.ndarray:

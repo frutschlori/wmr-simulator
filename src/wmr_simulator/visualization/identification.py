@@ -1,11 +1,9 @@
 import os
 
-import matplotlib
-
-matplotlib.use("Agg", force=False)
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib.ticker import FormatStrFormatter
+from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 import numpy as np
 
 from wmr_simulator.visualization.pololu import _plot_motor_model_axes
@@ -21,6 +19,8 @@ def plot_trajectory(
     theta_arrow_length=0.12,
     trajectory_linewidth=1.0,
     theta_arrow_width=0.0025,
+    save_pdf: bool = True,
+    show_plot: bool = False,
 ):
     os.makedirs("visualize", exist_ok=True)
     output_filename = out_path if out_path is not None else os.path.join("visualize", f"{out_prefix}.pdf")
@@ -111,10 +111,12 @@ def plot_trajectory(
     ax.grid(True)
     ax.legend()
     fig.tight_layout()
-    fig.savefig(output_filename, bbox_inches="tight", transparent=True)
+    if save_pdf:
+        fig.savefig(output_filename, bbox_inches="tight", transparent=True)
+        print(f"Trajectory PDF saved at: {output_filename}")
+    if show_plot:
+        plt.show()
     plt.close(fig)
-
-    print(f"Trajectory PDF saved at: {output_filename}")
 
 
 def plot_tracking_error_frame(
@@ -379,10 +381,8 @@ def plot_system_id(
     init_log,
     predicted_log,
     out_prefix="system_identification",
-    show_markers: bool = False,
 ):
     target_log = pipeline.target_log
-    marker_kwargs = _line_marker_kwargs(show_markers)
 
     plot_time = np.asarray(target_log.pose.time_s, dtype=float)
     reference_time = np.asarray(target_log.reference.time_s, dtype=float)
@@ -429,11 +429,11 @@ def plot_system_id(
 
     measurement_label = "Measured" if getattr(pipeline, "uses_external_target_log", False) else "True"
     show_estimate_dots = not getattr(pipeline, "uses_external_target_log", False)
-    ax_traj.plot(reference[:, 0], reference[:, 1], color="tab:red", linestyle="--", linewidth=1.3, label="Reference", **marker_kwargs)
-    ax_traj.plot(true_measurements[:, 0], true_measurements[:, 1], color="tab:blue", linewidth=1.2, label=measurement_label, **marker_kwargs)
+    ax_traj.plot(reference[:, 0], reference[:, 1], color="tab:red", linestyle="--", linewidth=1.3, label="Reference")
+    ax_traj.plot(true_measurements[:, 0], true_measurements[:, 1], color="tab:blue", linewidth=1.2, label=measurement_label)
     if show_estimate_dots:
         ax_traj.scatter(measurements[:, 0], measurements[:, 1], color="tab:blue", marker=".", s=5, linewidths=0.0)
-    _plot_replay_windows_xy(ax_traj, measurements, replay, window_starts, marker_kwargs)
+    _plot_replay_windows_xy(ax_traj, measurements, replay, window_starts)
     ax_traj.scatter(measurements[window_starts, 0], measurements[window_starts, 1], marker="x", s=32, linewidths=1.0, color="black")
     ax_traj.set_xlabel("x [m]")
     ax_traj.set_ylabel("y [m]")
@@ -460,10 +460,10 @@ def plot_system_id(
 
     cmd_time, cmd_right = _stair_series(command_time, wheel_cmd[:, 0], wheel_time[-1] if len(wheel_time) else None)
     _, cmd_left = _stair_series(command_time, wheel_cmd[:, 1], wheel_time[-1] if len(wheel_time) else None)
-    line_cmd_right = ax_wheels.step(cmd_time, cmd_right, where="post", color="tab:green", linestyle="--", linewidth=0.8, label="cmd right", **marker_kwargs)[0]
-    line_meas_right = ax_wheels.plot(wheel_time, wheel_actual[:, 0], color="tab:green", linewidth=0.9, label="meas right", **marker_kwargs)[0]
-    line_cmd_left = ax_wheels.step(cmd_time, cmd_left, where="post", color="tab:orange", linestyle="--", linewidth=0.8, label="cmd left", **marker_kwargs)[0]
-    line_meas_left = ax_wheels.plot(wheel_time, wheel_actual[:, 1], color="tab:orange", linewidth=0.9, label="meas left", **marker_kwargs)[0]
+    line_cmd_right = ax_wheels.step(cmd_time, cmd_right, where="post", color="tab:green", linestyle="--", linewidth=0.8, label="cmd right")[0]
+    line_meas_right = ax_wheels.plot(wheel_time, wheel_actual[:, 0], color="tab:green", linewidth=0.9, label="meas right")[0]
+    line_cmd_left = ax_wheels.step(cmd_time, cmd_left, where="post", color="tab:orange", linestyle="--", linewidth=0.8, label="cmd left")[0]
+    line_meas_left = ax_wheels.plot(wheel_time, wheel_actual[:, 1], color="tab:orange", linewidth=0.9, label="meas left")[0]
     ax_wheels.set_xlabel("time [s]")
     ax_wheels.set_ylabel("wheel speed [rad/s]")
     ax_wheels.set_title("Wheel Speeds")
@@ -477,17 +477,16 @@ def plot_system_id(
         wheel_actual,
         motor_model_wheel_speeds,
         wheel_window_starts,
-        marker_kwargs,
     )
 
     state_labels = ("x [m]", "y [m]", "theta [rad]")
     state_names = ("x", "y", "theta")
     for index, ax in enumerate(state_axes):
-        ax.plot(reference_time, reference[:, index], "r--", linewidth=1.3, label="Reference", **marker_kwargs)
-        ax.plot(plot_time, true_measurements[:, index], color="tab:blue", linewidth=1.2, label=measurement_label, **marker_kwargs)
+        ax.plot(reference_time, reference[:, index], "r--", linewidth=1.3, label="Reference")
+        ax.plot(plot_time, true_measurements[:, index], color="tab:blue", linewidth=1.2, label=measurement_label)
         if show_estimate_dots:
             ax.scatter(plot_time, measurements[:, index], color="tab:blue", marker=".", s=5, linewidths=0.0)
-        _plot_replay_windows_state(ax, plot_time, measurements, replay, window_starts, index, marker_kwargs)
+        _plot_replay_windows_state(ax, plot_time, measurements, replay, window_starts, index)
         _plot_window_start_markers(ax, plot_time, measurements[:, index], window_starts)
         ax.set_xlabel("time [s]")
         ax.set_ylabel(state_labels[index])
@@ -495,8 +494,6 @@ def plot_system_id(
         ax.grid(True)
         ax.legend()
 
-    if show_markers:
-        _set_line_widths(fig, 1.0)
     fig.tight_layout(rect=[0, 0, 1, 0.96])
     fig.savefig(output_path, bbox_inches="tight", transparent=False, facecolor="white")
     plt.close(fig)
@@ -533,7 +530,6 @@ def _plot_replay_windows_xy(
     measurements: np.ndarray,
     replay: np.ndarray,
     window_starts: np.ndarray,
-    marker_kwargs: dict[str, object],
 ):
     for window_index, start_idx in enumerate(window_starts):
         _, segment_poses = _model_window_segment(measurements, replay, None, window_starts, window_index)
@@ -546,7 +542,6 @@ def _plot_replay_windows_xy(
             color="tab:orange",
             linewidth=1.0,
             label=label,
-            **marker_kwargs,
         )
 
 
@@ -557,7 +552,6 @@ def _plot_replay_windows_state(
     replay: np.ndarray,
     window_starts: np.ndarray,
     state_index: int,
-    marker_kwargs: dict[str, object],
 ):
     _plot_replay_windows_series(
         ax,
@@ -569,7 +563,6 @@ def _plot_replay_windows_state(
         color="tab:orange",
         label="Model",
         linewidth=1.0,
-        marker_kwargs=marker_kwargs,
     )
 
 
@@ -580,7 +573,6 @@ def _plot_windowed_motor_model_axes(
     encoder_wheel_speeds: np.ndarray,
     model_wheel_speeds: np.ndarray,
     window_starts: np.ndarray,
-    marker_kwargs: dict[str, object],
 ):
     ax_speed = ax_duty.twinx()
 
@@ -590,7 +582,6 @@ def _plot_windowed_motor_model_axes(
         color="#f2c14e",
         linewidth=0.3,
         label="DC left",
-        **marker_kwargs,
     )[0]
     line_enc_l = ax_speed.plot(
         time,
@@ -598,7 +589,6 @@ def _plot_windowed_motor_model_axes(
         color="#f28e2b",
         linewidth=0.9,
         label="enc left",
-        **marker_kwargs,
     )[0]
     line_dc_r = ax_duty.plot(
         time,
@@ -606,7 +596,6 @@ def _plot_windowed_motor_model_axes(
         color="#59a14f",
         linewidth=0.3,
         label="DC right",
-        **marker_kwargs,
     )[0]
     line_enc_r = ax_speed.plot(
         time,
@@ -614,7 +603,6 @@ def _plot_windowed_motor_model_axes(
         color="#1b7f3a",
         linewidth=0.9,
         label="enc right",
-        **marker_kwargs,
     )[0]
 
     model_left = _plot_replay_windows_series(
@@ -627,7 +615,6 @@ def _plot_windowed_motor_model_axes(
         color="#b85c00",
         label="model left",
         linewidth=0.9,
-        marker_kwargs=marker_kwargs,
     )
     model_right = _plot_replay_windows_series(
         ax_speed,
@@ -639,7 +626,6 @@ def _plot_windowed_motor_model_axes(
         color="#0b5d1e",
         label="model right",
         linewidth=0.9,
-        marker_kwargs=marker_kwargs,
     )
     _set_symmetric_ylim(ax_duty, duty_cycle)
     speed_values = [encoder_wheel_speeds]
@@ -667,7 +653,6 @@ def _plot_replay_windows_series(
     color: str,
     label: str,
     linewidth: float,
-    marker_kwargs: dict[str, object],
 ):
     first_line = None
     for window_index, _ in enumerate(window_starts):
@@ -686,7 +671,6 @@ def _plot_replay_windows_series(
             color=color,
             linewidth=linewidth,
             label=label if first_line is None else None,
-            **marker_kwargs,
         )[0]
         first_line = line if first_line is None else first_line
     return first_line
@@ -762,22 +746,6 @@ def _plot_window_start_markers(
         linewidths=1.0,
         color=color,
     )
-
-
-def _line_marker_kwargs(show_markers: bool) -> dict[str, object]:
-    if not show_markers:
-        return {}
-    return {
-        "marker": "x",
-        "markersize": 3.2,
-        "markeredgewidth": 0.8,
-    }
-
-
-def _set_line_widths(fig, linewidth: float) -> None:
-    for ax in fig.axes:
-        for line in ax.lines:
-            line.set_linewidth(linewidth)
 
 
 def _set_symmetric_ylim(ax, values: np.ndarray) -> None:
@@ -915,6 +883,8 @@ def plot_tracking_error_surface(
     init_label="Initial parameter guess",
     hidden_label="Hidden parameters",
     min_label="Minimum sampled loss",
+    save_pdf: bool = True,
+    show_plot: bool = False,
 ):
     os.makedirs("visualize", exist_ok=True)
     output_filename = out_path if out_path is not None else os.path.join("visualize", f"{out_prefix}.pdf")
@@ -991,9 +961,7 @@ def plot_tracking_error_surface(
     ax.set_zlabel(surface_label)
     if z_min is not None and z_max is not None:
         ax.set_zlim(z_min, z_max)
-    ax.set_title(
-        f"{title} (seed={seed}, replay realizations={num_realizations})"
-    )
+    ax.set_title(title)
     ax.view_init(elev=10, azim=-157)
     ax.legend(loc="upper right")
     fig.colorbar(
@@ -1006,6 +974,9 @@ def plot_tracking_error_surface(
     )
 
     fig.tight_layout()
-    fig.savefig(output_filename, bbox_inches="tight")
-    print(f"Saved figure to: {output_filename}")
+    if save_pdf:
+        fig.savefig(output_filename, bbox_inches="tight")
+        print(f"Saved figure to: {output_filename}")
+    if show_plot:
+        plt.show()
     plt.close(fig)

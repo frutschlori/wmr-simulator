@@ -24,8 +24,8 @@ def _plot_trajectory_axes(
     closed_loop_estimates = np.asarray(closed_loop_log.measurements)
     replay_actual = np.asarray(replay_actual)
     replay_estimates = np.asarray(replay_estimates)
-    resolved_window_length = pipeline.resolve_window_length(window_length)
     num_replay_intervals = max(len(replay_estimates) - 1, 1)
+    resolved_window_length = pipeline.resolve_replay_window_length(window_length, num_replay_intervals)
     window_start_indices = np.arange(0, num_replay_intervals, resolved_window_length)
     if axis_limits is not None:
         x_limits, y_limits = axis_limits
@@ -87,11 +87,10 @@ def _plot_trajectory_axes(
         closed_loop_estimates[:, 0],
         closed_loop_estimates[:, 1],
         color="blue",
-        marker="x",
+        marker=".",
         s=3,
         alpha=1,
-        linewidth=0.5,
-        label="Closed-Loop Estimate",
+        linewidth=0.0,
     )
     for window_idx, start_idx in enumerate(window_start_indices):
         end_idx = min(start_idx + resolved_window_length, num_replay_intervals)
@@ -113,10 +112,9 @@ def _plot_trajectory_axes(
         replay_estimates[:, 1],
         color="orange",
         s=3,
-        marker="x",
+        marker=".",
         alpha=1,
-        linewidth=0.5,
-        label="Windowed Replay Estimate",
+        linewidth=0.0,
     )
     ax.scatter(
         closed_loop_estimates[window_start_indices, 0],

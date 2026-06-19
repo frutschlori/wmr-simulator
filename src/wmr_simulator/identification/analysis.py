@@ -6,7 +6,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from wmr_simulator.identification.pipeline import SystemIdentificationPipeline
-from wmr_simulator.types import PhysicalParams
+from wmr_simulator.types import PhysicalParams, SimulationLog
 from wmr_simulator.visualization.identification import (
     plot_tracking_error_surface,
     plot_trajectory,
@@ -62,7 +62,7 @@ def apply_reference_states_to_pipeline(
     reference_states: np.ndarray,
 ) -> SystemIdentificationPipeline:
     pipeline.reference_states = jnp.asarray(
-        pipeline._extend_reference_states(reference_states),
+        pipeline._fit_reference_states(reference_states),
         dtype=jnp.float32,
     )
     pipeline.loaded_reference_trajectory_path = None
@@ -113,6 +113,7 @@ def make_surface_pipeline(
     initial_params: PhysicalParams,
     seed: int = 0,
     window_length: int | None = None,
+    target_log: SimulationLog | None = None,
 ) -> SystemIdentificationPipeline:
     return SystemIdentificationPipeline(
         problem_path=problem_path,
@@ -120,6 +121,7 @@ def make_surface_pipeline(
         seed=seed,
         reference_trajectories_dir=None,
         window_length=window_length,
+        target_log=target_log,
     )
 
 
@@ -136,14 +138,20 @@ def run_physical_parameter_surface(
     window_length: int | None = None,
     reference_trajectory_path: str | None = None,
     reference_trajectories_dir: str | None = None,
+    target_log: SimulationLog | None = None,
     out_prefix: str = "si_tracking_error_surface",
     save_plots: bool = True,
+    show_plots: bool = False,
 ):
+    if target_log is not None and (reference_trajectory_path is not None or reference_trajectories_dir is not None):
+        raise ValueError("Use either target_log or reference trajectory inputs, not both.")
+
     pipeline = make_surface_pipeline(
         problem_path=problem_path,
         initial_params=initial_params,
         seed=seed,
         window_length=window_length,
+        target_log=target_log,
     )
     selected_reference_path = reference_trajectory_path
     if selected_reference_path is None and reference_trajectories_dir is not None:
@@ -164,17 +172,23 @@ def run_physical_parameter_surface(
         base_points=base_points,
     )
 
-    if save_plots:
-        plot_trajectory(pipeline=pipeline, out_prefix="surface_reference")
+    if save_plots or show_plots:
+        plot_trajectory(
+            pipeline=pipeline,
+            out_prefix="surface_reference",
+            save_pdf=save_plots,
+        )
         plot_tracking_error_surface(
             wheel_radius_values=wheel_radius_values,
             base_diameter_values=base_diameter_values,
             tracking_error_surface=tracking_error_surface,
-            hidden_params=pipeline.hidden_params,
+            hidden_params=None if pipeline.uses_external_target_log else pipeline.hidden_params,
             init_params=initial_params,
             num_realizations=1,
             seed=seed,
             out_prefix=out_prefix,
+            save_pdf=save_plots,
+            show_plot=show_plots,
         )
 
     return {

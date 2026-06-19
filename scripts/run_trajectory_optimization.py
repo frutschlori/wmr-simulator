@@ -1,21 +1,29 @@
 import argparse
 import os
 os.environ["JAX_PLATFORMS"] = "cpu"
+
+import jax.numpy as jnp
+
+from wmr_simulator.trajectory_optimization.analysis import (
+    create_stacked_tracking_surface_trace_gif,
+    render_tracking_surface_frames_for_optimization_trace,
+)
 from wmr_simulator.trajectory_optimization.pipeline import TrajectoryOptimizationPipeline
+from wmr_simulator.types import PhysicalParams
 
 
 def main():
     parser = argparse.ArgumentParser(description="Initialize trajectory optimization inputs.")
+    # Setup description
     parser.add_argument("--problem", default="problems/pololu.yaml")
     # Optimization Settings
-    parser.add_argument("--save-trajectory", action="store_true", default=False)
+    parser.add_argument("--save-trajectory", action="store_true", default=True)
     parser.add_argument("--window-length", type=int, default=20)
     parser.add_argument("--opt-steps", type=int, default=5000)
-    parser.add_argument("--learning-rate", type=float, default=2e-3)
+    parser.add_argument("--learning-rate", type=float, default=1e-3)
     # Path settings
     parser.add_argument("--time-scaling", choices=["s-curve", "linear"], default="s-curve")
-    parser.add_argument("--trajectory-generator", choices=["planner", "bezier"], default="bezier")
-    parser.add_argument("--bezier-order", type=int, default=7)
+    parser.add_argument("--bezier-order", type=int, default=10)
     # Constraints
     parser.add_argument("--constraint-weight", type=float, default=1.0)
     parser.add_argument("--constraint-v-weight", type=float, default=1.0)
@@ -24,26 +32,25 @@ def main():
     parser.add_argument("--constraint-omega-weight", type=float, default=1.0)
     parser.add_argument("--constraint-alpha-weight", type=float, default=1.0)
     parser.add_argument("--constraint-smooth-max-beta", type=float, default=20.0) # barrier constant
-    # Visualization
+    # Visualization settings
     parser.add_argument("--save-opt-GIF", action="store_true", default=False)
-    parser.add_argument("--export-opt-reference-states", action="store_true", default=False)
     parser.add_argument("--opt-trace-stride", type=int, default=500)
+    parser.add_argument("--stacked-tracking-surface", action="store_true", default=False)
     args = parser.parse_args()
 
     pipeline = TrajectoryOptimizationPipeline(
         args.problem,
-        trajectory_generator_type=args.trajectory_generator,
         time_scaling=args.time_scaling,
     )
 
     print(f"Loaded problem: {pipeline.problem.path}")
     print(f"Robot: {type(pipeline.robot).__name__}")
-    print(f"Trajectory generator: {type(pipeline.trajectory_generator).__name__}")
-    if args.trajectory_generator == "bezier":
-        print(f"Time scaling: {pipeline.time_scaling}")
-    print(f"Trajectory samples: {len(pipeline.trajectory.time)}")
-    print(f"Start pose: {pipeline.trajectory.poses[0]}")
-    print(f"Goal pose:  {pipeline.trajectory.poses[-1]}")
+    print("Trajectory generator: Bezier")
+    print(f"Time scaling: {pipeline.time_scaling}")
+    print(f"Reference samples: {len(pipeline.reference_states)} at dt={pipeline.problem.geometry_dt}")
+    print(f"Closed-loop pose samples: {len(pipeline.closed_loop_log.poses)} at dt={pipeline.problem.wheel_dt}")
+    print(f"Start pose: {pipeline.reference_states[0, :3]}")
+    print(f"Goal pose:  {pipeline.reference_states[-1, :3]}")
     print(f"Window length: {pipeline.resolve_window_length(args.window_length)}")
     print("Motion limits:")
     print({name: float(value) for name, value in pipeline.motion_limits().items()})
@@ -52,16 +59,15 @@ def main():
     print("FIM:")
     print(pipeline.compute_fim_matrix(window_length=args.window_length))
 
-    if args.trajectory_generator == "bezier":
-        initial_control_points = pipeline.initial_bezier_control_points(args.bezier_order)
-        pipeline.set_bezier_control_points(initial_control_points)
+    initial_control_points = pipeline.initial_bezier_control_points(args.bezier_order)
+    pipeline.set_bezier_control_points(initial_control_points)
 
     pipeline.plot_trajectory(
         window_length=args.window_length,
-        out_prefix=f"traj_initial_{args.trajectory_generator}",
+        out_prefix="traj_initial_bezier",
     )
 
-    if args.opt_steps and args.trajectory_generator == "bezier":
+    if args.opt_steps:
         constraint_component_weights = {
             "v": args.constraint_v_weight,
             "a": args.constraint_a_weight,
@@ -111,21 +117,48 @@ def main():
         )
         pipeline.plot_loss_history(out_prefix="traj_opt_loss_history")
         if args.save_opt_GIF:
+            frames_root = os.path.join("visualize", "Trajectory Optimization Frames")
+            trajectory_frames_dir = os.path.join(frames_root, "traj_opt_trajectory_frames")
+            trajectory_gif_path = os.path.join(frames_root, "traj_opt.gif")
             pipeline.save_optimization_GIF(
                 window_length=args.window_length,
                 out_prefix="traj_opt",
+                frames_dir=trajectory_frames_dir,
+                gif_path=trajectory_gif_path,
             )
-        if args.export_opt_reference_states:
-            export_dir, saved_paths = pipeline.save_optimization_reference_states(
-                filename_prefix="traj_opt_reference_states",
-            )
-            print("Exported optimization reference states:")
-            print(export_dir)
-            print(f"Saved {len(saved_paths)} snapshots")
+            if args.stacked_tracking_surface:
+                robot_cfg = pipeline.problem.robot_cfg
+                surface_initial_params = PhysicalParams(
+                    wheel_radius=jnp.asarray(robot_cfg["wheel_radius"], dtype=jnp.float32),
+                    base_diameter=jnp.asarray(robot_cfg["base_diameter"], dtype=jnp.float32),
+                    max_wheel_speed=jnp.asarray(robot_cfg["max_wheel_speed"], dtype=jnp.float32),
+                    time_constant=jnp.asarray(robot_cfg["time_constant"], dtype=jnp.float32),
+                )
+                surface_frames_dir = render_tracking_surface_frames_for_optimization_trace(
+                    problem_path=args.problem,
+                    snapshots=pipeline.optimization_snapshots,
+                    initial_params=surface_initial_params,
+                    output_dir_name=os.path.join(frames_root, "traj_opt_tracking_surface_frames"),
+                    radius_min=0.01,
+                    radius_max=0.1,
+                    radius_points=50,
+                    base_min=0.01,
+                    base_max=0.5,
+                    base_points=50,
+                    window_length=args.window_length,
+                )
+                stacked_gif_path = create_stacked_tracking_surface_trace_gif(
+                    trajectory_frames_dir=trajectory_frames_dir,
+                    surface_frames_dir=surface_frames_dir,
+                    output_dir_name=os.path.join(frames_root, "traj_opt_stacked_frames"),
+                    gif_name="traj_opt_tracking_surface.gif",
+                    gif_path=os.path.join(frames_root, "traj_opt_tracking_surface.gif"),
+                )
+                print(f"Stacked tracking-surface GIF: {stacked_gif_path}")
 
     if args.save_trajectory:
         saved_path = pipeline.save_reference_states_pickle(
-            filename_prefix=f"{args.trajectory_generator}_reference_states",
+            filename_prefix="bezier_reference_states",
         )
         print("Saved trajectory pickle:")
         print(saved_path)

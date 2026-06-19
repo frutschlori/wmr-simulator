@@ -31,7 +31,7 @@ def main():
     # Problem configuration (contains robot configuration and optimization defaults)
     parser.add_argument("--problem", type=str, default="problems/pololu.yaml")
     # Optimization hyper-parameters
-    parser.add_argument("--window-length", type=int, default=50)
+    parser.add_argument("--window-length", type=int, default=100)
     parser.add_argument("--steps", type=int, default=2000)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     # Initial guess robot parameters
@@ -40,9 +40,8 @@ def main():
     parser.add_argument("--init-max-wheel-speed", type=float, default=300.0)
     parser.add_argument("--init-time-constant", type=float, default=0.3)
 
-    # Arguments for running pipeline on real experiment log
+    # Path to real experiment log
     parser.add_argument("--pololu-log", type=str, default="Pololu Data/Logs/Event based/TR02")
-    parser.add_argument("--show-markers", action="store_true")
     args = parser.parse_args()
 
     init_params = PhysicalParams(
@@ -78,7 +77,6 @@ def main():
         init_target_log=result["init_target_log"],
         init_log=result["init_replay_log"],
         predicted_log=result["final_replay_log"],
-        show_markers=args.show_markers,
         out_prefix=out_prefix,
     )
     plot_loss_history(

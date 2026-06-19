@@ -10,7 +10,6 @@ def main():
     parser = argparse.ArgumentParser(description="Run Bezier trajectory optimization and save its trace GIF.")
     parser.add_argument("problem", nargs="?", default="problems/problem_hidden.yaml")
     parser.add_argument("--window-length", type=int, default=50)
-    parser.add_argument("--trajectory-generator", choices=["bezier"], default="bezier")
     parser.add_argument("--time-scaling", choices=["s-curve", "linear"], default="linear")
     parser.add_argument("--bezier-order", type=int, default=10)
     parser.add_argument("--opt-steps", type=int, default=4000)
@@ -49,7 +48,6 @@ def main():
     result = run_trajectory_optimization_trace(
         problem_path=args.problem,
         window_length=args.window_length,
-        trajectory_generator_type=args.trajectory_generator,
         time_scaling=args.time_scaling,
         bezier_order=args.bezier_order,
         num_steps=args.opt_steps,

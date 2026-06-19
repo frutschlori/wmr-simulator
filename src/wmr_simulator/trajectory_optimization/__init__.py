@@ -1,23 +1,16 @@
 __all__ = [
-    "BezierTrajectoryGenerator",
-    "PlannerTrajectoryGenerator",
+    "BezierCurve",
     "ProblemDefinition",
-    "Trajectory",
-    "TrajectoryGenerator",
     "TrajectoryOptimizationPipeline",
-    "build_trajectory_generator",
+    "compute_bezier_reference",
 ]
 
 
 def __getattr__(name):
-    if name == "BezierTrajectoryGenerator":
-        from wmr_simulator.trajectory_optimization.bezier import BezierTrajectoryGenerator
+    if name in {"BezierCurve", "compute_bezier_reference"}:
+        from wmr_simulator.trajectory_optimization import bezier
 
-        return BezierTrajectoryGenerator
-    if name in {"PlannerTrajectoryGenerator", "Trajectory", "TrajectoryGenerator", "build_trajectory_generator"}:
-        from wmr_simulator.trajectory_optimization import parametrization
-
-        return getattr(parametrization, name)
+        return getattr(bezier, name)
     if name in {"ProblemDefinition", "TrajectoryOptimizationPipeline"}:
         from wmr_simulator.trajectory_optimization import pipeline
 
