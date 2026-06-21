@@ -126,6 +126,7 @@ def _make_bootstrap_batch_optimizer(
             controller_gains=pipeline.gains,
             robot_key=robot_key,
             estimator_key=estimator_key,
+            wheel_speed_log_source=pipeline.replay_wheel_speed_source,
         )
 
     def params_from_optimizer_values(log_relative):
@@ -236,6 +237,12 @@ def bootstrap_identification_adam(
     if bootstrap_samples < 1:
         raise ValueError("bootstrap_samples must be at least 1.")
 
+    master_key = jax.random.PRNGKey(seed)
+    target_key, _ = jax.random.split(master_key, 2)
+    target_robot_key, target_estimator_key = jax.random.split(target_key, 2)
+    target_robot_keys = jax.random.split(target_robot_key, bootstrap_samples)
+    target_estimator_keys = jax.random.split(target_estimator_key, bootstrap_samples)
+
     if num_steps <= 0:
         estimated_params = PhysicalParams(
             wheel_radius=jnp.full((bootstrap_samples,), initial_params.wheel_radius, dtype=jnp.float32),
@@ -253,13 +260,10 @@ def bootstrap_identification_adam(
             "loss_history": jnp.empty((bootstrap_samples, 0), dtype=jnp.float32),
             "motor_loss_history": jnp.empty((bootstrap_samples, 0), dtype=jnp.float32),
             "parameter_mse_history": jnp.empty((bootstrap_samples, 0), dtype=jnp.float32),
+            "target_robot_key": target_robot_keys[0],
+            "target_estimator_key": target_estimator_keys[0],
         }
 
-    master_key = jax.random.PRNGKey(seed)
-    target_key, _ = jax.random.split(master_key, 2)
-    target_robot_key, target_estimator_key = jax.random.split(target_key, 2)
-    target_robot_keys = jax.random.split(target_robot_key, bootstrap_samples)
-    target_estimator_keys = jax.random.split(target_estimator_key, bootstrap_samples)
     optimize_batch = _make_bootstrap_batch_optimizer(
         pipeline=pipeline,
         init_params=initial_params,
@@ -280,4 +284,6 @@ def bootstrap_identification_adam(
         "loss_history": loss_history,
         "motor_loss_history": motor_loss_history,
         "parameter_mse_history": parameter_mse_history,
+        "target_robot_key": target_robot_keys[0],
+        "target_estimator_key": target_estimator_keys[0],
     }

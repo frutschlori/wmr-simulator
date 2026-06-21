@@ -6,8 +6,6 @@ from matplotlib.ticker import FormatStrFormatter
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 import numpy as np
 
-from wmr_simulator.visualization.pololu import _plot_motor_model_axes
-
 
 def plot_trajectory(
     pipeline,
@@ -189,7 +187,7 @@ def plot_tracking_error_frame(
         full_reference_states[:, 0],
         full_reference_states[:, 1],
         linestyle="--",
-        linewidth=trajectory_linewidth,
+        linewidth=0.8 * trajectory_linewidth,
         color="red",
         label="Complete",
     )
@@ -352,14 +350,14 @@ def plot_reference_trajectories(
                 reference_states[:, 0],
                 reference_states[:, 1],
                 linestyle="--",
-                linewidth=trajectory_linewidth,
+                linewidth=0.8 * trajectory_linewidth,
                 color=color,
             )
             _draw_theta_arrows(ax, reference_states[:, :3], color)
 
     legend_handles = [
         Line2D([0], [0], color="black", linewidth=trajectory_linewidth, linestyle="-", label="Training"),
-        Line2D([0], [0], color="black", linewidth=trajectory_linewidth, linestyle="--", label="Validation"),
+        Line2D([0], [0], color="black", linewidth=0.8 * trajectory_linewidth, linestyle="--", label="Validation"),
     ]
 
     ax.set_xlabel("x [m]")
@@ -429,7 +427,7 @@ def plot_system_id(
 
     measurement_label = "Measured" if getattr(pipeline, "uses_external_target_log", False) else "True"
     show_estimate_dots = not getattr(pipeline, "uses_external_target_log", False)
-    ax_traj.plot(reference[:, 0], reference[:, 1], color="tab:red", linestyle="--", linewidth=1.3, label="Reference")
+    ax_traj.plot(reference[:, 0], reference[:, 1], color="tab:red", linestyle="--", linewidth=1.0, label="Reference")
     ax_traj.plot(true_measurements[:, 0], true_measurements[:, 1], color="tab:blue", linewidth=1.2, label=measurement_label)
     if show_estimate_dots:
         ax_traj.scatter(measurements[:, 0], measurements[:, 1], color="tab:blue", marker=".", s=5, linewidths=0.0)
@@ -445,10 +443,10 @@ def plot_system_id(
     ax_vel_omega = ax_vel.twinx()
     ref_speed = np.linalg.norm(reference[:, 3:5], axis=1)
     true_vel_time, true_vel = _pose_vel_omega(plot_time, true_measurements)
-    line_ref_v = ax_vel.plot(reference_time, ref_speed, color="tab:blue", linestyle="--", linewidth=1.0, label="ref v")[0]
+    line_ref_v = ax_vel.step(reference_time, ref_speed, where="post", color="tab:blue", linestyle="--", linewidth=0.8, label="ref v")[0]
     line_true_v = ax_vel.plot(true_vel_time, true_vel[:, 0], color="tab:blue", linewidth=1.0, label="true v")[0]
     line_model_v, line_model_w = _plot_windowed_velocity(ax_vel, ax_vel_omega, plot_time, measurements, replay, window_starts)
-    line_ref_w = ax_vel_omega.plot(reference_time, reference[:, 5], color="tab:purple", linestyle="--", linewidth=1.0, label=r"ref $\omega$")[0]
+    line_ref_w = ax_vel_omega.step(reference_time, reference[:, 5], where="post", color="tab:purple", linestyle="--", linewidth=0.8, label=r"ref $\omega$")[0]
     line_true_w = ax_vel_omega.plot(true_vel_time, true_vel[:, 1], color="tab:purple", linewidth=1.0, label=r"true $\omega$")[0]
     ax_vel.set_xlabel("time [s]")
     ax_vel.set_ylabel("linear velocity [m/s]")
@@ -460,9 +458,9 @@ def plot_system_id(
 
     cmd_time, cmd_right = _stair_series(command_time, wheel_cmd[:, 0], wheel_time[-1] if len(wheel_time) else None)
     _, cmd_left = _stair_series(command_time, wheel_cmd[:, 1], wheel_time[-1] if len(wheel_time) else None)
-    line_cmd_right = ax_wheels.step(cmd_time, cmd_right, where="post", color="tab:green", linestyle="--", linewidth=0.8, label="cmd right")[0]
+    line_cmd_right = ax_wheels.step(cmd_time, cmd_right, where="post", color="tab:green", linestyle="--", linewidth=0.6, label="cmd right")[0]
     line_meas_right = ax_wheels.plot(wheel_time, wheel_actual[:, 0], color="tab:green", linewidth=0.9, label="meas right")[0]
-    line_cmd_left = ax_wheels.step(cmd_time, cmd_left, where="post", color="tab:orange", linestyle="--", linewidth=0.8, label="cmd left")[0]
+    line_cmd_left = ax_wheels.step(cmd_time, cmd_left, where="post", color="tab:orange", linestyle="--", linewidth=0.6, label="cmd left")[0]
     line_meas_left = ax_wheels.plot(wheel_time, wheel_actual[:, 1], color="tab:orange", linewidth=0.9, label="meas left")[0]
     ax_wheels.set_xlabel("time [s]")
     ax_wheels.set_ylabel("wheel speed [rad/s]")
@@ -482,7 +480,7 @@ def plot_system_id(
     state_labels = ("x [m]", "y [m]", "theta [rad]")
     state_names = ("x", "y", "theta")
     for index, ax in enumerate(state_axes):
-        ax.plot(reference_time, reference[:, index], "r--", linewidth=1.3, label="Reference")
+        ax.step(reference_time, reference[:, index], where="post", color="tab:red", linestyle="--", linewidth=0.9, label="Reference")
         ax.plot(plot_time, true_measurements[:, index], color="tab:blue", linewidth=1.2, label=measurement_label)
         if show_estimate_dots:
             ax.scatter(plot_time, measurements[:, index], color="tab:blue", marker=".", s=5, linewidths=0.0)
@@ -502,7 +500,7 @@ def plot_system_id(
 
 def _window_start_indices(pipeline, plot_len: int, window_length: int | None) -> np.ndarray:
     num_intervals = max(plot_len - 1, 1)
-    resolved_window_length = pipeline.resolve_window_length(window_length)
+    resolved_window_length = pipeline.resolve_replay_window_length(window_length, num_intervals)
     return np.arange(0, num_intervals, resolved_window_length, dtype=int)
 
 

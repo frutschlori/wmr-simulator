@@ -20,12 +20,12 @@ def _plot_trajectory_axes(
     axis_limits=None,
     title="Trajectory Plot",
 ):
-    closed_loop_actual = np.asarray(closed_loop_log.poses)
-    closed_loop_estimates = np.asarray(closed_loop_log.measurements)
+    closed_loop_actual = np.asarray(closed_loop_log.pose.true_states)
+    closed_loop_estimates = np.asarray(closed_loop_log.pose.states)
     replay_actual = np.asarray(replay_actual)
     replay_estimates = np.asarray(replay_estimates)
     num_replay_intervals = max(len(replay_estimates) - 1, 1)
-    resolved_window_length = pipeline.resolve_replay_window_length(window_length, num_replay_intervals)
+    resolved_window_length = pipeline.simulation.resolve_replay_window_length(window_length, num_replay_intervals)
     window_start_indices = np.arange(0, num_replay_intervals, resolved_window_length)
     if axis_limits is not None:
         x_limits, y_limits = axis_limits

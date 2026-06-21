@@ -38,7 +38,7 @@ def main():
     parser.add_argument("--bootstrap-samples", type=int, default=None)
     parser.add_argument("--window-length", type=int, default=50)
     parser.add_argument("--steps", type=int, default=1000)
-    parser.add_argument("--learning-rate", type=float, default=2e-3)
+    parser.add_argument("--learning-rate", type=float, default=1e-3)
     # Initial guess robot parameters
     parser.add_argument("--init-wheel-radius", type=float, default=0.02)
     parser.add_argument("--init-base-diameter", type=float, default=0.1)
