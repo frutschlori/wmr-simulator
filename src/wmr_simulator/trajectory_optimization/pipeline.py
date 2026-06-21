@@ -3,14 +3,14 @@ import os
 import pickle
 from typing import NamedTuple
 
-import jax
 import jax.numpy as jnp
 import numpy as np
 import yaml
 
 from wmr_simulator.controller import Controller
-from wmr_simulator.estimator import DiffDriveEstimator, EstimatorState
-from wmr_simulator.robot import DiffDrive, DiffDriveState
+from wmr_simulator.estimator import DiffDriveEstimator
+from wmr_simulator.robot import DiffDrive
+from wmr_simulator.simulation import SimulationPipeline, make_replay_segment_plan, replay_simulation_log
 from wmr_simulator.trajectory_optimization.bezier import (
     clamp_control_points,
     compute_bezier_reference,
@@ -31,6 +31,7 @@ from wmr_simulator.trajectory_optimization.fim import (
 from wmr_simulator.trajectory_optimization.objectives import fim_loss, trajectory_objective
 from wmr_simulator.trajectory_optimization.optimizers import optimize_bezier_control_points
 from wmr_simulator.trajectory_optimization.parametrization import normalize_time_scaling
+from wmr_simulator.types import PhysicalParams, SimulationLog
 from wmr_simulator.visualization.trajectories import (
     plot_loss_history as plot_loss_history_figure,
     plot_trajectory as plot_trajectory_figure,
@@ -93,26 +94,12 @@ class ProblemDefinition:
         return steps
 
 
-class ReplayInitializationLog(NamedTuple):
-    wheel_speeds: jax.Array
-    estimator_u_hat: jax.Array
-    estimator_u_true: jax.Array
-    estimator_covariances: jax.Array
-
-
-class ClosedLoopLog(NamedTuple):
-    poses: jax.Array
-    duty_cycles: jax.Array
-    measurements: jax.Array
-    replay_init: ReplayInitializationLog
-
-
 class OptimizationSnapshot(NamedTuple):
     step: int
     loss_value: float
     control_points: np.ndarray
     reference_states: np.ndarray
-    closed_loop_log: ClosedLoopLog
+    closed_loop_log: SimulationLog
 
 
 def reference_states_export_payload(reference_states, dt: float, **metadata):
@@ -131,19 +118,11 @@ class TrajectoryOptimizationPipeline:
         time_scaling: str | None = None,
     ):
         self.problem = ProblemDefinition(problem_path)
-        self.robot = self.problem.build_robot()
-        self.controller = self.problem.build_controller()
-        self.controller_gains = jnp.asarray(self.problem.controller_cfg["gains"], dtype=jnp.float32)
-        self.estimator = self.problem.build_estimator()
-        estimator_init_state = self.estimator.get_init_state(
-            key=jax.random.PRNGKey(1),
-            start_pose=self.problem.estimator_cfg["start"],
-        )
-        self.initial_estimator_covariance = estimator_init_state.P
-        master_key = jax.random.PRNGKey(0)
-        target_key, replay_key = jax.random.split(master_key, 2)
-        self.target_robot_key, self.target_estimator_key = jax.random.split(target_key, 2)
-        self.replay_robot_key, self.replay_estimator_key = jax.random.split(replay_key, 2)
+        self.simulation = SimulationPipeline(problem_path=problem_path, seed=0, reference_trajectories_dir=None)
+        self.robot = self.simulation.robot
+        self.controller = self.simulation.controller
+        self.controller_gains = self.simulation.gains
+        self.estimator = self.simulation.estimator
         self.time_scaling = normalize_time_scaling(time_scaling)
         self.control_points = initial_bezier_control_points(self.problem, order=2)
         self.reference_states = self.reference_states_from_control_points(self.control_points)
@@ -153,6 +132,14 @@ class TrajectoryOptimizationPipeline:
 
     def nominal_parameters(self) -> jnp.ndarray:
         return jnp.array([self.robot.r, self.robot.L], dtype=jnp.float32)
+
+    def nominal_physical_params(self) -> PhysicalParams:
+        return PhysicalParams(
+            wheel_radius=jnp.asarray(self.robot.r, dtype=jnp.float32),
+            base_diameter=jnp.asarray(self.robot.L, dtype=jnp.float32),
+            max_wheel_speed=jnp.asarray(self.robot.max_wheel_speed, dtype=jnp.float32),
+            time_constant=jnp.asarray(self.robot.tau, dtype=jnp.float32),
+        )
 
     def default_measurement_variances(self) -> np.ndarray:
         return default_measurement_variances(self.problem.estimator_cfg)
@@ -169,307 +156,73 @@ class TrajectoryOptimizationPipeline:
     def current_bezier_control_points(self):
         return np.asarray(self.control_points, dtype=float)
 
-    def _set_closed_loop_log(self, closed_loop_log: ClosedLoopLog):
+    def _set_closed_loop_log(self, closed_loop_log: SimulationLog):
         self.closed_loop_log = closed_loop_log
-        self.closed_loop_poses = closed_loop_log.poses
-        self.closed_loop_duty_cycles = closed_loop_log.duty_cycles
-        self.closed_loop_measurements = closed_loop_log.measurements
+        self.closed_loop_poses = closed_loop_log.pose.true_states
+        self.closed_loop_duty_cycles = closed_loop_log.wheel.duty_cycle
+        self.closed_loop_measurements = closed_loop_log.pose.states
 
-    def resolve_window_length(self, window_length: int | None) -> int:
-        if window_length is None:
-            return len(self.reference_states)
-
-        window_length = int(window_length)
-        if window_length <= 0:
-            raise ValueError("window_length must be a positive integer.")
-        return window_length
-
-    def resolve_replay_window_length(self, window_length: int | None, num_intervals: int) -> int:
-        if window_length is None:
-            return max(int(num_intervals), 1)
-        return self.resolve_window_length(window_length)
-
-    def initial_estimator_state(self, init_pose: jnp.ndarray, estimator_key: jax.Array):
-        return EstimatorState(
-            pose_hat=jnp.asarray(init_pose, dtype=jnp.float32),
-            pose_meas=jnp.asarray(init_pose, dtype=jnp.float32),
-            u_hat=jnp.zeros(2, dtype=jnp.float32),
-            u_true=jnp.zeros(2, dtype=jnp.float32),
-            P=jnp.asarray(self.initial_estimator_covariance, dtype=jnp.float32),
-            key=estimator_key,
+    def run_closed_loop_deployment(self, reference_states: jnp.ndarray) -> SimulationLog:
+        return self.simulation.run_closed_loop(
+            self.nominal_physical_params(),
+            controller_gains=self.controller_gains,
+            wheel_speed_log_source="estimated",
+            reference_states=reference_states,
         )
 
     @staticmethod
-    def initial_pose_from_reference(reference_states: jnp.ndarray) -> jnp.ndarray:
-        return jnp.asarray(reference_states[0, :3], dtype=jnp.float32)
+    def physical_params_from_vector(params: jnp.ndarray) -> PhysicalParams:
+        params = jnp.asarray(params, dtype=jnp.float32)
+        return PhysicalParams(
+            wheel_radius=params[0],
+            base_diameter=params[1],
+            max_wheel_speed=jnp.asarray(1.0, dtype=jnp.float32),
+            time_constant=jnp.asarray(0.0, dtype=jnp.float32),
+        )
 
-    def initial_closed_loop_carry(
+    def replay_segment_plan(self, target_log: SimulationLog, window_length: int | None = None):
+        num_pose_samples = len(target_log.pose.time_s)
+        num_wheel_samples = len(target_log.wheel.time_s)
+        window_length = self.simulation.resolve_replay_window_length(window_length, num_pose_samples - 1)
+        pose_time = np.arange(num_pose_samples, dtype=float) * self.problem.wheel_dt
+        wheel_time = np.arange(num_wheel_samples, dtype=float) * self.problem.wheel_dt - self.problem.wheel_dt
+        return make_replay_segment_plan(
+            pose_time,
+            wheel_time,
+            window_length,
+        )
+
+    def replay_log(
         self,
-        robot_key: jax.Array,
-        estimator_key: jax.Array,
-        reference_states: jnp.ndarray,
-    ):
-        initial_pose = self.initial_pose_from_reference(reference_states)
-        robot_state = self.robot.get_init_state(
-            key=robot_key,
-            init_pose=initial_pose,
+        params: jnp.ndarray,
+        window_length: int | None = None,
+        closed_loop_log: SimulationLog | None = None,
+    ) -> SimulationLog:
+        target_log = self.closed_loop_log if closed_loop_log is None else closed_loop_log
+        return replay_simulation_log(
+            robot=self.robot,
+            robot_key=self.simulation.robot_key,
+            target_log=target_log,
+            robot_params=self.physical_params_from_vector(params),
+            replay_segment_plan=self.replay_segment_plan(target_log, window_length),
         )
-        estimator_state = self.initial_estimator_state(
-            initial_pose,
-            estimator_key,
-        )
-        controller_state = jnp.zeros(2, dtype=jnp.float32)
-        delayed_duty_cycle = jnp.zeros(2, dtype=jnp.float32)
-        return robot_state, estimator_state, controller_state, delayed_duty_cycle
-
-    def initial_replay_carry(
-        self,
-        init_pose: jnp.ndarray,
-        robot_key: jax.Array,
-        estimator_key: jax.Array,
-        init_wheel_speeds: jnp.ndarray | None = None,
-        init_u_hat: jnp.ndarray | None = None,
-        init_u_true: jnp.ndarray | None = None,
-        init_covariance: jnp.ndarray | None = None,
-    ):
-        if init_wheel_speeds is None:
-            init_wheel_speeds = jnp.zeros(2, dtype=jnp.float32)
-        if init_u_hat is None:
-            init_u_hat = jnp.zeros(2, dtype=jnp.float32)
-        if init_u_true is None:
-            init_u_true = jnp.zeros(2, dtype=jnp.float32)
-        if init_covariance is None:
-            init_covariance = jnp.asarray(self.initial_estimator_covariance, dtype=jnp.float32)
-
-        robot_state = DiffDriveState(
-            pose=jnp.asarray(init_pose, dtype=jnp.float32),
-            wheel_speeds=jnp.asarray(init_wheel_speeds, dtype=jnp.float32),
-            key=robot_key,
-            vel_omega=jnp.zeros(2, dtype=jnp.float32),
-            duty_cycle=jnp.zeros(2, dtype=jnp.float32),
-            wheel_speed_cmd=jnp.zeros(2, dtype=jnp.float32),
-        )
-        estimator_state = EstimatorState(
-            pose_hat=jnp.asarray(init_pose, dtype=jnp.float32),
-            pose_meas=jnp.asarray(init_pose, dtype=jnp.float32),
-            u_hat=jnp.asarray(init_u_hat, dtype=jnp.float32),
-            u_true=jnp.asarray(init_u_true, dtype=jnp.float32),
-            P=jnp.asarray(init_covariance, dtype=jnp.float32),
-            key=estimator_key,
-        )
-        return robot_state, estimator_state
-
-    def closed_loop_step(self, carry, ref_k: jnp.ndarray, params: jnp.ndarray):
-        robot_state, estimator_state, controller_state, delayed_duty_cycle = carry
-
-        pose_est = self.estimator.get_est_pose(estimator_state)
-        wheel_est = self.estimator.get_est_wheel_speeds(estimator_state)
-        next_controller_state, duty_cycle = self.controller.compute(
-            controller_state,
-            ref_k,
-            pose_est,
-            wheel_est,
-            gains=self.controller_gains,
-            wheel_radius=params[0],
-            base_diameter=params[1],
-        )
-
-        def wheel_step(inner_carry, inner_index):
-            inner_robot_state, inner_estimator_state = inner_carry
-            applied_duty_cycle = jnp.where(inner_index == 0, delayed_duty_cycle, duty_cycle)
-            next_robot_state = self.robot.step(
-                inner_robot_state,
-                applied_duty_cycle,
-                wheel_radius=params[0],
-                base_diameter=params[1],
-                dt=self.problem.wheel_dt,
-            )
-            next_estimator_state = self.estimator.update(
-                inner_estimator_state,
-                next_robot_state.wheel_speeds[0],
-                next_robot_state.wheel_speeds[1],
-                self.robot.get_pose(next_robot_state),
-                wheel_radius=params[0],
-                base_diameter=params[1],
-                dt=self.problem.wheel_dt,
-            )
-            next_pose_true = self.robot.get_pose(next_robot_state)
-            measurement = self.estimator.get_est_pose(next_estimator_state)
-            replay_init_wheel_speeds = inner_robot_state.wheel_speeds
-            replay_init_u_hat = inner_estimator_state.u_hat
-            replay_init_u_true = inner_estimator_state.u_true
-            replay_init_covariance = inner_estimator_state.P
-            return (next_robot_state, next_estimator_state), (
-                next_pose_true,
-                applied_duty_cycle,
-                measurement,
-                replay_init_wheel_speeds,
-                replay_init_u_hat,
-                replay_init_u_true,
-                replay_init_covariance,
-            )
-
-        (next_robot_state, next_estimator_state), inner_outputs = jax.lax.scan(
-            wheel_step,
-            (robot_state, estimator_state),
-            jnp.arange(self.problem.inner_steps_per_geometry_step),
-        )
-
-        next_carry = (next_robot_state, next_estimator_state, next_controller_state, duty_cycle)
-        return next_carry, inner_outputs
-
-    def run_closed_loop_deployment(self, reference_states: jnp.ndarray):
-        params = self.nominal_parameters()
-        initial_carry = self.initial_closed_loop_carry(
-            self.target_robot_key,
-            self.target_estimator_key,
-            reference_states,
-        )
-
-        def scan_step(carry, ref_k):
-            return self.closed_loop_step(carry, ref_k, params)
-
-        _, outputs = jax.lax.scan(scan_step, initial_carry, reference_states)
-        poses, duty_cycles, measurements, init_wheel_speeds, init_u_hat, init_u_true, init_covariances = outputs
-        poses = poses.reshape(-1, 3)
-        duty_cycles = duty_cycles.reshape(-1, 2)
-        measurements = measurements.reshape(-1, 3)
-        init_wheel_speeds = init_wheel_speeds.reshape(-1, 2)
-        init_u_hat = init_u_hat.reshape(-1, 2)
-        init_u_true = init_u_true.reshape(-1, 2)
-        init_covariances = init_covariances.reshape(
-            -1,
-            init_covariances.shape[-2],
-            init_covariances.shape[-1],
-        )
-        initial_robot_state, initial_estimator_state, _, _ = initial_carry
-        initial_pose = self.robot.get_pose(initial_robot_state)[None, :]
-        initial_measurement = self.estimator.get_est_pose(initial_estimator_state)[None, :]
-        poses = jnp.concatenate([initial_pose, poses], axis=0)
-        measurements = jnp.concatenate([initial_measurement, measurements], axis=0)
-        replay_init = ReplayInitializationLog(
-            wheel_speeds=init_wheel_speeds,
-            estimator_u_hat=init_u_hat,
-            estimator_u_true=init_u_true,
-            estimator_covariances=init_covariances,
-        )
-        return ClosedLoopLog(
-            poses=poses,
-            duty_cycles=duty_cycles,
-            measurements=measurements,
-            replay_init=replay_init,
-        )
-
-    def open_loop_replay_step(self, carry, inputs, params: jnp.ndarray):
-        robot_state, estimator_state = carry
-        wheel_speeds, duty_cycle = inputs
-
-        next_robot_state = self.robot.step_kinematic(
-            robot_state,
-            wheel_speeds,
-            duty_cycle,
-            wheel_radius=params[0],
-            base_diameter=params[1],
-            dt=self.problem.wheel_dt,
-        )
-        ur_true, ul_true = wheel_speeds
-        pose_true = self.robot.get_pose(next_robot_state)
-        next_estimator_state = self.estimator.update(
-            estimator_state,
-            ur_true,
-            ul_true,
-            pose_true,
-            wheel_radius=params[0],
-            base_diameter=params[1],
-            dt=self.problem.wheel_dt,
-        )
-        measurement = self.estimator.get_est_pose(next_estimator_state)
-        actual_pose = self.robot.get_pose(next_robot_state)
-        return (next_robot_state, next_estimator_state), (actual_pose, measurement)
 
     def replay_rollout(
         self,
         params: jnp.ndarray,
         window_length: int | None = None,
-        closed_loop_log: ClosedLoopLog | None = None,
+        closed_loop_log: SimulationLog | None = None,
     ):
-        if closed_loop_log is None:
-            closed_loop_log = self.closed_loop_log
-
-        replay_wheel_speeds = closed_loop_log.replay_init.wheel_speeds
-        replay_duty_cycles = closed_loop_log.duty_cycles
-
-        num_intervals = replay_wheel_speeds.shape[0]
-        window_length = self.resolve_replay_window_length(window_length, num_intervals)
-        num_windows = int(np.ceil(num_intervals / window_length))
-        padded_num_intervals = num_windows * window_length
-        pad_steps = padded_num_intervals - num_intervals
-
-        padded_wheel_speeds = jnp.pad(replay_wheel_speeds, ((0, pad_steps), (0, 0)))
-        padded_duty_cycles = jnp.pad(replay_duty_cycles, ((0, pad_steps), (0, 0)))
-        wheel_speed_windows = padded_wheel_speeds.reshape(num_windows, window_length, 2)
-        duty_cycle_windows = padded_duty_cycles.reshape(num_windows, window_length, 2)
-
-        window_start_indices = jnp.arange(num_windows, dtype=jnp.int32) * window_length
-        init_poses = closed_loop_log.measurements[window_start_indices]
-        init_wheel_speeds = closed_loop_log.replay_init.wheel_speeds[window_start_indices]
-        init_u_hat = closed_loop_log.replay_init.estimator_u_hat[window_start_indices]
-        init_u_true = closed_loop_log.replay_init.estimator_u_true[window_start_indices]
-        init_covariances = closed_loop_log.replay_init.estimator_covariances[window_start_indices]
-
-        window_robot_keys = jax.random.split(self.replay_robot_key, num_windows)
-        window_estimator_keys = jax.random.split(self.replay_estimator_key, num_windows)
-
-        def rollout_single_window(
-            init_pose,
-            init_window_wheel_speeds,
-            init_window_u_hat,
-            init_window_u_true,
-            init_window_covariance,
-            robot_key,
-            estimator_key,
-            wheel_speed_window,
-            duty_cycle_window,
-        ):
-            initial_carry = self.initial_replay_carry(
-                init_pose,
-                robot_key,
-                estimator_key,
-                init_wheel_speeds=init_window_wheel_speeds,
-                init_u_hat=init_window_u_hat,
-                init_u_true=init_window_u_true,
-                init_covariance=init_window_covariance,
-            )
-            _, outputs = jax.lax.scan(
-                lambda carry, replay_inputs: self.open_loop_replay_step(carry, replay_inputs, params),
-                initial_carry,
-                (wheel_speed_window, duty_cycle_window),
-            )
-            return outputs
-
-        actual_pose_windows, measurement_windows = jax.vmap(rollout_single_window)(
-            init_poses,
-            init_wheel_speeds,
-            init_u_hat,
-            init_u_true,
-            init_covariances,
-            window_robot_keys,
-            window_estimator_keys,
-            wheel_speed_windows,
-            duty_cycle_windows,
-        )
-
-        actual_poses = actual_pose_windows.reshape(-1, 3)[:num_intervals]
-        measurements = measurement_windows.reshape(-1, 3)[:num_intervals]
-        actual_poses = jnp.concatenate([closed_loop_log.poses[:1], actual_poses], axis=0)
-        measurements = jnp.concatenate([closed_loop_log.measurements[:1], measurements], axis=0)
-        return actual_poses, measurements
+        target_log = self.closed_loop_log if closed_loop_log is None else closed_loop_log
+        replay_log = self.replay_log(params, window_length=window_length, closed_loop_log=closed_loop_log)
+        replay_poses = jnp.concatenate([target_log.pose.states[:1], replay_log.pose.states], axis=0)
+        return replay_poses, replay_poses
 
     def replay_measurement_sequence(
         self,
         params: jnp.ndarray,
         window_length: int | None = None,
-        closed_loop_log: ClosedLoopLog | None = None,
+        closed_loop_log: SimulationLog | None = None,
     ) -> jnp.ndarray:
         """
         Replays commands logged from closed-loop experiment on open-loop robot and records estimates
@@ -477,18 +230,17 @@ class TrajectoryOptimizationPipeline:
         but the replay log stores the integrated window endpoints. Thus the state sensitivity recursion length is
         limited to the window_length (-> smaller windows will yield smaller FIM).
         """
-        _, scanned_measurements = self.replay_rollout(
+        return self.replay_log(
             params,
             window_length=window_length,
             closed_loop_log=closed_loop_log,
-        )
-        return scanned_measurements
+        ).pose.states
 
     def measurement_vector(
         self,
         params: jnp.ndarray,
         window_length: int | None = None,
-        closed_loop_log: ClosedLoopLog | None = None,
+        closed_loop_log: SimulationLog | None = None,
     ) -> jnp.ndarray:
         """ Flattens Nx3 measurement matrix into 3Nx1 vector """
         measurements = self.replay_measurement_sequence(

@@ -192,7 +192,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Convert a Pololu reference JSON/JSN file into a simulator reference pickle."
     )
-    parser.add_argument("--input", type=str, default="Pololu Data/References/20cp.JSN")
+    parser.add_argument("--input", type=str, default="Pololu Data/References/20cp_bridge.JSN")
     parser.add_argument("--output-dir", type=str, default="trajectory_exports")
     parser.add_argument("--output-name", type=str, default=None)
     parser.add_argument("--result-index", type=int, default=0)

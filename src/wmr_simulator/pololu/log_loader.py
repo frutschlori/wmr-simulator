@@ -171,7 +171,6 @@ if __name__ == "__main__":
     parser.add_argument("--log", type=str, default="Pololu Data/Logs/Event based/TR02")
     parser.add_argument("--output", type=str, default=None)
     parser.add_argument("--out-dir", type=str, default="visualize")
-    parser.add_argument("--show-markers", action="store_true")
     args = parser.parse_args()
 
     log_path = Path(args.log)
@@ -183,4 +182,4 @@ if __name__ == "__main__":
     print(f"Pose samples: {len(log.pose.time_s)}")
     print(f"Wheel samples: {len(log.wheel.time_s)}")
     print(f"Command samples: {len(log.pose.command_time_s)}")
-    plot_logged_summary(log, out_prefix=out_prefix, out_dir=args.out_dir, show_markers=args.show_markers)
+    plot_logged_summary(log, out_prefix=out_prefix, out_dir=args.out_dir)

@@ -10,10 +10,8 @@ def plot_logged_summary(
     *,
     out_prefix: str = "pololu_log",
     out_dir: str | Path = "visualize",
-    show_markers: bool = False,
 ) -> Path:
     plt = _plot_module()
-    marker_kwargs = _line_marker_kwargs(show_markers)
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -35,7 +33,7 @@ def plot_logged_summary(
     fig.suptitle(f"Pololu Log Summary ({out_prefix})", fontsize=16)
 
     ax_traj = axes[0, 0]
-    ax_traj.plot(reference[:, 0], reference[:, 1], color="tab:red", linestyle="--", linewidth=1.3, label="Reference")
+    ax_traj.plot(reference[:, 0], reference[:, 1], color="tab:red", linestyle="--", linewidth=1.0, label="Reference")
     ax_traj.plot(measured_pose[:, 0], measured_pose[:, 1], color="tab:blue", linewidth=1.2, label="Measured")
     ax_traj.set_xlabel("x [m]")
     ax_traj.set_ylabel("y [m]")
@@ -47,7 +45,7 @@ def plot_logged_summary(
     ax_vel = axes[0, 1]
     ax_vel_omega = ax_vel.twinx()
     reference_speed = np.linalg.norm(reference[:, 3:5], axis=1)
-    line_ref_v = ax_vel.plot(ref_time, reference_speed, color="lightskyblue", linestyle="--", linewidth=1.35, label="ref v", **marker_kwargs)[0]
+    line_ref_v = ax_vel.step(ref_time, reference_speed, where="post", color="lightskyblue", linestyle="--", linewidth=0.9, label="ref v")[0]
     line_mocap_v = ax_vel.plot(
         mocap_vel_time,
         mocap_vel[:, 0],
@@ -59,11 +57,11 @@ def plot_logged_summary(
         wheel_time,
         odom_vel[:, 0],
         color="navy",
-        linestyle=":",
-        linewidth=0.55,
+        linestyle="--",
+        linewidth=0.45,
         label="odom v",
     )[0]
-    line_ref_w = ax_vel_omega.plot(ref_time, reference[:, 5], color="khaki", linestyle="--", linewidth=1.35, label=r"ref $\omega$", **marker_kwargs)[0]
+    line_ref_w = ax_vel_omega.step(ref_time, reference[:, 5], where="post", color="khaki", linestyle="--", linewidth=0.9, label=r"ref $\omega$")[0]
     line_mocap_w = ax_vel_omega.plot(
         mocap_vel_time,
         mocap_vel[:, 1],
@@ -75,8 +73,8 @@ def plot_logged_summary(
         wheel_time,
         odom_vel[:, 1],
         color="darkgoldenrod",
-        linestyle=":",
-        linewidth=0.55,
+        linestyle="--",
+        linewidth=0.45,
         label=r"odom $\omega$",
     )[0]
     ax_vel.set_xlabel("time [s]")
@@ -92,10 +90,10 @@ def plot_logged_summary(
     ax_wheels = axes[0, 2]
     cmd_time, cmd_right = _stair_series(command_time, wheel_cmd[:, 0], wheel_time[-1] if len(wheel_time) else None)
     _, cmd_left = _stair_series(command_time, wheel_cmd[:, 1], wheel_time[-1] if len(wheel_time) else None)
-    line_cmd_right = ax_wheels.step(cmd_time, cmd_right, where="post", color="tab:green", linestyle="--", linewidth=1.1, label="cmd right", **marker_kwargs)[0]
-    line_meas_right = ax_wheels.plot(wheel_time, wheel_speeds[:, 0], color="tab:green", linewidth=1.2, label="meas right", **marker_kwargs)[0]
-    line_cmd_left = ax_wheels.step(cmd_time, cmd_left, where="post", color="tab:orange", linestyle="--", linewidth=1.1, label="cmd left", **marker_kwargs)[0]
-    line_meas_left = ax_wheels.plot(wheel_time, wheel_speeds[:, 1], color="tab:orange", linewidth=1.2, label="meas left", **marker_kwargs)[0]
+    line_cmd_right = ax_wheels.step(cmd_time, cmd_right, where="post", color="tab:green", linestyle="--", linewidth=0.75, label="cmd right")[0]
+    line_meas_right = ax_wheels.plot(wheel_time, wheel_speeds[:, 0], color="tab:green", linewidth=1.2, label="meas right")[0]
+    line_cmd_left = ax_wheels.step(cmd_time, cmd_left, where="post", color="tab:orange", linestyle="--", linewidth=0.75, label="cmd left")[0]
+    line_meas_left = ax_wheels.plot(wheel_time, wheel_speeds[:, 1], color="tab:orange", linewidth=1.2, label="meas left")[0]
     ax_wheels.set_xlabel("time [s]")
     ax_wheels.set_ylabel("wheel speed [rad/s]")
     ax_wheels.set_title("Wheel Speeds")
@@ -105,7 +103,7 @@ def plot_logged_summary(
     labels = ("x [m]", "y [m]", "theta [rad]")
     titles = ("x State", "y State", "theta State")
     for index, ax in enumerate(axes[1, :]):
-        ax.plot(ref_time, reference[:, index], color="tab:red", linestyle="--", linewidth=1.3, label="Reference")
+        ax.step(ref_time, reference[:, index], where="post", color="tab:red", linestyle="--", linewidth=0.9, label="Reference")
         ax.plot(pose_time, measured_pose[:, index], color="tab:blue", linewidth=1.2, label="Measured")
         ax.set_xlabel("time [s]")
         ax.set_ylabel(labels[index])
@@ -113,8 +111,6 @@ def plot_logged_summary(
         ax.grid(True)
         ax.legend()
 
-    if show_markers:
-        _set_line_widths(fig, 1.0)
     fig.tight_layout(rect=[0, 0, 1, 0.96])
     fig.savefig(output_path, bbox_inches="tight", transparent=False, facecolor="white")
     plt.close(fig)
@@ -127,7 +123,6 @@ def _plot_motor_model_axes(
     duty_cycle: np.ndarray,
     encoder_wheel_speeds: np.ndarray,
     model_wheel_speeds: np.ndarray | None,
-    marker_kwargs: dict[str, object],
 ):
     ax_speed = ax_duty.twinx()
     model_wheel_speeds = (
@@ -137,23 +132,22 @@ def _plot_motor_model_axes(
     )
     model_wheel_speeds = model_wheel_speeds[: len(time)]
 
-    line_dc_l = ax_duty.plot(
+    line_dc_l = ax_duty.step(
         time,
         duty_cycle[:, 1],
+        where="post",
         color="tab:orange",
         linestyle="--",
         linewidth=0.8,
         label="DC left",
-        **marker_kwargs,
     )[0]
     line_enc_l = ax_speed.plot(
         time,
         encoder_wheel_speeds[:, 1],
         color="tab:orange",
-        linestyle=":",
-        linewidth=0.9,
+        linestyle="--",
+        linewidth=0.7,
         label="enc left",
-        **marker_kwargs,
     )[0]
     line_model_l = ax_speed.plot(
         time,
@@ -162,25 +156,23 @@ def _plot_motor_model_axes(
         linestyle="-",
         linewidth=0.9,
         label="model left",
-        **marker_kwargs,
     )[0]
-    line_dc_r = ax_duty.plot(
+    line_dc_r = ax_duty.step(
         time,
         duty_cycle[:, 0],
+        where="post",
         color="tab:green",
         linestyle="--",
-        linewidth=0.8,
+        linewidth=0.6,
         label="DC right",
-        **marker_kwargs,
     )[0]
     line_enc_r = ax_speed.plot(
         time,
         encoder_wheel_speeds[:, 0],
         color="tab:green",
-        linestyle=":",
-        linewidth=0.9,
+        linestyle="--",
+        linewidth=0.7,
         label="enc right",
-        **marker_kwargs,
     )[0]
     line_model_r = ax_speed.plot(
         time,
@@ -189,7 +181,6 @@ def _plot_motor_model_axes(
         linestyle="-",
         linewidth=0.9,
         label="model right",
-        **marker_kwargs,
     )[0]
 
     _set_symmetric_ylim(ax_duty, duty_cycle)
@@ -217,16 +208,6 @@ def _plot_module():
     return plt
 
 
-def _line_marker_kwargs(show_markers: bool) -> dict[str, object]:
-    if not show_markers:
-        return {}
-    return {
-        "marker": "x",
-        "markersize": 3.2,
-        "markeredgewidth": 0.8,
-    }
-
-
 def _mocap_vel_omega(time_s: np.ndarray, pose: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     if len(time_s) < 2:
         return time_s, np.zeros((len(time_s), 2), dtype=float)
@@ -244,12 +225,6 @@ def _stair_series(time: np.ndarray, values: np.ndarray, end_time: float | None) 
     if end_time is None or len(time) == 0 or end_time <= time[-1]:
         return time, values
     return np.concatenate([time, [end_time]]), np.concatenate([values, values[-1:]])
-
-
-def _set_line_widths(fig, linewidth: float) -> None:
-    for ax in fig.axes:
-        for line in ax.lines:
-            line.set_linewidth(linewidth)
 
 
 def _set_symmetric_ylim(ax, values: np.ndarray) -> None:

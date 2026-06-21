@@ -9,7 +9,7 @@ import yaml
 from wmr_simulator.controller import Controller
 from wmr_simulator.estimator import DiffDriveEstimator
 from wmr_simulator.planner import compute_reference_trajectory
-from wmr_simulator.robot import DiffDrive
+from wmr_simulator.robot import DiffDrive, DiffDriveState
 from wmr_simulator.types import PhysicalParams, PoseLog, ReferenceLog, SimulationLog, WheelLog
 
 
@@ -132,11 +132,19 @@ class SimulationPipeline:
             raise ValueError("window_length must be positive")
         return window_length
 
-    def initial_reference_pose(self) -> jnp.ndarray:
-        return jnp.asarray(self.reference_states[0, :3], dtype=jnp.float32)
+    def resolve_replay_window_length(self, window_length: int | None, num_intervals: int) -> int:
+        if window_length is None:
+            if self.window_length is None:
+                return max(int(num_intervals), 1)
+            return self.resolve_window_length(self.window_length)
+        return self.resolve_window_length(window_length)
 
-    def _init_states(self, robot_key, estimator_key):
-        pose0 = self.initial_reference_pose()
+    def initial_reference_pose(self, reference_states=None) -> jnp.ndarray:
+        reference_states = self.reference_states if reference_states is None else reference_states
+        return jnp.asarray(reference_states[0, :3], dtype=jnp.float32)
+
+    def _init_states(self, robot_key, estimator_key, reference_states=None):
+        pose0 = self.initial_reference_pose(reference_states)
         robot_state = self.robot.get_init_state(key=robot_key, init_pose=pose0)
         estimator_state = self.estimator.get_init_state(key=estimator_key, start_pose=pose0)
         controller_state = jnp.zeros(2, dtype=jnp.float32)
@@ -158,13 +166,15 @@ class SimulationPipeline:
         robot_key=None,
         estimator_key=None,
         wheel_speed_log_source: str = "estimated",
+        reference_states=None,
     ) -> SimulationLog:
         if wheel_speed_log_source not in {"estimated", "true"}:
             raise ValueError("wheel_speed_log_source must be 'estimated' or 'true'.")
         robot_key = self.target_robot_key if robot_key is None else robot_key
         estimator_key = self.target_estimator_key if estimator_key is None else estimator_key
         model_params = robot_params if est_params is None else est_params
-        carry0 = self._init_states(robot_key, estimator_key)
+        reference_states = self.reference_states if reference_states is None else reference_states
+        carry0 = self._init_states(robot_key, estimator_key, reference_states)
 
         def geometry_step(carry, ref_state):
             robot_state, estimator_state, controller_state, delayed_wheel_ref = carry
@@ -238,9 +248,17 @@ class SimulationPipeline:
                 wheel_outputs[5],
             )
 
-        _, outputs = jax.lax.scan(geometry_step, carry0, self.reference_states[:-1])
-        wheel_cmds, true_pose_samples, pose_samples, true_wheel_speeds, estimated_wheel_speeds, wheel_vel_omega, duty_cycles = outputs
-        initial_pose = self.initial_reference_pose()[None, :]
+        _, outputs = jax.lax.scan(geometry_step, carry0, reference_states[:-1])
+        (
+            wheel_cmds,
+            true_pose_samples,
+            pose_samples,
+            true_wheel_speeds,
+            estimated_wheel_speeds,
+            wheel_vel_omega,
+            duty_cycles,
+        ) = outputs
+        initial_pose = self.initial_reference_pose(reference_states)[None, :]
         pose_states = jnp.concatenate([initial_pose, pose_samples.reshape(-1, 3)], axis=0)
         true_pose_states = jnp.concatenate([initial_pose, true_pose_samples.reshape(-1, 3)], axis=0)
         duty_inputs = duty_cycles.reshape(-1, 2)
@@ -249,13 +267,13 @@ class SimulationPipeline:
         wheel_speed_log = jnp.vstack([initial_wheel_speeds, selected_wheel_speeds.reshape(-1, 2)])
         vel_omega_log = jnp.vstack([carry0[0].vel_omega, wheel_vel_omega.reshape(-1, 2)])
         duty_log = jnp.vstack([duty_inputs, duty_inputs[-1]])
-        num_reference_samples = self.reference_states.shape[0]
+        num_reference_samples = reference_states.shape[0]
         num_pose_samples = (num_reference_samples - 1) * self.inner_steps_per_geometry_step + 1
 
         return SimulationLog(
             reference=ReferenceLog(
                 time_s=jnp.asarray(self.reference_time_grid[:num_reference_samples], dtype=jnp.float32),
-                states=self.reference_states,
+                states=reference_states,
             ),
             wheel=WheelLog(
                 time_s=jnp.asarray(self.wheel_time_grid[:num_pose_samples], dtype=jnp.float32),
@@ -274,3 +292,161 @@ class SimulationPipeline:
 
     def simulate(self, *args, **kwargs):
         return self.run_closed_loop(*args, **kwargs)
+
+
+def make_replay_segment_plan(
+    pose_times: np.ndarray,
+    wheel_times: np.ndarray,
+    window_length: int,
+):
+    pose_times = np.asarray(pose_times, dtype=float)
+    wheel_times = np.asarray(wheel_times, dtype=float)
+    segment_dt = []
+    wheel_indices = []
+    reset_mask = []
+    reset_pose_indices = []
+    record_indices = []
+
+    for pose_index in range(len(pose_times) - 1):
+        current_time = pose_times[pose_index]
+        end_time = pose_times[pose_index + 1]
+        wheel_index = max(0, int(np.searchsorted(wheel_times, current_time, side="right") - 1))
+        first_segment = True
+
+        event_indices = np.flatnonzero((wheel_times > current_time) & (wheel_times <= end_time))
+        for event_index in event_indices:
+            event_time = float(wheel_times[event_index])
+            if event_time > current_time:
+                _append_replay_segment(
+                    segment_dt,
+                    wheel_indices,
+                    reset_mask,
+                    reset_pose_indices,
+                    event_time - current_time,
+                    wheel_index,
+                    pose_index if first_segment and pose_index % window_length == 0 else None,
+                )
+                first_segment = False
+            current_time = event_time
+            wheel_index = int(event_index)
+
+        if end_time > current_time:
+            _append_replay_segment(
+                segment_dt,
+                wheel_indices,
+                reset_mask,
+                reset_pose_indices,
+                end_time - current_time,
+                wheel_index,
+                pose_index if first_segment and pose_index % window_length == 0 else None,
+            )
+        record_indices.append(len(segment_dt) - 1)
+
+    return (
+        np.asarray(segment_dt, dtype=np.float32),
+        np.asarray(wheel_indices, dtype=np.int32),
+        np.asarray(reset_mask, dtype=bool),
+        np.asarray(reset_pose_indices, dtype=np.int32),
+        np.asarray(record_indices, dtype=np.int32),
+    )
+
+
+def replay_simulation_log(
+    robot: DiffDrive,
+    robot_key: jax.Array,
+    target_log: SimulationLog,
+    robot_params: PhysicalParams,
+    replay_segment_plan,
+) -> SimulationLog:
+    predicted_poses = replay_pose_states(
+        robot=robot,
+        robot_key=robot_key,
+        initial_pose=target_log.pose.states[0],
+        initial_wheel_speeds=target_log.wheel.speeds[0],
+        pose_states=target_log.pose.states,
+        wheel_speeds=target_log.wheel.speeds,
+        duty_cycles=target_log.wheel.duty_cycle,
+        robot_params=robot_params,
+        replay_segment_plan=replay_segment_plan,
+    )
+    return SimulationLog(
+        reference=target_log.reference,
+        wheel=target_log.wheel,
+        pose=PoseLog(
+            time_s=target_log.pose.time_s[1:],
+            states=predicted_poses,
+            true_states=predicted_poses,
+            command_time_s=target_log.pose.command_time_s,
+            wheel_cmd=target_log.pose.wheel_cmd,
+        ),
+    )
+
+
+def replay_pose_states(
+    robot: DiffDrive,
+    robot_key: jax.Array,
+    initial_pose: jax.Array,
+    initial_wheel_speeds: jax.Array,
+    pose_states: jax.Array,
+    wheel_speeds: jax.Array,
+    duty_cycles: jax.Array,
+    robot_params: PhysicalParams,
+    replay_segment_plan,
+) -> jax.Array:
+    segment_dt, wheel_indices, reset_mask, reset_pose_indices, record_indices = replay_segment_plan
+    segment_dt = jnp.asarray(segment_dt, dtype=jnp.float32)
+    wheel_indices = jnp.asarray(wheel_indices, dtype=jnp.int32)
+    reset_mask = jnp.asarray(reset_mask)
+    reset_pose_indices = jnp.asarray(reset_pose_indices, dtype=jnp.int32)
+    record_indices = jnp.asarray(record_indices, dtype=jnp.int32)
+
+    state = DiffDriveState(
+        pose=initial_pose,
+        wheel_speeds=initial_wheel_speeds,
+        key=robot_key,
+        vel_omega=jnp.zeros(2, dtype=jnp.float32),
+        duty_cycle=jnp.zeros(2, dtype=jnp.float32),
+        wheel_speed_cmd=jnp.zeros(2, dtype=jnp.float32),
+    )
+    segment_speeds = wheel_speeds[wheel_indices]
+    segment_duty = duty_cycles[wheel_indices]
+    reset_poses = pose_states[reset_pose_indices]
+
+    def replay_step(carry, inputs):
+        dt, speed, duty, do_reset, reset_pose = inputs
+
+        def reset_state(state):
+            return state._replace(pose=reset_pose, wheel_speeds=speed)
+
+        carry = jax.lax.cond(do_reset, reset_state, lambda state: state, carry)
+        next_state = robot.step_kinematic(
+            carry,
+            speed,
+            duty,
+            wheel_radius=robot_params.wheel_radius,
+            base_diameter=robot_params.base_diameter,
+            dt=dt,
+        )
+        return next_state, next_state.pose
+
+    _, segment_poses = jax.lax.scan(
+        replay_step,
+        state,
+        (segment_dt, segment_speeds, segment_duty, reset_mask, reset_poses),
+    )
+    return segment_poses[record_indices]
+
+
+def _append_replay_segment(
+    segment_dt,
+    wheel_indices,
+    reset_mask,
+    reset_pose_indices,
+    dt: float,
+    wheel_index: int,
+    reset_pose_index: int | None,
+):
+    segment_dt.append(float(dt))
+    wheel_indices.append(int(wheel_index))
+    reset_mask.append(reset_pose_index is not None)
+    reset_pose_indices.append(0 if reset_pose_index is None else int(reset_pose_index))

@@ -24,13 +24,13 @@ def compute_fim_matrix(
     measurement_sensitivity = jax.jacfwd(measurement_vector_fn)(params)
     parameter_scaling = jnp.diag(params)
     # parameter_scaling = jnp.eye(2)
-    weighted_measurement_sensitivity = measurement_sensitivity @ parameter_scaling
+    relative_measurement_sensitivity = measurement_sensitivity @ parameter_scaling
 
     num_measurements = measurement_vector.shape[0] // 3
     stacked_inverse_variances = jnp.tile(inverse_variances, num_measurements)
     weights = stacked_inverse_variances.reshape(-1, 1)
 
-    return weighted_measurement_sensitivity.T @ (weighted_measurement_sensitivity * weights)
+    return relative_measurement_sensitivity.T @ (relative_measurement_sensitivity * weights)
 
 
 def regularize_fim(fim: jnp.ndarray, regularization: float = 1e-6) -> jnp.ndarray:
