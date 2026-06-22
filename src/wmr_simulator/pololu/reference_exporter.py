@@ -22,16 +22,24 @@ def load_latest_reference_trajectory(
     *,
     recursive: bool = False,
 ) -> ReferenceTrajectory:
+    candidates = list_reference_trajectory_pickles(input_dir, recursive=recursive)
+    if not candidates:
+        raise ValueError(f"No pickle trajectories found in {input_dir}")
+
+    return load_reference_trajectory(candidates[-1])
+
+
+def list_reference_trajectory_pickles(
+    input_dir: str | Path,
+    *,
+    recursive: bool = False,
+) -> list[Path]:
     input_dir = Path(input_dir)
     if not input_dir.is_dir():
         raise ValueError(f"Input path must be a directory: {input_dir}")
 
     pattern = "**/*.pkl" if recursive else "*.pkl"
-    candidates = sorted(input_dir.glob(pattern), key=lambda path: (_latest_reference_activity_time(path), path.name))
-    if not candidates:
-        raise ValueError(f"No pickle trajectories found in {input_dir}")
-
-    return load_reference_trajectory(candidates[-1])
+    return sorted(input_dir.glob(pattern), key=lambda path: (_latest_reference_activity_time(path), path.name))
 
 
 def load_reference_trajectory(path: str | Path) -> ReferenceTrajectory:
@@ -91,6 +99,49 @@ def export_latest_reference(
     decimals: int = 6,
 ) -> Path:
     trajectory = load_latest_reference_trajectory(input_dir, recursive=recursive)
+    return export_reference_trajectory(
+        trajectory,
+        output_dir,
+        output_name=output_name,
+        cost=cost,
+        time_stamp=time_stamp,
+        decimals=decimals,
+    )
+
+
+def export_all_references(
+    input_dir: str | Path,
+    output_dir: str | Path,
+    *,
+    recursive: bool = False,
+    cost: float = 100.0,
+    time_stamp: float = 0.0,
+    decimals: int = 6,
+) -> list[Path]:
+    paths = list_reference_trajectory_pickles(input_dir, recursive=recursive)
+    if not paths:
+        raise ValueError(f"No pickle trajectories found in {input_dir}")
+    return [
+        export_reference_trajectory(
+            load_reference_trajectory(path),
+            output_dir,
+            cost=cost,
+            time_stamp=time_stamp,
+            decimals=decimals,
+        )
+        for path in paths
+    ]
+
+
+def export_reference_trajectory(
+    trajectory: ReferenceTrajectory,
+    output_dir: str | Path,
+    *,
+    output_name: str | None = None,
+    cost: float = 100.0,
+    time_stamp: float = 0.0,
+    decimals: int = 6,
+) -> Path:
     formatted = format_pololu_reference(
         trajectory,
         cost=cost,
@@ -148,15 +199,32 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Format the latest synthesized trajectory pickle as a Pololu reference JSN."
     )
-    parser.add_argument("--input_dir", type=str, default="trajectory_exports")
-    parser.add_argument("--output_dir", type=str, default="Pololu Data/References")
+    parser.add_argument("--input_dir", type=str, default="trajectory_exports/dt comparison")
+    parser.add_argument("--output_dir", type=str, default="Pololu Data/References/dt comparison")
     parser.add_argument("--output-name", default=None)
 
     parser.add_argument("--recursive", action="store_true", help="Search for pickle files recursively.")
+    parser.add_argument("--all", action="store_true", default=True)
     parser.add_argument("--cost", type=float, default=100.0)
     parser.add_argument("--time-stamp", type=float, default=0.0)
     parser.add_argument("--decimals", type=int, default=6)
     args = parser.parse_args(argv)
+
+    if args.all and args.output_name is not None:
+        parser.error("--output-name can only be used when exporting a single latest reference.")
+
+    if args.all:
+        output_paths = export_all_references(
+            args.input_dir,
+            args.output_dir,
+            recursive=args.recursive,
+            cost=args.cost,
+            time_stamp=args.time_stamp,
+            decimals=args.decimals,
+        )
+        for output_path in output_paths:
+            print(output_path)
+        return 0
 
     output_path = export_latest_reference(
         args.input_dir,
