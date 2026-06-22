@@ -168,7 +168,7 @@ if __name__ == "__main__":
     from wmr_simulator.visualization.pololu import plot_logged_summary
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--log", type=str, default="Pololu Data/Logs/Event based/TR02")
+    parser.add_argument("--log", type=str, default="Pololu Data/Logs/2026_06_22/optimized/50ms_turbo/TR00")
     parser.add_argument("--output", type=str, default=None)
     parser.add_argument("--out-dir", type=str, default="visualize")
     args = parser.parse_args()

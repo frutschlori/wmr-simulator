@@ -30,11 +30,11 @@ def main():
     # Optimization Settings
     parser.add_argument("--save-trajectory", action="store_true", default=True)
     parser.add_argument("--window-length", type=int, default=50)
-    parser.add_argument("--opt-steps", type=int, default=5000)
+    parser.add_argument("--opt-steps", type=int, default=10000)
     parser.add_argument("--learning-rate", type=float, default=2e-3)
     # Path settings
-    parser.add_argument("--time-scaling", choices=["s-curve", "linear"], default="s-curve")
-    parser.add_argument("--bezier-order", type=int, default=7)
+    parser.add_argument("--time-scaling", choices=["s-curve", "linear"], default="linear")
+    parser.add_argument("--bezier-order", type=int, default=20)
     # Constraints
     parser.add_argument("--constraint-weight", type=float, default=1.0)
     parser.add_argument("--constraint-v-weight", type=float, default=1.0)

@@ -4,8 +4,8 @@
 joystick_control_dt_ms=20.0
 traj_following_dt_s=0.05
 
-wheel_radius=0.016
-wheel_base=0.0842
+wheel_radius=0.01637
+wheel_base=0.08525
 
 motor_direction_left=1.0
 motor_direction_right=1.0
@@ -15,13 +15,13 @@ motor_max_duty_right=0.8
 
 k_clip=1.0
 
-kp_inner=0.01
-ki_inner=0.02
+kp_inner=0.0288
+ki_inner=0.048
 kd_inner=0.0
 
-kx_traj=4.5
-ky_traj=6.0
-ktheta_traj=12.0
+kx_traj=9.68
+ky_traj=7.85
+ktheta_traj=6.12
 
 gear_ratio=15.25
 encoder_cpr=-183.0
