@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
+
+os.environ["JAX_PLATFORMS"] = "cpu"
 
 import jax.numpy as jnp
 import numpy as np
@@ -42,7 +45,7 @@ POLOLU_TRAJ_CONTROL_COLUMNS = (
 )
 
 
-def load_pololu_traj_control_log(path: str | Path) -> SimulationLog:
+def load_pololu_traj_control_log(path: str | Path, *, clip_after_first_trajectory: bool = False) -> SimulationLog:
     columns, data = _read_csv(Path(path))
     if tuple(columns) != POLOLU_TRAJ_CONTROL_COLUMNS:
         raise ValueError(f"Unexpected columns in {path}: {tuple(columns)}")
@@ -54,6 +57,9 @@ def load_pololu_traj_control_log(path: str | Path) -> SimulationLog:
     time_s = time_s - time_s[0]
     data = data.copy()
     data[:, ts_index] = time_s
+
+    if clip_after_first_trajectory:
+        data = _clip_after_first_reference_stop(columns, data)
 
     reference_rows = _rows_with(columns, data, ("x_des", "y_des", "yaw_des", "v_ff", "w_ff"))
     pose_rows = _rows_with(columns, data, ("x_raw", "y_raw", "yaw_raw"))
@@ -164,22 +170,85 @@ def _col(columns: list[str], data: np.ndarray, name: str) -> np.ndarray:
     return data[:, columns.index(name)]
 
 
-if __name__ == "__main__":
-    from wmr_simulator.visualization.pololu import plot_logged_summary
+def _clip_after_first_reference_stop(
+    columns: list[str],
+    data: np.ndarray,
+    *,
+    min_zero_rows: int = 3,
+    zero_tolerance: float = 1e-6,
+) -> np.ndarray:
+    reference_rows = _rows_with(columns, data, ("x_des", "y_des", "yaw_des", "v_ff", "w_ff"))
+    if len(reference_rows) < min_zero_rows:
+        return data
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--log", type=str, default="Pololu Data/Logs/2026_06_22/optimized/50ms_turbo/TR00")
-    parser.add_argument("--output", type=str, default=None)
-    parser.add_argument("--out-dir", type=str, default="visualize")
-    args = parser.parse_args()
+    ts_index = columns.index("ts")
+    v_ff = _col(columns, reference_rows, "v_ff")
+    w_ff = _col(columns, reference_rows, "w_ff")
+    zero_reference = (np.abs(v_ff) <= zero_tolerance) & (np.abs(w_ff) <= zero_tolerance)
+    motion_seen = False
+    for index in range(len(reference_rows) - min_zero_rows + 1):
+        if not zero_reference[index]:
+            motion_seen = True
+            continue
+        if motion_seen and np.all(zero_reference[index : index + min_zero_rows]):
+            return data[data[:, ts_index] < reference_rows[index, ts_index]]
+    return data
 
-    log_path = Path(args.log)
-    log = load_pololu_traj_control_log(log_path)
-    out_prefix = args.output if args.output is not None else f"pololu_{log_path.stem}"
 
+def list_pololu_log_paths(log_dir: str | Path) -> list[Path]:
+    log_dir = Path(log_dir)
+    if not log_dir.is_dir():
+        raise ValueError(f"Log path must be a directory: {log_dir}")
+    paths = sorted(path for path in log_dir.iterdir() if path.is_file() and _looks_like_pololu_log(path))
+    if not paths:
+        raise ValueError(f"No log files found in: {log_dir}")
+    return paths
+
+
+def _looks_like_pololu_log(path: Path) -> bool:
+    try:
+        first_line = path.read_text(encoding="utf-8").splitlines()[0]
+    except (OSError, UnicodeDecodeError, IndexError):
+        return False
+    columns = tuple(name.strip() for name in first_line.split(","))
+    return columns == POLOLU_TRAJ_CONTROL_COLUMNS
+
+
+def print_log_summary(log_path: Path, log: SimulationLog):
     print(f"Loaded {log_path}")
     print(f"Reference samples: {len(log.reference.time_s)}")
     print(f"Pose samples: {len(log.pose.time_s)}")
     print(f"Wheel samples: {len(log.wheel.time_s)}")
     print(f"Command samples: {len(log.pose.command_time_s)}")
+
+
+if __name__ == "__main__":
+    from wmr_simulator.visualization.pololu import plot_logged_summary
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--log", type=str, default="Pololu Data/Experiments/2026_06_22/Logs/optimized/50ms_turbo_2/")
+    parser.add_argument("--output", type=str, default=None, help="Output filename prefix")
+    parser.add_argument("--out-dir", type=str, default="Pololu Data/Experiments/2026_06_22/Plots/optimized/")
+    parser.add_argument("--clip-after-first-trajectory", default=True, action="store_true")
+    args = parser.parse_args()
+
+    log_path = Path(args.log)
+    if log_path.is_dir():
+        output_dir = Path(args.out_dir) / log_path.name
+        for path in list_pololu_log_paths(log_path):
+            log = load_pololu_traj_control_log(
+                path,
+                clip_after_first_trajectory=args.clip_after_first_trajectory,
+            )
+            print_log_summary(path, log)
+            out_prefix = f"{args.output}_{path.stem}" if args.output is not None else f"pololu_{path.stem}"
+            plot_logged_summary(log, out_prefix=out_prefix, out_dir=output_dir)
+        raise SystemExit(0)
+
+    log = load_pololu_traj_control_log(
+        log_path,
+        clip_after_first_trajectory=args.clip_after_first_trajectory,
+    )
+    print_log_summary(log_path, log)
+    out_prefix = args.output if args.output is not None else f"pololu_{log_path.stem}"
     plot_logged_summary(log, out_prefix=out_prefix, out_dir=args.out_dir)
