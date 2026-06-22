@@ -31,7 +31,7 @@ def main():
     # Problem configuration (contains robot configuration and optimization defaults)
     parser.add_argument("--problem", type=str, default="problems/pololu.yaml")
     # Optimization hyper-parameters
-    parser.add_argument("--window-length", type=int, default=100)
+    parser.add_argument("--window-length", type=int, default=40)
     parser.add_argument("--steps", type=int, default=2000)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     # Initial guess robot parameters
@@ -41,7 +41,7 @@ def main():
     parser.add_argument("--init-time-constant", type=float, default=0.3)
 
     # Path to real experiment log
-    parser.add_argument("--pololu-log", type=str, default="Pololu Data/Logs/Event based/TR02")
+    parser.add_argument("--pololu-log", type=str, default="Pololu Data/Logs/06_22/super_fast/TR00")
     args = parser.parse_args()
 
     init_params = PhysicalParams(

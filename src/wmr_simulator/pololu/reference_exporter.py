@@ -199,8 +199,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Format the latest synthesized trajectory pickle as a Pololu reference JSN."
     )
-    parser.add_argument("--input_dir", type=str, default="trajectory_exports/dt comparison")
-    parser.add_argument("--output_dir", type=str, default="Pololu Data/References/dt comparison")
+    parser.add_argument("--input_dir", type=str, default="trajectory_exports/baselines/")
+    parser.add_argument("--output_dir", type=str, default="Pololu Data/References/baselines")
     parser.add_argument("--output-name", default=None)
 
     parser.add_argument("--recursive", action="store_true", help="Search for pickle files recursively.")

@@ -10,7 +10,7 @@ from wmr_simulator.visualization.identification import (plot_loss_history, plot_
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--problem", type=str, default="problems/pololu_gains.yaml")
-    parser.add_argument("--reference-trajectories-dir", type=str, default="trajectory_exports")
+    parser.add_argument("--reference-trajectories-dir", type=str, default="trajectory_exports/turbo/")
     parser.add_argument("--steps", type=int, default=2000)
     parser.add_argument("--learning-rate", type=float, default=1e-2)
     parser.add_argument("--num-realizations", type=int, default=8)
