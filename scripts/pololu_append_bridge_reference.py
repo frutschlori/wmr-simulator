@@ -97,6 +97,46 @@ def append_bridge_reference(
     return output_path
 
 
+def append_bridge_references_in_directory(
+    input_dir: str | Path,
+    output_dir: str | Path,
+    *,
+    wait_time: float,
+    bridge_time: float,
+    result_index: int = 0,
+    cost: float = 100.0,
+    time_stamp: float = 0.0,
+    decimals: int = 6,
+) -> list[tuple[Path, Path]]:
+    input_dir = Path(input_dir)
+    if not input_dir.is_dir():
+        raise ValueError(f"Input path must be a directory: {input_dir}")
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    input_paths = sorted(input_dir.glob("*.JSN"))
+    if not input_paths:
+        raise ValueError(f"No JSN files found in: {input_dir}")
+
+    outputs = []
+    for input_path in input_paths:
+        output_path = output_dir / f"{input_path.stem}_bridge.JSN"
+        plot_path = output_path.with_suffix(".pdf")
+        append_bridge_reference(
+            input_path,
+            output_path,
+            wait_time=wait_time,
+            bridge_time=bridge_time,
+            result_index=result_index,
+            cost=cost,
+            time_stamp=time_stamp,
+            decimals=decimals,
+            plot_path=plot_path,
+        )
+        outputs.append((output_path, plot_path))
+    return outputs
+
+
 def plot_bridged_reference(
     reference_states: np.ndarray,
     wait_states: np.ndarray,
@@ -141,11 +181,11 @@ def plot_bridged_reference(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Append a wait and bridge-back path to a Pololu reference JSN.")
-    parser.add_argument("--input", type=str, default="Pololu Data/References/20cp.JSN")
-    parser.add_argument("--output", type=str, default=None)
+    parser.add_argument("--input", type=str, default="Pololu Data/References/dt comparison/")
+    parser.add_argument("--output", type=str, default="Pololu Data/References/dt comparison/bridged/")
     parser.add_argument("--plot-output", type=str, default=None)
     parser.add_argument("--wait-time", type=float, default=2.0)
-    parser.add_argument("--bridge-time", type=float, default=5.0)
+    parser.add_argument("--bridge-time", type=float, default=10.0)
     parser.add_argument("--result-index", type=int, default=0)
     parser.add_argument("--cost", type=float, default=100.0)
     parser.add_argument("--time-stamp", type=float, default=0.0)
@@ -153,6 +193,27 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     input_path = Path(args.input)
+    if input_path.is_dir():
+        if args.plot_output is not None:
+            parser.error("--plot-output can only be used when --input points to a single file.")
+        output_dir = Path(args.output) if args.output is not None else input_path
+        saved_paths = append_bridge_references_in_directory(
+            input_path,
+            output_dir,
+            wait_time=args.wait_time,
+            bridge_time=args.bridge_time,
+            result_index=args.result_index,
+            cost=args.cost,
+            time_stamp=args.time_stamp,
+            decimals=args.decimals,
+        )
+        for output_path, plot_path in saved_paths:
+            print(output_path)
+            print(plot_path)
+        return 0
+
+    if not input_path.is_file():
+        parser.error(f"--input must point to a JSN file or directory: {input_path}")
     output_path = Path(args.output) if args.output is not None else input_path.with_name(f"{input_path.stem}_bridge.JSN")
     plot_path = Path(args.plot_output) if args.plot_output is not None else output_path.with_suffix(".pdf")
     saved_path = append_bridge_reference(
