@@ -25,8 +25,6 @@ def plot_logged_summary(
     wheel_cmd = np.asarray(log.pose.wheel_cmd, dtype=float)
     wheel_time = np.asarray(log.wheel.time_s, dtype=float)
     wheel_speeds = np.asarray(log.wheel.speeds, dtype=float)
-    odom_vel = np.asarray(log.wheel.vel_omega, dtype=float)
-    duty_cycle = np.asarray(log.wheel.duty_cycle, dtype=float)
     mocap_vel_time, mocap_vel = _mocap_vel_omega(pose_time, measured_pose)
 
     fig, axes = plt.subplots(2, 3, figsize=(18, 10))
@@ -34,7 +32,7 @@ def plot_logged_summary(
 
     ax_traj = axes[0, 0]
     ax_traj.plot(reference[:, 0], reference[:, 1], color="tab:red", linestyle="--", linewidth=1.0, label="Reference")
-    ax_traj.plot(measured_pose[:, 0], measured_pose[:, 1], color="tab:blue", linewidth=1.2, label="Measured")
+    ax_traj.plot(measured_pose[:, 0], measured_pose[:, 1], color="tab:blue", linewidth=0.8, label="Measured")
     ax_traj.set_xlabel("x [m]")
     ax_traj.set_ylabel("y [m]")
     ax_traj.set_title("Trajectory")
@@ -53,14 +51,6 @@ def plot_logged_summary(
         linewidth=0.65,
         label="mocap v",
     )[0]
-    line_odom_v = ax_vel.plot(
-        wheel_time,
-        odom_vel[:, 0],
-        color="navy",
-        linestyle="--",
-        linewidth=0.45,
-        label="odom v",
-    )[0]
     line_ref_w = ax_vel_omega.step(ref_time, reference[:, 5], where="post", color="khaki", linestyle="--", linewidth=0.9, label=r"ref $\omega$")[0]
     line_mocap_w = ax_vel_omega.plot(
         mocap_vel_time,
@@ -69,21 +59,13 @@ def plot_logged_summary(
         linewidth=0.65,
         label=r"mocap $\omega$",
     )[0]
-    line_odom_w = ax_vel_omega.plot(
-        wheel_time,
-        odom_vel[:, 1],
-        color="darkgoldenrod",
-        linestyle="--",
-        linewidth=0.45,
-        label=r"odom $\omega$",
-    )[0]
     ax_vel.set_xlabel("time [s]")
     ax_vel.set_ylabel("linear velocity [m/s]")
     ax_vel_omega.set_ylabel("angular velocity [rad/s]")
     ax_vel.set_title("Velocity")
     ax_vel.grid(True)
     ax_vel.legend(
-        handles=[line_ref_v, line_mocap_v, line_odom_v, line_ref_w, line_mocap_w, line_odom_w],
+        handles=[line_ref_v, line_mocap_v, line_ref_w, line_mocap_w],
         loc="best",
     )
 
@@ -91,9 +73,9 @@ def plot_logged_summary(
     cmd_time, cmd_right = _stair_series(command_time, wheel_cmd[:, 0], wheel_time[-1] if len(wheel_time) else None)
     _, cmd_left = _stair_series(command_time, wheel_cmd[:, 1], wheel_time[-1] if len(wheel_time) else None)
     line_cmd_right = ax_wheels.step(cmd_time, cmd_right, where="post", color="tab:green", linestyle="--", linewidth=0.75, label="cmd right")[0]
-    line_meas_right = ax_wheels.plot(wheel_time, wheel_speeds[:, 0], color="tab:green", linewidth=1.2, label="meas right")[0]
+    line_meas_right = ax_wheels.plot(wheel_time, wheel_speeds[:, 0], color="tab:green", linewidth=0.8, label="meas right")[0]
     line_cmd_left = ax_wheels.step(cmd_time, cmd_left, where="post", color="tab:orange", linestyle="--", linewidth=0.75, label="cmd left")[0]
-    line_meas_left = ax_wheels.plot(wheel_time, wheel_speeds[:, 1], color="tab:orange", linewidth=1.2, label="meas left")[0]
+    line_meas_left = ax_wheels.plot(wheel_time, wheel_speeds[:, 1], color="tab:orange", linewidth=0.8, label="meas left")[0]
     ax_wheels.set_xlabel("time [s]")
     ax_wheels.set_ylabel("wheel speed [rad/s]")
     ax_wheels.set_title("Wheel Speeds")
@@ -104,7 +86,7 @@ def plot_logged_summary(
     titles = ("x State", "y State", "theta State")
     for index, ax in enumerate(axes[1, :]):
         ax.step(ref_time, reference[:, index], where="post", color="tab:red", linestyle="--", linewidth=0.9, label="Reference")
-        ax.plot(pose_time, measured_pose[:, index], color="tab:blue", linewidth=1.2, label="Measured")
+        ax.plot(pose_time, measured_pose[:, index], color="tab:blue", linewidth=0.95, label="Measured")
         ax.set_xlabel("time [s]")
         ax.set_ylabel(labels[index])
         ax.set_title(titles[index])

@@ -41,7 +41,8 @@ def main():
     parser.add_argument("--init-time-constant", type=float, default=0.3)
 
     # Path to real experiment log
-    parser.add_argument("--pololu-log", type=str, default="Pololu Data/Logs/06_22/super_fast/TR00")
+    parser.add_argument("--pololu-log", type=str, default="Pololu Data/Logs/2026_06_22/optimized/50ms_turbo/TR00")
+    parser.add_argument("--clip-after-first-trajectory", action="store_true", default=True)
     args = parser.parse_args()
 
     init_params = PhysicalParams(
@@ -51,7 +52,10 @@ def main():
         time_constant=jnp.asarray(args.init_time_constant),
     )
 
-    pololu_log = load_pololu_traj_control_log(args.pololu_log)
+    pololu_log = load_pololu_traj_control_log(
+        args.pololu_log,
+        clip_after_first_trajectory=args.clip_after_first_trajectory,
+    )
 
     result = run_single_experiment_identification(
         problem_path=args.problem,
