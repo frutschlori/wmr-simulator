@@ -26,14 +26,14 @@ def main():
     parser = argparse.ArgumentParser(description="Initialize trajectory optimization inputs.")
     # Setup description
     parser.add_argument("--problem", default="problems/pololu.yaml")
-    parser.add_argument("--title", type=str, default="50ms_turbo")
+    parser.add_argument("--title", type=str, default="medium_speed_new_scurve")
     # Optimization Settings
     parser.add_argument("--save-trajectory", action="store_true", default=True)
     parser.add_argument("--window-length", type=int, default=50)
     parser.add_argument("--opt-steps", type=int, default=10000)
     parser.add_argument("--learning-rate", type=float, default=2e-3)
     # Path settings
-    parser.add_argument("--time-scaling", choices=["s-curve", "linear"], default="linear")
+    parser.add_argument("--time-scaling", choices=["s-curve", "linear"], default="s-curve")
     parser.add_argument("--bezier-order", type=int, default=20)
     # Constraints
     parser.add_argument("--constraint-weight", type=float, default=1.0)
@@ -42,6 +42,7 @@ def main():
     parser.add_argument("--constraint-lateral-weight", type=float, default=1.0)
     parser.add_argument("--constraint-omega-weight", type=float, default=1.0)
     parser.add_argument("--constraint-alpha-weight", type=float, default=1.0)
+    parser.add_argument("--tangent-floor-weight", type=float, default=1.0)
     parser.add_argument("--constraint-smooth-max-beta", type=float, default=20.0) # barrier constant
     # Visualization settings
     parser.add_argument("--save-opt-GIF", action="store_true", default=False)
@@ -97,6 +98,7 @@ def main():
             constraint_weight=args.constraint_weight,
             constraint_component_weights=constraint_component_weights,
             constraint_smooth_max_beta=args.constraint_smooth_max_beta,
+            tangent_floor_weight=args.tangent_floor_weight,
         )
         objective_terms = pipeline.objective_terms_from_control_points(
             optimized_control_points,
@@ -104,6 +106,7 @@ def main():
             constraint_weight=args.constraint_weight,
             constraint_component_weights=constraint_component_weights,
             constraint_smooth_max_beta=args.constraint_smooth_max_beta,
+            tangent_floor_weight=args.tangent_floor_weight,
         )
         constraint_components = pipeline.constraint_components_from_control_points(
             optimized_control_points,
@@ -116,6 +119,7 @@ def main():
         print("Final objective terms:")
         print(f"  FIM:         {float(objective_terms['fim']):.8e}")
         print(f"  Constraints: {float(objective_terms['constraints']):.8e}")
+        print(f"  Tangent:     {float(objective_terms['tangent_floor']):.8e}")
         print("  Constraint components:")
         for name in ("v", "a", "lateral", "omega", "alpha"):
             print(f"    {name:<7}: {float(constraint_components[name]):.8e}")

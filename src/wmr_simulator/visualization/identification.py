@@ -883,6 +883,8 @@ def plot_tracking_error_surface(
     min_label="Minimum sampled loss",
     save_pdf: bool = True,
     show_plot: bool = False,
+    elev: float = 10.0,
+    azim: float = -157.0,
 ):
     os.makedirs("visualize", exist_ok=True)
     output_filename = out_path if out_path is not None else os.path.join("visualize", f"{out_prefix}.pdf")
@@ -957,10 +959,10 @@ def plot_tracking_error_surface(
     ax.set_xlabel(x_label)
     ax.set_ylabel(y_label)
     ax.set_zlabel(surface_label)
-    if z_min is not None and z_max is not None:
-        ax.set_zlim(z_min, z_max)
+    if z_min is not None or z_max is not None:
+        ax.set_zlim(bottom=z_min, top=z_max)
     ax.set_title(title)
-    ax.view_init(elev=10, azim=-157)
+    ax.view_init(elev=elev, azim=azim)
     ax.legend(loc="upper right")
     fig.colorbar(
         surf,

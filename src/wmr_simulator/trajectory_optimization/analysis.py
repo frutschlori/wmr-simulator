@@ -144,6 +144,7 @@ def run_trajectory_optimization_trace(
     constraint_weight: float = 1.0,
     constraint_component_weights: dict | None = None,
     constraint_smooth_max_beta: float = 20.0,
+    tangent_floor_weight: float = 1.0,
     out_prefix: str = "traj_opt",
     frame_duration: float = 0.2,
     export_reference_states: bool = False,
@@ -178,6 +179,7 @@ def run_trajectory_optimization_trace(
         constraint_weight=constraint_weight,
         constraint_component_weights=constraint_component_weights,
         constraint_smooth_max_beta=constraint_smooth_max_beta,
+        tangent_floor_weight=tangent_floor_weight,
     )
     objective_terms = pipeline.objective_terms_from_control_points(
         optimized_control_points,
@@ -185,6 +187,7 @@ def run_trajectory_optimization_trace(
         constraint_weight=constraint_weight,
         constraint_component_weights=constraint_component_weights,
         constraint_smooth_max_beta=constraint_smooth_max_beta,
+        tangent_floor_weight=tangent_floor_weight,
     )
     pipeline.plot_trajectory(
         window_length=window_length,

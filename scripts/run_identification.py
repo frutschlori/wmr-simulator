@@ -35,7 +35,7 @@ def main():
     # Problem configuration (contains hidden robot parameters, noise, optionally reference traj)
     parser.add_argument("--problem", type=str, default="problems/pololu.yaml")
     # Optimization hyper-parameters
-    parser.add_argument("--bootstrap-samples", type=int, default=None)
+    parser.add_argument("--bootstrap-samples", type=int, default=1000)
     parser.add_argument("--window-length", type=int, default=50)
     parser.add_argument("--steps", type=int, default=1000)
     parser.add_argument("--learning-rate", type=float, default=1e-3)

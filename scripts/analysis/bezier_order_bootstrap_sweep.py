@@ -112,6 +112,7 @@ def run_order(args, order: int, init_params: PhysicalParams, out_dir: str) -> di
         constraint_weight=args.constraint_weight,
         constraint_component_weights=constraint_component_weights,
         constraint_smooth_max_beta=args.constraint_smooth_max_beta,
+        tangent_floor_weight=args.tangent_floor_weight,
     )
     trajectory_pipeline.set_bezier_control_points(optimized_control_points)
     reference_path = save_reference_states(trajectory_pipeline, order, out_dir)
@@ -160,6 +161,7 @@ def main():
     parser.add_argument("--constraint-lateral-weight", type=float, default=1.0)
     parser.add_argument("--constraint-omega-weight", type=float, default=1.0)
     parser.add_argument("--constraint-alpha-weight", type=float, default=1.0)
+    parser.add_argument("--tangent-floor-weight", type=float, default=1.0)
     parser.add_argument("--constraint-smooth-max-beta", type=float, default=20.0)
     args = parser.parse_args()
 
