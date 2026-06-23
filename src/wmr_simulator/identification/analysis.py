@@ -142,6 +142,9 @@ def run_physical_parameter_surface(
     out_prefix: str = "si_tracking_error_surface",
     save_plots: bool = True,
     show_plots: bool = False,
+    surface_elev: float = 10.0,
+    surface_azim: float = -157.0,
+    surface_z_max: float | None = None,
 ):
     if target_log is not None and (reference_trajectory_path is not None or reference_trajectories_dir is not None):
         raise ValueError("Use either target_log or reference trajectory inputs, not both.")
@@ -189,6 +192,9 @@ def run_physical_parameter_surface(
             out_prefix=out_prefix,
             save_pdf=save_plots,
             show_plot=show_plots,
+            elev=surface_elev,
+            azim=surface_azim,
+            z_max=surface_z_max,
         )
 
     return {

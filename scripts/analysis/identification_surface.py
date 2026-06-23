@@ -26,7 +26,8 @@ def main():
     parser.add_argument("--init-wheel-radius", type=float, default=0.02)
     parser.add_argument("--init-base-diameter", type=float, default=0.1)
     # Log or reference loading
-    parser.add_argument("--pololu-log", type=str, default="Pololu Data/Logs/Event based/TR02")
+    parser.add_argument("--pololu-log", type=str,
+                        default="Pololu Data/Experiments/2026_06_22/Logs/optimized/50ms_turbo/TR01")
     # parser.add_argument("--pololu-log", type=str, default=None)
     # parser.add_argument("--reference-trajectory", type=str, default="trajectory_exports/20cp_constrained_vertikal.pkl")
     parser.add_argument("--reference-trajectory", type=str, default=None)
@@ -35,7 +36,7 @@ def main():
     parser.add_argument("--seed", type=int, default=2)
     # Grid settings
     parser.add_argument("--radius-min", type=float, default=0.01)
-    parser.add_argument("--radius-max", type=float, default=0.025)
+    parser.add_argument("--radius-max", type=float, default=0.020)
     parser.add_argument("--base-min", type=float, default=0.04)
     parser.add_argument("--base-max", type=float, default=0.14)
     parser.add_argument("--radius-points", type=int, default=100)
@@ -44,6 +45,9 @@ def main():
     parser.add_argument("--output", type=str, default="real_id_loss_surface")
     parser.add_argument("--save-pdf", action="store_true", default=True)
     parser.add_argument("--show-plot", action="store_true", default=True)
+    parser.add_argument("--elev", "--elevation", dest="elev", type=float, default=22.0)
+    parser.add_argument("--azim", "--azimut", dest="azim", type=float, default=-150.0)
+    parser.add_argument("--z-max", type=float, default=10000)
     args = parser.parse_args()
 
     max_wheel_speed, time_constant = load_motor_params(args.problem)
@@ -73,6 +77,9 @@ def main():
         out_prefix=args.output,
         save_plots=args.save_pdf,
         show_plots=args.show_plot,
+        surface_elev=args.elev,
+        surface_azim=args.azim,
+        surface_z_max=args.z_max,
     )
     surface = result["tracking_error_surface"]
     print(f"Minimum sampled loss: {float(np.min(surface)):.8f}")

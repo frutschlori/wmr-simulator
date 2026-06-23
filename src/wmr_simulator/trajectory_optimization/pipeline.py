@@ -17,6 +17,7 @@ from wmr_simulator.trajectory_optimization.bezier import (
     control_points_from_decision_variables,
     decision_variables_from_control_points,
     initial_bezier_control_points,
+    tangent_floor_loss,
 )
 from wmr_simulator.trajectory_optimization.constraints import (
     constraint_loss_components_from_reference_states,
@@ -294,6 +295,7 @@ class TrajectoryOptimizationPipeline:
         constraint_weight: float = 1.0,
         constraint_component_weights: dict | None = None,
         constraint_smooth_max_beta: float = 20.0,
+        tangent_floor_weight: float = 1.0,
     ) -> jnp.ndarray:
         control_points = self.clamp_control_points(control_points)
         reference_states = self.reference_states_from_control_points(control_points)
@@ -313,7 +315,7 @@ class TrajectoryOptimizationPipeline:
                 component_weights=constraint_component_weights,
             ),
             smooth_max_beta=constraint_smooth_max_beta,
-        )
+        ) + tangent_floor_weight * tangent_floor_loss(self.problem, control_points)
 
     def objective_terms_from_control_points(
         self,
@@ -323,6 +325,7 @@ class TrajectoryOptimizationPipeline:
         constraint_weight: float = 1.0,
         constraint_component_weights: dict | None = None,
         constraint_smooth_max_beta: float = 20.0,
+        tangent_floor_weight: float = 1.0,
     ) -> dict[str, jnp.ndarray]:
         control_points = self.clamp_control_points(control_points)
         reference_states = self.reference_states_from_control_points(control_points)
@@ -343,10 +346,12 @@ class TrajectoryOptimizationPipeline:
             ),
             smooth_max_beta=constraint_smooth_max_beta,
         )
-        total = fim_term + constraint_term
+        tangent_term = tangent_floor_weight * tangent_floor_loss(self.problem, control_points)
+        total = fim_term + constraint_term + tangent_term
         return {
             "fim": fim_term,
             "constraints": constraint_term,
+            "tangent_floor": tangent_term,
             "total": total,
             "constraint_share": constraint_term / jnp.maximum(total, 1e-12),
         }
@@ -383,6 +388,7 @@ class TrajectoryOptimizationPipeline:
         constraint_weight: float = 1.0,
         constraint_component_weights: dict | None = None,
         constraint_smooth_max_beta: float = 20.0,
+        tangent_floor_weight: float = 1.0,
     ):
         return optimize_bezier_control_points(
             pipeline=self,
@@ -396,6 +402,7 @@ class TrajectoryOptimizationPipeline:
             constraint_weight=constraint_weight,
             constraint_component_weights=constraint_component_weights,
             constraint_smooth_max_beta=constraint_smooth_max_beta,
+            tangent_floor_weight=tangent_floor_weight,
         )
 
     def plot_trajectory(self, window_length=None, out_prefix="trajectory_plot", out_path=None):

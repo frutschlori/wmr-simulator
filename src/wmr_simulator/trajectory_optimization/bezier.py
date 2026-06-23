@@ -127,10 +127,11 @@ def compute_bezier_reference(
     acceleration = dpos_ds * s_ddot[:, None] + d2pos_ds2 * (s_dot[:, None] ** 2)
     theta = jnp.arctan2(dpos_ds[:, 1], dpos_ds[:, 0])
 
-    speed_sq = jnp.sum(velocity ** 2, axis=1)
-    omega = (
-        velocity[:, 0] * acceleration[:, 1] - velocity[:, 1] * acceleration[:, 0]
-    ) / (speed_sq + 1e-8)
+    tangent_norm_sq = jnp.sum(dpos_ds**2, axis=1)
+    dtheta_ds = (
+        dpos_ds[:, 0] * d2pos_ds2[:, 1] - dpos_ds[:, 1] * d2pos_ds2[:, 0]
+    ) / (tangent_norm_sq + 1e-8)
+    omega = dtheta_ds * s_dot
 
     return jnp.column_stack(
         [
@@ -144,3 +145,17 @@ def compute_bezier_reference(
             acceleration[:, 1],
         ]
     )
+
+
+def tangent_floor_loss(
+    problem,
+    control_points: jnp.ndarray,
+    min_tangent_norm: float = 1e-2,
+) -> jnp.ndarray:
+    curve = BezierCurve(control_points)
+    time_grid = jnp.asarray(problem.sim_time_grid(), dtype=jnp.float32)
+    total_time = jnp.asarray(problem.sim_time, dtype=jnp.float32)
+    s = jnp.clip(time_grid / total_time, 0.0, 1.0)
+    tangent_norm = jnp.sqrt(jnp.sum(curve.evald(s) ** 2, axis=1) + 1e-8)
+    violation = jnp.maximum(jnp.asarray(min_tangent_norm, dtype=jnp.float32) - tangent_norm, 0.0)
+    return jnp.mean((violation / min_tangent_norm) ** 2)

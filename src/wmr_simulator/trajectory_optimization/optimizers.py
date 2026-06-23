@@ -30,6 +30,7 @@ def optimize_bezier_control_points(
     constraint_weight: float = 1.0,
     constraint_component_weights: dict | None = None,
     constraint_smooth_max_beta: float = 20.0,
+    tangent_floor_weight: float = 1.0,
 ):
     from wmr_simulator.trajectory_optimization.pipeline import OptimizationSnapshot
 
@@ -47,6 +48,7 @@ def optimize_bezier_control_points(
             constraint_weight=constraint_weight,
             constraint_component_weights=constraint_component_weights,
             constraint_smooth_max_beta=constraint_smooth_max_beta,
+            tangent_floor_weight=tangent_floor_weight,
         )
 
     initial_loss = unnormalized_loss_fn(initial_decision_variables)
