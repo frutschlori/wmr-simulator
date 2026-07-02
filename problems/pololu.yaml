@@ -13,17 +13,18 @@ planner:
     - [1.0,0.5, 1.57]
   time: 5.0 # seconds
 controller:
-  #gains: [4.5, 6.0, 12.0, 2.5, 2.5, 5.0, 5.0] # [kx, ky, kth, kprmotor, kplmotor, kirmotor, kilmotor]
-  gains: [5.0, 5.0, 3.5, 5.0, 5.0, 0.0, 0.0] # [kx, ky, kth, kprmotor, kplmotor, kirmotor, kilmotor]
-  # gains: [5.0, 5.0, 3.0, 0.4, 0.4, 0.2, 0.2]
+  # Motor gains are dimensionless here, but in duty / (rad/s) in pololu firmware -> divide gains by motor gain for conversion
+  # gains: [4.5, 6.0, 12.0, 2.5, 5.0, 0.0] # [kx, ky, kth, kpmotor, kimotor, kdmotor]
+  gains: [5.0, 5.0, 3.5, 2.0, 5.0, 1.0] # [kx, ky, kth, kpmotor, kimotor, kdmotor]
+  # gains: [5.0, 5.0, 3.0, 0.4, 0.0, 0.0] # [kx, ky, kth, kpmotor, kimotor, kdmotor]
 robot:
   type: differential_drive
   wheel_radius: 0.01637   # m
   base_diameter: 0.08525 # m
   max_wheel_speed: 248.17  # rad/s
   time_constant:  0.2237  # time constant for first-order wheel dynamics (set to 0 for ideal actuation)
-  slip_r: 0.05          # std of fractional slip on ur (40%) [0 -> 1.0]
-  slip_l: 0.05          # std of fractional slip on ul (50%) [0 -> 1.0]
+  slip_r: 0.01          # std of fractional slip on ur (40%) [0 -> 1.0]
+  slip_l: 0.01          # std of fractional slip on ul (50%) [0 -> 1.0]
   v_max: 2.0          # m/s
   a_max: 5.0         # m/s^2
   a_max_lateral: 10.0 # m/s^2
@@ -36,7 +37,7 @@ estimator:
   base_diameter: 0.0842   # estimator's base_diameter [m]
   noise_pos: 0.002        # position measurement noise [m] (from mocap almost no noise)
   noise_angle: 0.035      # orientation noise [rad] ~  2 degrees
-  enc_angle_noise: 0.035  # 2 degrees encoder noise
+  enc_angle_noise: 0.01  # 2 degrees encoder noise
   
   proc_pos_std: 0.02      # [m]   process noise on x,y per step
   proc_theta_std: 0.05    # [rad] process noise on θ per step

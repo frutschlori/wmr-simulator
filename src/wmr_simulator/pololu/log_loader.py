@@ -61,89 +61,61 @@ def load_pololu_traj_control_log(path: str | Path, *, clip_after_first_trajector
     if clip_after_first_trajectory:
         data = _clip_after_first_reference_stop(columns, data)
 
-    reference_rows = _rows_with(columns, data, ("x_des", "y_des", "yaw_des", "v_ff", "w_ff"))
-    pose_rows = _rows_with(columns, data, ("x_raw", "y_raw", "yaw_raw"))
-    wheel_rows = _rows_with(
+    reference_time, reference_values = _sparse_stream(
         columns,
         data,
-        ("v_actual", "w_actual", "omega_r_meas", "omega_l_meas", "duty_r", "duty_l"),
+        ("x_des", "y_des", "yaw_des", "v_ff", "w_ff"),
     )
-    command_rows = _rows_with(columns, data, ("omega_r_cmd", "omega_l_cmd"))
+    pose_time, pose_states = _sparse_stream(columns, data, ("x_raw", "y_raw", "yaw_raw"))
+    wheel_time, wheel_speeds = _sparse_stream(
+        columns,
+        data,
+        ("omega_r_meas", "omega_l_meas"),
+        trigger_names=("omega_r_meas", "omega_l_meas"),
+    )
+    wheel_vel_omega = _latest_values_at_times(columns, data, ("v_actual", "w_actual"), wheel_time)
+    duty_cycle = _latest_values_at_times(columns, data, ("duty_r", "duty_l"), wheel_time)
+    command_time, wheel_cmd = _sparse_stream(
+        columns,
+        data,
+        ("omega_r_cmd", "omega_l_cmd"),
+        trigger_names=("omega_r_cmd", "omega_l_cmd"),
+    )
 
-    if len(reference_rows) == 0 or len(pose_rows) == 0 or len(wheel_rows) == 0 or len(command_rows) == 0:
+    if len(reference_time) == 0 or len(pose_time) == 0 or len(wheel_time) == 0 or len(command_time) == 0:
         raise ValueError(f"Log {path} does not contain all required event streams.")
 
-    zeros = np.zeros(len(reference_rows), dtype=np.float32)
+    zeros = np.zeros(len(reference_time), dtype=np.float32)
     reference_states = np.column_stack(
         [
-            _col(columns, reference_rows, "x_des"),
-            _col(columns, reference_rows, "y_des"),
-            _col(columns, reference_rows, "yaw_des"),
-            _col(columns, reference_rows, "v_ff"),
+            reference_values[:, 0],
+            reference_values[:, 1],
+            reference_values[:, 2],
+            reference_values[:, 3],
             zeros,
-            _col(columns, reference_rows, "w_ff"),
+            reference_values[:, 4],
             zeros,
             zeros,
-        ]
-    )
-
-    pose_states = np.column_stack(
-        [
-            _col(columns, pose_rows, "x_raw"),
-            _col(columns, pose_rows, "y_raw"),
-            _col(columns, pose_rows, "yaw_raw"),
         ]
     )
 
     return SimulationLog(
         reference=ReferenceLog(
-            time_s=jnp.asarray(_col(columns, reference_rows, "ts"), dtype=jnp.float32),
+            time_s=jnp.asarray(reference_time, dtype=jnp.float32),
             states=jnp.asarray(reference_states, dtype=jnp.float32),
         ),
         wheel=WheelLog(
-            time_s=jnp.asarray(_col(columns, wheel_rows, "ts"), dtype=jnp.float32),
-            speeds=jnp.asarray(
-                np.column_stack(
-                    [
-                        _col(columns, wheel_rows, "omega_r_meas"),
-                        _col(columns, wheel_rows, "omega_l_meas"),
-                    ]
-                ),
-                dtype=jnp.float32,
-            ),
-            vel_omega=jnp.asarray(
-                np.column_stack(
-                    [
-                        _col(columns, wheel_rows, "v_actual"),
-                        _col(columns, wheel_rows, "w_actual"),
-                    ]
-                ),
-                dtype=jnp.float32,
-            ),
-            duty_cycle=jnp.asarray(
-                np.column_stack(
-                    [
-                        _col(columns, wheel_rows, "duty_r"),
-                        _col(columns, wheel_rows, "duty_l"),
-                    ]
-                ),
-                dtype=jnp.float32,
-            ),
+            time_s=jnp.asarray(wheel_time, dtype=jnp.float32),
+            speeds=jnp.asarray(wheel_speeds, dtype=jnp.float32),
+            vel_omega=jnp.asarray(wheel_vel_omega, dtype=jnp.float32),
+            duty_cycle=jnp.asarray(duty_cycle, dtype=jnp.float32),
         ),
         pose=PoseLog(
-            time_s=jnp.asarray(_col(columns, pose_rows, "ts"), dtype=jnp.float32),
+            time_s=jnp.asarray(pose_time, dtype=jnp.float32),
             states=jnp.asarray(pose_states, dtype=jnp.float32),
             true_states=jnp.asarray(pose_states, dtype=jnp.float32),
-            command_time_s=jnp.asarray(_col(columns, command_rows, "ts"), dtype=jnp.float32),
-            wheel_cmd=jnp.asarray(
-                np.column_stack(
-                    [
-                        _col(columns, command_rows, "omega_r_cmd"),
-                        _col(columns, command_rows, "omega_l_cmd"),
-                    ]
-                ),
-                dtype=jnp.float32,
-            ),
+            command_time_s=jnp.asarray(command_time, dtype=jnp.float32),
+            wheel_cmd=jnp.asarray(wheel_cmd, dtype=jnp.float32),
         ),
     )
 
@@ -164,6 +136,60 @@ def _read_csv(path: Path) -> tuple[list[str], np.ndarray]:
 def _rows_with(columns: list[str], data: np.ndarray, names: tuple[str, ...]) -> np.ndarray:
     indices = [columns.index(name) for name in names]
     return data[np.all(np.isfinite(data[:, indices]), axis=1)]
+
+
+def _sparse_stream(
+    columns: list[str],
+    data: np.ndarray,
+    names: tuple[str, ...],
+    *,
+    trigger_names: tuple[str, ...] | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    value_indices = [columns.index(name) for name in names]
+    trigger_indices = value_indices if trigger_names is None else [columns.index(name) for name in trigger_names]
+    ts_index = columns.index("ts")
+    latest = np.full(len(value_indices), np.nan, dtype=np.float32)
+    times: list[float] = []
+    values: list[np.ndarray] = []
+
+    for row in data:
+        row_values = row[value_indices]
+        updates = np.isfinite(row_values)
+        if np.any(updates):
+            latest[updates] = row_values[updates]
+        if not np.any(np.isfinite(row[trigger_indices])) or not np.all(np.isfinite(latest)):
+            continue
+        times.append(float(row[ts_index]))
+        values.append(latest.copy())
+
+    if not values:
+        return np.empty(0, dtype=np.float32), np.empty((0, len(value_indices)), dtype=np.float32)
+    return np.asarray(times, dtype=np.float32), np.vstack(values).astype(np.float32, copy=False)
+
+
+def _latest_values_at_times(
+    columns: list[str],
+    data: np.ndarray,
+    names: tuple[str, ...],
+    target_time_s: np.ndarray,
+    *,
+    default: float = 0.0,
+) -> np.ndarray:
+    value_indices = [columns.index(name) for name in names]
+    ts_index = columns.index("ts")
+    latest = np.full(len(value_indices), default, dtype=np.float32)
+    output = np.empty((len(target_time_s), len(value_indices)), dtype=np.float32)
+    source_index = 0
+
+    for target_index, target_time in enumerate(target_time_s):
+        while source_index < len(data) and data[source_index, ts_index] <= target_time:
+            row_values = data[source_index, value_indices]
+            updates = np.isfinite(row_values)
+            if np.any(updates):
+                latest[updates] = row_values[updates]
+            source_index += 1
+        output[target_index] = latest
+    return output
 
 
 def _col(columns: list[str], data: np.ndarray, name: str) -> np.ndarray:
@@ -226,9 +252,9 @@ if __name__ == "__main__":
     from wmr_simulator.visualization.pololu import plot_logged_summary
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--log", type=str, default="Pololu Data/Experiments/2026_06_22/Logs/optimized/50ms_turbo_2/")
+    parser.add_argument("--log", type=str, default="Pololu Data/Experiments/2026_07_01/TR03.csv")
     parser.add_argument("--output", type=str, default=None, help="Output filename prefix")
-    parser.add_argument("--out-dir", type=str, default="Pololu Data/Experiments/2026_06_22/Plots/optimized/")
+    parser.add_argument("--out-dir", type=str, default="visualize")
     parser.add_argument("--clip-after-first-trajectory", default=True, action="store_true")
     args = parser.parse_args()
 

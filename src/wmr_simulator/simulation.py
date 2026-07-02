@@ -147,7 +147,7 @@ class SimulationPipeline:
         pose0 = self.initial_reference_pose(reference_states)
         robot_state = self.robot.get_init_state(key=robot_key, init_pose=pose0)
         estimator_state = self.estimator.get_init_state(key=estimator_key, start_pose=pose0)
-        controller_state = jnp.zeros(2, dtype=jnp.float32)
+        controller_state = jnp.zeros(4, dtype=jnp.float32)
         delayed_wheel_ref = jnp.zeros(2, dtype=jnp.float32)
         return robot_state, estimator_state, controller_state, delayed_wheel_ref
 

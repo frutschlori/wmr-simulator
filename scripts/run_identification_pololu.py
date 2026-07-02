@@ -42,7 +42,7 @@ def main():
 
     # Path to real experiment log
     parser.add_argument("--pololu-log", type=str,
-                        default="Pololu Data/Experiments/2026_06_22/Logs/gain tuning/tuned_3/TR01")
+                        default="Pololu Data/Experiments/2026_07_01/TR07")
     parser.add_argument("--clip-after-first-trajectory", action="store_true", default=True)
     args = parser.parse_args()
 

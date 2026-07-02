@@ -6,7 +6,7 @@ from jax_tqdm import scan_tqdm
 
 from wmr_simulator.gain_tuning.objectives import (
     clip_controller_gains,
-    closed_loop_tracking_mse,
+    closed_loop_objective,
 )
 
 
@@ -24,6 +24,8 @@ def optimize_controller_gains(
     num_steps: int,
     learning_rate: float,
     num_realizations: int,
+    input_weight: float = 0.0,
+    input_delta_weight: float = 0.0,
 ):
     optimizer = optax.adam(learning_rate)
     current_values = _controller_gains_to_optimizer_values(init_gains)
@@ -41,11 +43,13 @@ def optimize_controller_gains(
 
         def loss_for_optimizer_values(current_values):
             current_gains = _controller_gains_from_optimizer_values(current_values)
-            return closed_loop_tracking_mse(
+            return closed_loop_objective(
                 pipeline,
                 current_gains,
                 replay_robot_keys,
                 replay_estimator_keys,
+                input_weight=input_weight,
+                input_delta_weight=input_delta_weight,
             )
 
         loss_value, grads = jax.value_and_grad(

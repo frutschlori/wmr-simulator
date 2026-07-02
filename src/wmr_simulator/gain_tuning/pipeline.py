@@ -4,7 +4,7 @@ import yaml
 
 from wmr_simulator.gain_tuning.objectives import (
     clip_controller_gains,
-    closed_loop_tracking_mse,
+    closed_loop_objective,
 )
 from wmr_simulator.gain_tuning.optimizers import optimize_controller_gains
 from wmr_simulator.simulation import SimulationPipeline
@@ -25,16 +25,40 @@ class ControllerTuningPipeline(SimulationPipeline):
     def _clip_controller_gains(gains: jax.Array):
         return clip_controller_gains(gains)
 
-    def loss(self, gains: jax.Array, replay_robot_keys: jax.Array, replay_estimator_keys: jax.Array):
-        return closed_loop_tracking_mse(self, gains, replay_robot_keys, replay_estimator_keys)
+    def loss(
+        self,
+        gains: jax.Array,
+        replay_robot_keys: jax.Array,
+        replay_estimator_keys: jax.Array,
+        input_weight: float = 0.0,
+        input_delta_weight: float = 0.0,
+    ):
+        return closed_loop_objective(
+            self,
+            gains,
+            replay_robot_keys,
+            replay_estimator_keys,
+            input_weight=input_weight,
+            input_delta_weight=input_delta_weight,
+        )
 
-    def optimize(self, init_gains: jax.Array, num_steps: int, learning_rate: float, num_realizations: int):
+    def optimize(
+        self,
+        init_gains: jax.Array,
+        num_steps: int,
+        learning_rate: float,
+        num_realizations: int,
+        input_weight: float = 0.0,
+        input_delta_weight: float = 0.0,
+    ):
         return optimize_controller_gains(
             pipeline=self,
             init_gains=init_gains,
             num_steps=num_steps,
             learning_rate=learning_rate,
             num_realizations=num_realizations,
+            input_weight=input_weight,
+            input_delta_weight=input_delta_weight,
         )
 
 
@@ -65,6 +89,8 @@ def run_gain_tuning_experiment(
     num_realizations: int,
     seed: int = 0,
     reference_trajectories_dir: str | None = None,
+    input_weight: float = 0.0,
+    input_delta_weight: float = 0.0,
 ):
     pipeline = ControllerTuningPipeline(
         problem_path=problem_path,
@@ -79,6 +105,8 @@ def run_gain_tuning_experiment(
         num_steps=num_steps,
         learning_rate=learning_rate,
         num_realizations=num_realizations,
+        input_weight=input_weight,
+        input_delta_weight=input_delta_weight,
     )
     final_hidden_log = pipeline.run_closed_loop(
         robot_params,
