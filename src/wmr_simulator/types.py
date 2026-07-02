@@ -71,10 +71,9 @@ def print_controller_gains(label: str, gains: jax.Array):
     print(f"  kx={float(gains[0]):.7f}")
     print(f"  ky={float(gains[1]):.7f}")
     print(f"  kth={float(gains[2]):.7f}")
-    print(f"  kprmotor={float(gains[3]):.7f}")
-    print(f"  kplmotor={float(gains[4]):.7f}")
-    print(f"  kirmotor={float(gains[5]):.7f}")
-    print(f"  kilmotor={float(gains[6]):.7f}")
+    print(f"  kpmotor={float(gains[3]):.7f}")
+    print(f"  kimotor={float(gains[4]):.7f}")
+    print(f"  kdmotor={float(gains[5]):.7f}")
 
 
 def clip_physical_params(params: PhysicalParams) -> PhysicalParams:
