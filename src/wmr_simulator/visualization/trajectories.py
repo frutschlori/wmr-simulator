@@ -22,11 +22,13 @@ def _plot_trajectory_axes(
 ):
     closed_loop_actual = np.asarray(closed_loop_log.pose.true_states)
     closed_loop_estimates = np.asarray(closed_loop_log.pose.states)
-    replay_actual = np.asarray(replay_actual)
-    replay_estimates = np.asarray(replay_estimates)
-    num_replay_intervals = max(len(replay_estimates) - 1, 1)
-    resolved_window_length = pipeline.simulation.resolve_replay_window_length(window_length, num_replay_intervals)
-    window_start_indices = np.arange(0, num_replay_intervals, resolved_window_length)
+    show_replay = replay_actual is not None and replay_estimates is not None
+    if show_replay:
+        replay_actual = np.asarray(replay_actual)
+        replay_estimates = np.asarray(replay_estimates)
+        num_replay_intervals = max(len(replay_estimates) - 1, 1)
+        resolved_window_length = pipeline.simulation.resolve_replay_window_length(window_length, num_replay_intervals)
+        window_start_indices = np.arange(0, num_replay_intervals, resolved_window_length)
     if axis_limits is not None:
         x_limits, y_limits = axis_limits
     elif bezier_control_points is not None:
@@ -92,39 +94,40 @@ def _plot_trajectory_axes(
         alpha=1,
         linewidth=0.0,
     )
-    for window_idx, start_idx in enumerate(window_start_indices):
-        end_idx = min(start_idx + resolved_window_length, num_replay_intervals)
-        if end_idx <= start_idx:
-            continue
-        label = "Windowed Replay Actual" if window_idx == 0 else None
-        window_start = closed_loop_estimates[start_idx : start_idx + 1]
-        window_actual = np.concatenate([window_start, replay_actual[start_idx + 1 : end_idx + 1]], axis=0)
-        ax.plot(
-            window_actual[:, 0],
-            window_actual[:, 1],
+    if show_replay:
+        for window_idx, start_idx in enumerate(window_start_indices):
+            end_idx = min(start_idx + resolved_window_length, num_replay_intervals)
+            if end_idx <= start_idx:
+                continue
+            label = "Windowed Replay Actual" if window_idx == 0 else None
+            window_start = closed_loop_estimates[start_idx : start_idx + 1]
+            window_actual = np.concatenate([window_start, replay_actual[start_idx + 1 : end_idx + 1]], axis=0)
+            ax.plot(
+                window_actual[:, 0],
+                window_actual[:, 1],
+                color="orange",
+                linestyle="-",
+                linewidth=0.9,
+                label=label,
+            )
+        ax.scatter(
+            replay_estimates[:, 0],
+            replay_estimates[:, 1],
             color="orange",
-            linestyle="-",
-            linewidth=0.9,
-            label=label,
+            s=3,
+            marker=".",
+            alpha=1,
+            linewidth=0.0,
         )
-    ax.scatter(
-        replay_estimates[:, 0],
-        replay_estimates[:, 1],
-        color="orange",
-        s=3,
-        marker=".",
-        alpha=1,
-        linewidth=0.0,
-    )
-    ax.scatter(
-        closed_loop_estimates[window_start_indices, 0],
-        closed_loop_estimates[window_start_indices, 1],
-        marker="x",
-        s=36,
-        linewidths=1.0,
-        color="black",
-        label="Window Start",
-    )
+        ax.scatter(
+            closed_loop_estimates[window_start_indices, 0],
+            closed_loop_estimates[window_start_indices, 1],
+            marker="x",
+            s=36,
+            linewidths=1.0,
+            color="black",
+            label="Window Start",
+        )
 
     ax.set_xlabel("x [m]")
     ax.set_ylabel("y [m]")
@@ -162,11 +165,16 @@ def plot_trajectory(
     if closed_loop_log is None:
         closed_loop_log = pipeline.closed_loop_log
 
-    replay_actual, replay_estimates = pipeline.replay_rollout(
-        pipeline.nominal_parameters(),
-        window_length=window_length,
-        closed_loop_log=closed_loop_log,
-    )
+    is_gain_tuning = getattr(pipeline, "objective_mode", None) == "gain-tuning"
+    if is_gain_tuning:
+        replay_actual = None
+        replay_estimates = None
+    else:
+        replay_actual, replay_estimates = pipeline.replay_rollout(
+            pipeline.nominal_parameters(),
+            window_length=window_length,
+            closed_loop_log=closed_loop_log,
+        )
 
     fig, ax = plt.subplots(1, 1, figsize=(8, 8))
     _plot_trajectory_axes(

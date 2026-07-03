@@ -16,14 +16,17 @@ def compute_fim_matrix(
     measurement_vector_fn,
     params: jnp.ndarray,
     measurement_variances,
+    parameter_scaling: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     measurement_variances = np.asarray(measurement_variances, dtype=float)
     inverse_variances = jnp.asarray(1.0 / measurement_variances, dtype=jnp.float32)
 
+    params = jnp.asarray(params, dtype=jnp.float32)
     measurement_vector = measurement_vector_fn(params)
     measurement_sensitivity = jax.jacfwd(measurement_vector_fn)(params)
-    parameter_scaling = jnp.diag(params)
-    # parameter_scaling = jnp.eye(2)
+    if parameter_scaling is None:
+        parameter_scaling = params
+    parameter_scaling = jnp.diag(jnp.asarray(parameter_scaling, dtype=jnp.float32))
     relative_measurement_sensitivity = measurement_sensitivity @ parameter_scaling
 
     num_measurements = measurement_vector.shape[0] // 3

@@ -1,8 +1,9 @@
 from datetime import datetime
 import os
 import pickle
-from typing import NamedTuple
+from typing import NamedTuple, Sequence
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import yaml
@@ -103,6 +104,21 @@ class OptimizationSnapshot(NamedTuple):
     closed_loop_log: SimulationLog
 
 
+OBJECTIVE_MODE_IDENTIFICATION = "identification"
+OBJECTIVE_MODE_GAIN_TUNING = "gain-tuning"
+OBJECTIVE_MODES = {OBJECTIVE_MODE_IDENTIFICATION, OBJECTIVE_MODE_GAIN_TUNING}
+
+
+def normalize_objective_mode(objective_mode: str) -> str:
+    objective_mode = objective_mode.strip().lower().replace("_", "-")
+    if objective_mode not in OBJECTIVE_MODES:
+        raise ValueError(
+            f"Unsupported trajectory optimization objective mode '{objective_mode}'. "
+            f"Expected one of {sorted(OBJECTIVE_MODES)}."
+        )
+    return objective_mode
+
+
 def reference_states_export_payload(reference_states, dt: float, **metadata):
     payload = {
         "reference_states": np.asarray(reference_states),
@@ -117,6 +133,7 @@ class TrajectoryOptimizationPipeline:
         self,
         problem_path: str,
         time_scaling: str | None = None,
+        objective_mode: str = OBJECTIVE_MODE_IDENTIFICATION,
     ):
         self.problem = ProblemDefinition(problem_path)
         self.simulation = SimulationPipeline(problem_path=problem_path, seed=0, reference_trajectories_dir=None)
@@ -125,14 +142,26 @@ class TrajectoryOptimizationPipeline:
         self.controller_gains = self.simulation.gains
         self.estimator = self.simulation.estimator
         self.time_scaling = normalize_time_scaling(time_scaling)
+        self.objective_mode = normalize_objective_mode(objective_mode)
         self.control_points = initial_bezier_control_points(self.problem, order=2)
         self.reference_states = self.reference_states_from_control_points(self.control_points)
         self._set_closed_loop_log(self.run_closed_loop_deployment(reference_states=self.reference_states))
         self.loss_history = None
+        self.batch_loss_history = None
+        self.batch_final_losses = None
+        self.batch_constraint_weights = None
+        self.batch_orders = None
         self.optimization_snapshots = None
 
     def nominal_parameters(self) -> jnp.ndarray:
+        if self.objective_mode == OBJECTIVE_MODE_GAIN_TUNING:
+            return jnp.asarray(self.controller_gains, dtype=jnp.float32)
         return jnp.array([self.robot.r, self.robot.L], dtype=jnp.float32)
+
+    def fim_parameter_scaling(self, params: jnp.ndarray) -> jnp.ndarray:
+        if self.objective_mode == OBJECTIVE_MODE_GAIN_TUNING:
+            return jnp.ones_like(params)
+        return jnp.asarray(params, dtype=jnp.float32)
 
     def nominal_physical_params(self) -> PhysicalParams:
         return PhysicalParams(
@@ -215,6 +244,15 @@ class TrajectoryOptimizationPipeline:
         closed_loop_log: SimulationLog | None = None,
     ):
         target_log = self.closed_loop_log if closed_loop_log is None else closed_loop_log
+        if self.objective_mode == OBJECTIVE_MODE_GAIN_TUNING:
+            del window_length
+            predicted_log = self.simulation.run_closed_loop(
+                self.nominal_physical_params(),
+                controller_gains=params,
+                wheel_speed_log_source="estimated",
+                reference_states=target_log.reference.states,
+            )
+            return predicted_log.pose.true_states, predicted_log.pose.states
         replay_log = self.replay_log(params, window_length=window_length, closed_loop_log=closed_loop_log)
         replay_poses = jnp.concatenate([target_log.pose.states[:1], replay_log.pose.states], axis=0)
         return replay_poses, replay_poses
@@ -237,6 +275,27 @@ class TrajectoryOptimizationPipeline:
             closed_loop_log=closed_loop_log,
         ).pose.states
 
+    def closed_loop_gain_measurement_sequence(
+        self,
+        gains: jnp.ndarray,
+        window_length: int | None = None,
+        closed_loop_log: SimulationLog | None = None,
+    ) -> jnp.ndarray:
+        """
+        Runs the normal closed-loop deployment and records estimated poses as measurements.
+        window_length is accepted for API symmetry with replay mode; closed-loop gain sensitivities
+        intentionally use the full rollout without replay resets.
+        """
+        del window_length
+        target_log = self.closed_loop_log if closed_loop_log is None else closed_loop_log
+        predicted_log = self.simulation.run_closed_loop(
+            self.nominal_physical_params(),
+            controller_gains=gains,
+            wheel_speed_log_source="estimated",
+            reference_states=target_log.reference.states,
+        )
+        return predicted_log.pose.states[1:]
+
     def measurement_vector(
         self,
         params: jnp.ndarray,
@@ -244,11 +303,18 @@ class TrajectoryOptimizationPipeline:
         closed_loop_log: SimulationLog | None = None,
     ) -> jnp.ndarray:
         """ Flattens Nx3 measurement matrix into 3Nx1 vector """
-        measurements = self.replay_measurement_sequence(
-            params,
-            window_length,
-            closed_loop_log=closed_loop_log,
-        )
+        if self.objective_mode == OBJECTIVE_MODE_GAIN_TUNING:
+            measurements = self.closed_loop_gain_measurement_sequence(
+                params,
+                window_length,
+                closed_loop_log=closed_loop_log,
+            )
+        else:
+            measurements = self.replay_measurement_sequence(
+                params,
+                window_length,
+                closed_loop_log=closed_loop_log,
+            )
         return measurements.reshape(-1)
 
     def compute_fim_matrix(self, measurement_variances=None,
@@ -267,18 +333,29 @@ class TrajectoryOptimizationPipeline:
             ),
             params=params,
             measurement_variances=measurement_variances,
+            parameter_scaling=self.fim_parameter_scaling(params),
         )
 
     def initial_bezier_control_points(self, order: int) -> jnp.ndarray:
         return initial_bezier_control_points(self.problem, order)
 
     def clamp_control_points(self, control_points: jnp.ndarray) -> jnp.ndarray:
+        if self.objective_mode == OBJECTIVE_MODE_GAIN_TUNING:
+            env_min = jnp.asarray(self.problem.environment_min, dtype=jnp.float32)
+            env_max = jnp.asarray(self.problem.environment_max, dtype=jnp.float32)
+            return jnp.clip(control_points, env_min, env_max)
         return clamp_control_points(self.problem, control_points)
 
     def control_points_from_decision_variables(self, decision_variables: jnp.ndarray) -> jnp.ndarray:
+        if self.objective_mode == OBJECTIVE_MODE_GAIN_TUNING:
+            decision_variables = jnp.ravel(decision_variables)
+            return self.clamp_control_points(jnp.reshape(decision_variables, (-1, 2)))
         return control_points_from_decision_variables(self.problem, decision_variables)
 
     def decision_variables_from_control_points(self, control_points: jnp.ndarray) -> jnp.ndarray:
+        if self.objective_mode == OBJECTIVE_MODE_GAIN_TUNING:
+            control_points = self.clamp_control_points(control_points)
+            return jnp.ravel(control_points)
         return decision_variables_from_control_points(self.problem, control_points)
 
     def set_bezier_control_points(self, control_points: jnp.ndarray):
@@ -404,6 +481,253 @@ class TrajectoryOptimizationPipeline:
             constraint_smooth_max_beta=constraint_smooth_max_beta,
             tangent_floor_weight=tangent_floor_weight,
         )
+
+    def _random_gain_tuning_control_points(
+        self,
+        rng: np.random.Generator,
+        order: int,
+    ) -> jnp.ndarray:
+        env_min = np.asarray(self.problem.environment_min, dtype=float)
+        env_max = np.asarray(self.problem.environment_max, dtype=float)
+        if not np.all(np.isfinite(env_min)) or not np.all(np.isfinite(env_max)):
+            raise ValueError("Random gain-tuning trajectories require finite environment bounds.")
+        start = rng.uniform(env_min, env_max)
+        goal = rng.uniform(env_min, env_max)
+        line_samples = np.linspace(0.0, 1.0, order + 1)[:, None]
+        control_points = start[None, :] + line_samples * (goal[None, :] - start[None, :])
+        return jnp.asarray(control_points, dtype=jnp.float32)
+
+    @staticmethod
+    def _trajectory_order_sequence(
+        order: int,
+        num_trajectories: int,
+        orders: Sequence[int] | None = None,
+        order_min: int | None = None,
+        order_max: int | None = None,
+        seed: int = 0,
+    ) -> list[int]:
+        if num_trajectories <= 0:
+            raise ValueError("num_trajectories must be positive.")
+        if orders is not None:
+            order_values = [int(value) for value in orders]
+            if not order_values:
+                raise ValueError("orders must contain at least one Bezier order.")
+            if any(value < 2 for value in order_values):
+                raise ValueError("Bezier orders must be >= 2.")
+            repeats, remainder = divmod(num_trajectories, len(order_values))
+            sequence = []
+            for index, value in enumerate(order_values):
+                count = repeats + (1 if index < remainder else 0)
+                sequence.extend([value] * count)
+            return sequence
+
+        order_min = order if order_min is None else int(order_min)
+        order_max = order if order_max is None else int(order_max)
+        if order_min < 2 or order_max < order_min:
+            raise ValueError("Bezier order range must satisfy 2 <= order_min <= order_max.")
+        rng = np.random.default_rng(seed)
+        return [int(rng.integers(order_min, order_max + 1)) for _ in range(num_trajectories)]
+
+    def initial_bezier_control_point_candidates(
+        self,
+        order: int,
+        num_trajectories: int,
+        orders: Sequence[int] | None = None,
+        order_min: int | None = None,
+        order_max: int | None = None,
+        seed: int = 0,
+    ) -> list[jnp.ndarray]:
+        rng = np.random.default_rng(seed)
+        candidates = []
+        for candidate_order in self._trajectory_order_sequence(
+            order=order,
+            num_trajectories=num_trajectories,
+            orders=orders,
+            order_min=order_min,
+            order_max=order_max,
+            seed=seed,
+        ):
+            if self.objective_mode == OBJECTIVE_MODE_GAIN_TUNING:
+                control_points = self._random_gain_tuning_control_points(rng, candidate_order)
+            else:
+                control_points = self.initial_bezier_control_points(candidate_order)
+            candidates.append(self.clamp_control_points(control_points))
+        return candidates
+
+    def initial_bezier_control_point_batch(self, order: int, num_trajectories: int) -> jnp.ndarray:
+        candidates = self.initial_bezier_control_point_candidates(order=order, num_trajectories=num_trajectories)
+        shapes = {tuple(candidate.shape) for candidate in candidates}
+        if len(shapes) != 1:
+            raise ValueError("Vectorized trajectory optimization requires all candidates to have the same Bezier order.")
+        return jnp.stack(candidates, axis=0)
+
+    def optimize_bezier_trajectories(
+        self,
+        order: int,
+        num_steps: int,
+        learning_rate: float,
+        num_trajectories: int,
+        vectorized: bool = False,
+        orders: Sequence[int] | None = None,
+        order_min: int | None = None,
+        order_max: int | None = None,
+        constraint_weight_jitter: float = 0.0,
+        seed: int = 0,
+        window_length: int | None = None,
+        measurement_variances=None,
+        constraint_weight: float = 1.0,
+        constraint_component_weights: dict | None = None,
+        constraint_smooth_max_beta: float = 20.0,
+        tangent_floor_weight: float = 1.0,
+    ):
+        initial_control_point_candidates = self.initial_bezier_control_point_candidates(
+            order=order,
+            num_trajectories=num_trajectories,
+            orders=orders,
+            order_min=order_min,
+            order_max=order_max,
+            seed=seed,
+        )
+        rng = np.random.default_rng(seed + 1)
+        if constraint_weight_jitter < 0.0:
+            raise ValueError("constraint_weight_jitter must be non-negative.")
+        low = max(0.0, 1.0 - float(constraint_weight_jitter))
+        high = 1.0 + float(constraint_weight_jitter)
+        constraint_weight_factors = rng.uniform(low, high, size=num_trajectories)
+        constraint_weights_per_trajectory = constraint_weight * constraint_weight_factors
+
+        if vectorized:
+            from wmr_simulator.trajectory_optimization.optimizers import optimize_bezier_control_points_batch
+
+            optimized = [None] * num_trajectories
+            final_losses = [np.nan] * num_trajectories
+            combined_loss_history = None
+            order_groups: dict[int, list[int]] = {}
+            for index, control_points in enumerate(initial_control_point_candidates):
+                order_groups.setdefault(int(control_points.shape[0] - 1), []).append(index)
+
+            for group_indices in order_groups.values():
+                initial_control_points = jnp.stack(
+                    [initial_control_point_candidates[index] for index in group_indices],
+                    axis=0,
+                )
+                group_constraint_weights = jnp.asarray(
+                    [constraint_weights_per_trajectory[index] for index in group_indices],
+                    dtype=jnp.float32,
+                )
+                optimized_group, group_loss_history = optimize_bezier_control_points_batch(
+                    pipeline=self,
+                    initial_control_points=initial_control_points,
+                    num_steps=num_steps,
+                    learning_rate=learning_rate,
+                    window_length=window_length,
+                    measurement_variances=measurement_variances,
+                    constraint_weight=group_constraint_weights,
+                    constraint_component_weights=constraint_component_weights,
+                    constraint_smooth_max_beta=constraint_smooth_max_beta,
+                    tangent_floor_weight=tangent_floor_weight,
+                )
+                if group_loss_history:
+                    group_loss_history = np.asarray(group_loss_history, dtype=float)
+                    if combined_loss_history is None:
+                        combined_loss_history = np.full((group_loss_history.shape[0], num_trajectories), np.nan)
+                    combined_loss_history[:, group_indices] = group_loss_history
+
+                for local_index, trajectory_index in enumerate(group_indices):
+                    optimized_control_points_one = optimized_group[local_index]
+                    candidate_constraint_weight = float(constraint_weights_per_trajectory[trajectory_index])
+                    final_loss = self.fim_loss_from_control_points(
+                        optimized_control_points_one,
+                        window_length=window_length,
+                        measurement_variances=measurement_variances,
+                        constraint_weight=candidate_constraint_weight,
+                        constraint_component_weights=constraint_component_weights,
+                        constraint_smooth_max_beta=constraint_smooth_max_beta,
+                        tangent_floor_weight=tangent_floor_weight,
+                    )
+                    if not np.isfinite(float(final_loss)):
+                        optimized_control_points_one = initial_control_point_candidates[trajectory_index]
+                        final_loss = self.fim_loss_from_control_points(
+                            optimized_control_points_one,
+                            window_length=window_length,
+                            measurement_variances=measurement_variances,
+                            constraint_weight=candidate_constraint_weight,
+                            constraint_component_weights=constraint_component_weights,
+                            constraint_smooth_max_beta=constraint_smooth_max_beta,
+                            tangent_floor_weight=tangent_floor_weight,
+                        )
+                    final_loss_value = float(final_loss)
+                    optimized[trajectory_index] = optimized_control_points_one
+                    final_losses[trajectory_index] = final_loss_value
+                    if combined_loss_history is not None:
+                        combined_loss_history[-1, trajectory_index] = final_loss_value
+
+            shapes = {tuple(candidate.shape) for candidate in optimized}
+            optimized_control_points = jnp.stack(optimized, axis=0) if len(shapes) == 1 else optimized
+            loss_history = combined_loss_history.tolist() if combined_loss_history is not None else []
+        else:
+            optimized = []
+            histories = []
+            final_losses = []
+            for control_points, candidate_constraint_weight in zip(
+                initial_control_point_candidates,
+                constraint_weights_per_trajectory,
+            ):
+                optimized_control_points_one, loss_history_one = optimize_bezier_control_points(
+                    pipeline=self,
+                    order=control_points.shape[0] - 1,
+                    num_steps=num_steps,
+                    learning_rate=learning_rate,
+                    initial_control_points=control_points,
+                    window_length=window_length,
+                    measurement_variances=measurement_variances,
+                    save_trace=False,
+                    constraint_weight=float(candidate_constraint_weight),
+                    constraint_component_weights=constraint_component_weights,
+                    constraint_smooth_max_beta=constraint_smooth_max_beta,
+                    tangent_floor_weight=tangent_floor_weight,
+                )
+                final_loss = self.fim_loss_from_control_points(
+                    optimized_control_points_one,
+                    window_length=window_length,
+                    measurement_variances=measurement_variances,
+                    constraint_weight=float(candidate_constraint_weight),
+                    constraint_component_weights=constraint_component_weights,
+                    constraint_smooth_max_beta=constraint_smooth_max_beta,
+                    tangent_floor_weight=tangent_floor_weight,
+                )
+                if not np.isfinite(float(final_loss)):
+                    optimized_control_points_one = control_points
+                    final_loss = self.fim_loss_from_control_points(
+                        optimized_control_points_one,
+                        window_length=window_length,
+                        measurement_variances=measurement_variances,
+                        constraint_weight=float(candidate_constraint_weight),
+                        constraint_component_weights=constraint_component_weights,
+                        constraint_smooth_max_beta=constraint_smooth_max_beta,
+                        tangent_floor_weight=tangent_floor_weight,
+                    )
+                final_loss_value = float(final_loss)
+                if loss_history_one:
+                    loss_history_one = list(loss_history_one)
+                    loss_history_one[-1] = final_loss_value
+                optimized.append(optimized_control_points_one)
+                histories.append(loss_history_one)
+                final_losses.append(final_loss_value)
+            shapes = {tuple(candidate.shape) for candidate in optimized}
+            optimized_control_points = jnp.stack(optimized, axis=0) if len(shapes) == 1 else optimized
+            loss_history = np.asarray(histories, dtype=float).T.tolist() if histories and histories[0] else []
+
+        self.batch_loss_history = loss_history
+        final_losses = np.asarray(final_losses, dtype=float)
+        self.batch_final_losses = final_losses.tolist()
+        self.batch_constraint_weights = constraint_weights_per_trajectory.tolist()
+        self.batch_orders = [int(candidate.shape[0] - 1) for candidate in initial_control_point_candidates]
+        finite_losses = np.where(np.isfinite(final_losses), final_losses, np.inf)
+        best_index = int(np.argmin(finite_losses))
+        self.set_bezier_control_points(optimized_control_points[best_index])
+        self.loss_history = np.asarray(loss_history)[:, best_index].tolist() if len(loss_history) else []
+        return optimized_control_points, loss_history
 
     def plot_trajectory(self, window_length=None, out_prefix="trajectory_plot", out_path=None):
         plot_trajectory_figure(
