@@ -50,6 +50,11 @@ class ControllerTuningPipeline(SimulationPipeline):
         num_realizations: int,
         input_weight: float = 0.0,
         input_delta_weight: float = 0.0,
+        k_min_stab: float = 1e-3,
+        k_max_stab: float = 20.0,
+        k_max_rest: float = 20.0,
+        num_lhs_points: int = 0,
+        num_adam_optimizations: int = 1,
     ):
         return optimize_controller_gains(
             pipeline=self,
@@ -59,6 +64,11 @@ class ControllerTuningPipeline(SimulationPipeline):
             num_realizations=num_realizations,
             input_weight=input_weight,
             input_delta_weight=input_delta_weight,
+            k_min_stab=k_min_stab,
+            k_max_stab=k_max_stab,
+            k_max_rest=k_max_rest,
+            num_lhs_points=num_lhs_points,
+            num_adam_optimizations=num_adam_optimizations,
         )
 
 
@@ -91,6 +101,11 @@ def run_gain_tuning_experiment(
     reference_trajectories_dir: str | None = None,
     input_weight: float = 0.0,
     input_delta_weight: float = 0.0,
+    k_min_stab: float = 1e-3,
+    k_max_stab: float = 20.0,
+    k_max_rest: float = 20.0,
+    num_lhs_points: int = 0,
+    num_adam_optimizations: int = 1,
 ):
     pipeline = ControllerTuningPipeline(
         problem_path=problem_path,
@@ -107,6 +122,11 @@ def run_gain_tuning_experiment(
         num_realizations=num_realizations,
         input_weight=input_weight,
         input_delta_weight=input_delta_weight,
+        k_min_stab=k_min_stab,
+        k_max_stab=k_max_stab,
+        k_max_rest=k_max_rest,
+        num_lhs_points=num_lhs_points,
+        num_adam_optimizations=num_adam_optimizations,
     )
     final_hidden_log = pipeline.run_closed_loop(
         robot_params,

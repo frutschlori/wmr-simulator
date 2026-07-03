@@ -4,6 +4,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 import optax
+from jax_tqdm import scan_tqdm
 
 
 def print_progress(step: int, total_steps: int, loss_value: float, bar_width: int = 30):
@@ -23,6 +24,7 @@ def optimize_bezier_control_points(
     order: int,
     num_steps: int,
     learning_rate: float,
+    initial_control_points: jax.Array | None = None,
     window_length: int | None = None,
     measurement_variances=None,
     save_trace: bool = False,
@@ -34,7 +36,10 @@ def optimize_bezier_control_points(
 ):
     from wmr_simulator.trajectory_optimization.pipeline import OptimizationSnapshot
 
-    initial_control_points = pipeline.initial_bezier_control_points(order)
+    if initial_control_points is None:
+        initial_control_points = pipeline.initial_bezier_control_points(order)
+    else:
+        initial_control_points = pipeline.clamp_control_points(initial_control_points)
     initial_decision_variables = pipeline.decision_variables_from_control_points(initial_control_points)
     optimizer = optax.adam(learning_rate)
     opt_state = optimizer.init(initial_decision_variables)
@@ -116,4 +121,95 @@ def optimize_bezier_control_points(
     pipeline.set_bezier_control_points(optimized_control_points)
     pipeline.loss_history = loss_history
     pipeline.optimization_snapshots = snapshots
+    return optimized_control_points, loss_history
+
+
+def optimize_bezier_control_points_batch(
+    pipeline,
+    initial_control_points: jax.Array,
+    num_steps: int,
+    learning_rate: float,
+    window_length: int | None = None,
+    measurement_variances=None,
+    constraint_weight: float = 1.0,
+    constraint_component_weights: dict | None = None,
+    constraint_smooth_max_beta: float = 20.0,
+    tangent_floor_weight: float = 1.0,
+):
+    constraint_weights = jnp.broadcast_to(
+        jnp.asarray(constraint_weight, dtype=jnp.float32),
+        (initial_control_points.shape[0],),
+    )
+    optimizer = optax.adam(learning_rate)
+
+    def unnormalized_loss_fn(decision_variables, current_constraint_weight):
+        control_points = pipeline.control_points_from_decision_variables(decision_variables)
+        return pipeline.fim_loss_from_control_points(
+            control_points,
+            window_length=window_length,
+            measurement_variances=measurement_variances,
+            constraint_weight=current_constraint_weight,
+            constraint_component_weights=constraint_component_weights,
+            constraint_smooth_max_beta=constraint_smooth_max_beta,
+            tangent_floor_weight=tangent_floor_weight,
+        )
+
+    def scaled_loss_fn(decision_variables, scale, current_constraint_weight):
+        return scale * unnormalized_loss_fn(decision_variables, current_constraint_weight)
+
+    decision_variables_from_control_points_batch = jax.vmap(pipeline.decision_variables_from_control_points)
+    control_points_from_decision_variables_batch = jax.vmap(pipeline.control_points_from_decision_variables)
+    loss_values_fn = jax.vmap(scaled_loss_fn, in_axes=(0, 0, 0))
+    unnormalized_loss_values_fn = jax.vmap(unnormalized_loss_fn, in_axes=(0, 0))
+
+    def optimize_batch(control_points, current_constraint_weights):
+        initial_decision_variables = decision_variables_from_control_points_batch(control_points)
+        initial_loss = unnormalized_loss_values_fn(initial_decision_variables, current_constraint_weights)
+        loss_scale = 1.0 / jnp.maximum(initial_loss, 1e-12)
+        initial_opt_state = optimizer.init(initial_decision_variables)
+
+        def summed_loss_fn(decision_variables):
+            loss_values = loss_values_fn(decision_variables, loss_scale, current_constraint_weights)
+            return jnp.sum(loss_values), loss_values
+
+        @scan_tqdm(
+            num_steps,
+            desc=(
+                f"Bezier optimization "
+                f"(order {initial_control_points.shape[1] - 1}, {initial_control_points.shape[0]} trajectories)"
+            ),
+        )
+        def train_step(carry, _):
+            decision_variables, optimizer_state = carry
+            (_, loss_values), grads = jax.value_and_grad(summed_loss_fn, has_aux=True)(decision_variables)
+            updates, next_optimizer_state = optimizer.update(grads, optimizer_state, decision_variables)
+            next_decision_variables = optax.apply_updates(decision_variables, updates)
+            next_control_points = control_points_from_decision_variables_batch(next_decision_variables)
+            next_decision_variables = decision_variables_from_control_points_batch(next_control_points)
+            return (next_decision_variables, next_optimizer_state), loss_values
+
+        if num_steps <= 0:
+            return control_points, jnp.empty((0, control_points.shape[0]), dtype=jnp.float32), initial_loss, loss_scale
+
+        (final_decision_variables, _), loss_history = jax.lax.scan(
+            train_step,
+            (initial_decision_variables, initial_opt_state),
+            jnp.arange(num_steps),
+        )
+        final_control_points = control_points_from_decision_variables_batch(final_decision_variables)
+        return final_control_points, loss_history, initial_loss, loss_scale
+
+    optimize_batch = jax.jit(optimize_batch)
+    optimized_control_points, loss_history_by_trajectory, initial_loss, loss_scale = optimize_batch(
+        initial_control_points,
+        constraint_weights,
+    )
+
+    print(f"Initial unnormalized batch loss: {np.asarray(initial_loss, dtype=float)}")
+    print(f"Batch loss normalization scale: {np.asarray(loss_scale, dtype=float)}")
+    if num_steps <= 0:
+        return optimized_control_points, []
+
+    loss_history = np.asarray(loss_history_by_trajectory, dtype=float).tolist()
+
     return optimized_control_points, loss_history

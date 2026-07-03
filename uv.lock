@@ -1482,6 +1482,7 @@ dependencies = [
     { name = "optax" },
     { name = "pyqt6" },
     { name = "pyyaml" },
+    { name = "scipy" },
     { name = "tensorboard" },
     { name = "wandb" },
 ]
@@ -1499,6 +1500,7 @@ requires-dist = [
     { name = "optax", specifier = "==0.2.8" },
     { name = "pyqt6", specifier = ">=6.11.0" },
     { name = "pyyaml", specifier = ">=6.0.3" },
+    { name = "scipy", specifier = ">=1.16.3" },
     { name = "tensorboard", specifier = ">=2.20.0" },
     { name = "wandb", specifier = ">=0.23.1" },
 ]
