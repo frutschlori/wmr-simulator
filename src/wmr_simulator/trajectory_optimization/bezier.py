@@ -103,26 +103,14 @@ class BezierCurve:
         return evaluate_bezier(self.second_diff, s)
 
 
-def compute_bezier_reference(
-    problem,
-    control_points: jnp.ndarray,
-    time_scaling: str | None = "s_curve",
+def _reference_from_derivatives(
+    position: jnp.ndarray,
+    dpos_ds: jnp.ndarray,
+    d2pos_ds2: jnp.ndarray,
+    s_dot: jnp.ndarray,
+    s_ddot: jnp.ndarray,
 ) -> jnp.ndarray:
-    curve = BezierCurve(control_points)
-
-    time_grid = jnp.asarray(problem.sim_time_grid(), dtype=jnp.float32)
-    total_time = jnp.asarray(problem.sim_time, dtype=jnp.float32)
-    s, s_dot, s_ddot = time_scaling_derivatives(
-        time_grid,
-        total_time,
-        time_scaling=normalize_time_scaling(time_scaling),
-    )
-    s = jnp.clip(s, 0.0, 1.0)
-
-    position = curve.eval(s)
-    dpos_ds = curve.evald(s)
-    d2pos_ds2 = curve.evaldd(s)
-
+    """Assemble the [T, 8] reference-state matrix from curve derivatives."""
     velocity = dpos_ds * s_dot[:, None]
     acceleration = dpos_ds * s_ddot[:, None] + d2pos_ds2 * (s_dot[:, None] ** 2)
     theta = jnp.arctan2(dpos_ds[:, 1], dpos_ds[:, 0])
@@ -145,6 +133,29 @@ def compute_bezier_reference(
             acceleration[:, 1],
         ]
     )
+
+
+def compute_bezier_reference(
+    problem,
+    control_points: jnp.ndarray,
+    time_scaling: str | None = "s_curve",
+) -> jnp.ndarray:
+    curve = BezierCurve(control_points)
+
+    time_grid = jnp.asarray(problem.sim_time_grid(), dtype=jnp.float32)
+    total_time = jnp.asarray(problem.sim_time, dtype=jnp.float32)
+    s, s_dot, s_ddot = time_scaling_derivatives(
+        time_grid,
+        total_time,
+        time_scaling=normalize_time_scaling(time_scaling),
+    )
+    s = jnp.clip(s, 0.0, 1.0)
+
+    position = curve.eval(s)
+    dpos_ds = curve.evald(s)
+    d2pos_ds2 = curve.evaldd(s)
+
+    return _reference_from_derivatives(position, dpos_ds, d2pos_ds2, s_dot, s_ddot)
 
 
 def tangent_floor_loss(

@@ -33,6 +33,7 @@ def optimize_bezier_control_points(
     constraint_component_weights: dict | None = None,
     constraint_smooth_max_beta: float = 20.0,
     tangent_floor_weight: float = 1.0,
+    verbose: bool = True,
 ):
     from wmr_simulator.trajectory_optimization.pipeline import OptimizationSnapshot
 
@@ -90,8 +91,9 @@ def optimize_bezier_control_points(
             )
         )
 
-    print(f"Initial unnormalized loss: {float(initial_loss):.8f}")
-    print(f"Loss normalization scale: {float(loss_scale):.8f}")
+    if verbose:
+        print(f"Initial unnormalized loss: {float(initial_loss):.8f}")
+        print(f"Loss normalization scale: {float(loss_scale):.8f}")
     if num_steps <= 0:
         optimized_control_points = pipeline.control_points_from_decision_variables(decision_variables)
         pipeline.set_bezier_control_points(optimized_control_points)
@@ -102,7 +104,8 @@ def optimize_bezier_control_points(
     for step in range(num_steps):
         decision_variables, opt_state, loss_value = train_step(decision_variables, opt_state)
         loss_history.append(float(loss_value))
-        print_progress(step + 1, num_steps, float(loss_value))
+        if verbose:
+            print_progress(step + 1, num_steps, float(loss_value))
         if save_trace and ((step + 1) % trace_stride == 0 or step + 1 == num_steps):
             control_points = pipeline.control_points_from_decision_variables(decision_variables)
             reference_states = pipeline.reference_states_from_control_points(control_points)
@@ -135,6 +138,7 @@ def optimize_bezier_control_points_batch(
     constraint_component_weights: dict | None = None,
     constraint_smooth_max_beta: float = 20.0,
     tangent_floor_weight: float = 1.0,
+    verbose: bool = True,
 ):
     constraint_weights = jnp.broadcast_to(
         jnp.asarray(constraint_weight, dtype=jnp.float32),
@@ -172,13 +176,6 @@ def optimize_bezier_control_points_batch(
             loss_values = loss_values_fn(decision_variables, loss_scale, current_constraint_weights)
             return jnp.sum(loss_values), loss_values
 
-        @scan_tqdm(
-            num_steps,
-            desc=(
-                f"Bezier optimization "
-                f"(order {initial_control_points.shape[1] - 1}, {initial_control_points.shape[0]} trajectories)"
-            ),
-        )
         def train_step(carry, _):
             decision_variables, optimizer_state = carry
             (_, loss_values), grads = jax.value_and_grad(summed_loss_fn, has_aux=True)(decision_variables)
@@ -187,6 +184,14 @@ def optimize_bezier_control_points_batch(
             next_control_points = control_points_from_decision_variables_batch(next_decision_variables)
             next_decision_variables = decision_variables_from_control_points_batch(next_control_points)
             return (next_decision_variables, next_optimizer_state), loss_values
+
+        train_step = scan_tqdm(
+            num_steps,
+            desc=(
+                f"Bezier optimization "
+                f"(order {initial_control_points.shape[1] - 1}, {initial_control_points.shape[0]} trajectories)"
+            ),
+        )(train_step)
 
         if num_steps <= 0:
             return control_points, jnp.empty((0, control_points.shape[0]), dtype=jnp.float32), initial_loss, loss_scale
@@ -205,8 +210,9 @@ def optimize_bezier_control_points_batch(
         constraint_weights,
     )
 
-    print(f"Initial unnormalized batch loss: {np.asarray(initial_loss, dtype=float)}")
-    print(f"Batch loss normalization scale: {np.asarray(loss_scale, dtype=float)}")
+    if verbose:
+        print(f"Initial unnormalized batch loss: {np.asarray(initial_loss, dtype=float)}")
+        print(f"Batch loss normalization scale: {np.asarray(loss_scale, dtype=float)}")
     if num_steps <= 0:
         return optimized_control_points, []
 

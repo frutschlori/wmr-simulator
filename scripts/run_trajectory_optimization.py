@@ -28,23 +28,23 @@ def filename_stem(title: str | None) -> str | None:
 def main():
     parser = argparse.ArgumentParser(description="Initialize trajectory optimization inputs.")
     # Setup description
-    parser.add_argument("--problem", default="problems/pololu.yaml")
+    parser.add_argument("--problem", default="problems/pololu_gains.yaml")
     parser.add_argument("--title", type=str, default="tuning_optimized")
     # Optimization Settings
     parser.add_argument("--save-trajectory", action="store_true", default=True)
     parser.add_argument("--no-save-trajectory", dest="save_trajectory", action="store_false")
     parser.add_argument("--window-length", type=int, default=50) # replay window length, only for identification mode
-    parser.add_argument("--opt-steps", type=int, default=2000)
+    parser.add_argument("--opt-steps", type=int, default=5000)
     parser.add_argument("--learning-rate", type=float, default=1e-2)
     parser.add_argument("--objective-mode", choices=["identification", "gain-tuning"],
                         default="gain-tuning")
     # Settings for multiple trajectory synthesis
-    parser.add_argument("--num-trajectories", type=int, default=10)
-    parser.add_argument("--constraint-weight-jitter", type=float, default=0.2) # factor for diverse constraints
+    parser.add_argument("--num-trajectories", type=int, default=20)
+    parser.add_argument("--constraint-weight-jitter", type=float, default=0.5) # factor for diverse constraints
     parser.add_argument("--vectorize-trajectories", action="store_true", default=True)
     # Path settings
     parser.add_argument("--time-scaling", choices=["s-curve", "linear"], default="s-curve")
-    parser.add_argument("--bezier-order", type=int, nargs="+", default=[10, 20])
+    parser.add_argument("--bezier-order", type=int, default=15)
     parser.add_argument("--trajectory-seed", type=int, default=0)
     # Constraints
     parser.add_argument("--constraint-weight", type=float, default=1.0)
@@ -67,9 +67,8 @@ def main():
         raise ValueError("--num-trajectories must be positive.")
     if args.num_trajectories > 1 and args.save_opt_GIF:
         raise ValueError("--save-opt-GIF is only supported for single-trajectory optimization.")
-    bezier_orders = [int(order) for order in args.bezier_order]
-    if any(order < 2 for order in bezier_orders):
-        raise ValueError("Bezier orders must be >= 2.")
+    if args.bezier_order < 2:
+        raise ValueError("--bezier-order must be >= 2.")
 
     pipeline = TrajectoryOptimizationPipeline(
         args.problem,
@@ -84,23 +83,24 @@ def main():
     print(f"Objective mode: {pipeline.objective_mode}")
     print(f"Optimized trajectories: {args.num_trajectories}")
     if args.num_trajectories > 1:
-        print(f"Bezier orders: {bezier_orders}")
+        print(f"Bezier order: {args.bezier_order}")
         print(f"Constraint weight jitter: +/-{100.0 * args.constraint_weight_jitter:.1f}%")
     print(f"Reference samples: {len(pipeline.reference_states)} at dt={pipeline.problem.geometry_dt}")
     print(f"Closed-loop pose samples: {len(pipeline.closed_loop_log.pose.states)} at dt={pipeline.problem.wheel_dt}")
-    print(f"Start pose: {pipeline.problem.start}")
-    print(f"Goal pose:  {pipeline.problem.goal}")
-    print(f"Window length: {pipeline.simulation.resolve_window_length(args.window_length)}")
-    print("Motion limits:")
-    print({name: float(value) for name, value in pipeline.motion_limits().items()})
-    print("Measurement vector shape:")
-    print(pipeline.measurement_vector(pipeline.nominal_parameters(), window_length=args.window_length).shape)
-    print("FIM parameter vector shape:")
-    print(pipeline.nominal_parameters().shape)
-    print("FIM:")
-    print(pipeline.compute_fim_matrix(window_length=args.window_length))
+    if args.num_trajectories == 1:
+        print(f"Start pose: {pipeline.problem.start}")
+        print(f"Goal pose:  {pipeline.problem.goal}")
+        print(f"Window length: {pipeline.simulation.resolve_window_length(args.window_length)}")
+        print("Motion limits:")
+        print({name: float(value) for name, value in pipeline.motion_limits().items()})
+        print("Measurement vector shape:")
+        print(pipeline.measurement_vector(pipeline.nominal_parameters(), window_length=args.window_length).shape)
+        print("FIM parameter vector shape:")
+        print(pipeline.nominal_parameters().shape)
+        print("FIM:")
+        print(pipeline.compute_fim_matrix(window_length=args.window_length))
 
-    initial_control_points = pipeline.initial_bezier_control_points(bezier_orders[0])
+    initial_control_points = pipeline.initial_bezier_control_points(args.bezier_order)
     pipeline.set_bezier_control_points(initial_control_points)
 
     pipeline.plot_trajectory(
@@ -120,7 +120,7 @@ def main():
         }
         if args.num_trajectories == 1:
             optimized_control_points, loss_history = pipeline.optimize_bezier_trajectory(
-                order=bezier_orders[0],
+                order=args.bezier_order,
                 num_steps=args.opt_steps,
                 learning_rate=args.learning_rate,
                 window_length=args.window_length,
@@ -133,12 +133,11 @@ def main():
             )
         else:
             optimized_control_point_batch, loss_history = pipeline.optimize_bezier_trajectories(
-                order=bezier_orders[0],
+                order=args.bezier_order,
                 num_steps=args.opt_steps,
                 learning_rate=args.learning_rate,
                 num_trajectories=args.num_trajectories,
                 vectorized=args.vectorize_trajectories,
-                orders=bezier_orders,
                 constraint_weight_jitter=args.constraint_weight_jitter,
                 seed=args.trajectory_seed,
                 window_length=args.window_length,
@@ -146,48 +145,50 @@ def main():
                 constraint_component_weights=constraint_component_weights,
                 constraint_smooth_max_beta=args.constraint_smooth_max_beta,
                 tangent_floor_weight=args.tangent_floor_weight,
+                verbose=False,
             )
             final_losses = np.asarray(pipeline.batch_final_losses, dtype=float)
             best_index = int(np.argmin(np.where(np.isfinite(final_losses), final_losses, np.inf)))
             optimized_control_points = optimized_control_point_batch[best_index]
             selected_constraint_weight = float(pipeline.batch_constraint_weights[best_index])
-            print("Final batch losses:")
-            print(final_losses)
-            print("Sampled Bezier orders:")
-            print(pipeline.batch_orders)
-            print("Sampled constraint weights:")
-            print(np.asarray(pipeline.batch_constraint_weights, dtype=float))
-            print(f"Best trajectory index: {best_index}")
+            sampled_constraint_weights = np.asarray(pipeline.batch_constraint_weights, dtype=float)
+            sampled_constraint_factors = (
+                sampled_constraint_weights / args.constraint_weight
+                if args.constraint_weight != 0.0
+                else sampled_constraint_weights
+            )
+            print("Sampled constraint factors:")
+            print(sampled_constraint_factors)
         if args.num_trajectories == 1:
             selected_constraint_weight = args.constraint_weight
-        objective_terms = pipeline.objective_terms_from_control_points(
-            optimized_control_points,
-            window_length=args.window_length,
-            constraint_weight=selected_constraint_weight,
-            constraint_component_weights=constraint_component_weights,
-            constraint_smooth_max_beta=args.constraint_smooth_max_beta,
-            tangent_floor_weight=args.tangent_floor_weight,
-        )
-        constraint_components = pipeline.constraint_components_from_control_points(
-            optimized_control_points,
-            constraint_weight=selected_constraint_weight,
-            constraint_component_weights=constraint_component_weights,
-            constraint_smooth_max_beta=args.constraint_smooth_max_beta,
-        )
-        print("Final optimization loss:")
-        print(loss_history[-1])
-        print("Final objective terms:")
-        print(f"  FIM:         {float(objective_terms['fim']):.8e}")
-        print(f"  Constraints: {float(objective_terms['constraints']):.8e}")
-        print(f"  Tangent:     {float(objective_terms['tangent_floor']):.8e}")
-        print("  Constraint components:")
-        for name in ("v", "a", "lateral", "omega", "alpha"):
-            print(f"    {name:<7}: {float(constraint_components[name]):.8e}")
-        print(f"  Total:       {float(objective_terms['total']):.8e}")
-        print(f"  Constraint share: {100.0 * float(objective_terms['constraint_share']):.2f}%")
-        print(f"  Constraint weight used: {selected_constraint_weight:.8g}")
-        print("Optimized FIM:")
-        print(pipeline.compute_fim_matrix(window_length=args.window_length))
+            objective_terms = pipeline.objective_terms_from_control_points(
+                optimized_control_points,
+                window_length=args.window_length,
+                constraint_weight=selected_constraint_weight,
+                constraint_component_weights=constraint_component_weights,
+                constraint_smooth_max_beta=args.constraint_smooth_max_beta,
+                tangent_floor_weight=args.tangent_floor_weight,
+            )
+            constraint_components = pipeline.constraint_components_from_control_points(
+                optimized_control_points,
+                constraint_weight=selected_constraint_weight,
+                constraint_component_weights=constraint_component_weights,
+                constraint_smooth_max_beta=args.constraint_smooth_max_beta,
+            )
+            print("Final optimization loss:")
+            print(loss_history[-1])
+            print("Final objective terms:")
+            print(f"  FIM:         {float(objective_terms['fim']):.8e}")
+            print(f"  Constraints: {float(objective_terms['constraints']):.8e}")
+            print(f"  Tangent:     {float(objective_terms['tangent_floor']):.8e}")
+            print("  Constraint components:")
+            for name in ("v", "a", "lateral", "omega", "alpha"):
+                print(f"    {name:<7}: {float(constraint_components[name]):.8e}")
+            print(f"  Total:       {float(objective_terms['total']):.8e}")
+            print(f"  Constraint share: {100.0 * float(objective_terms['constraint_share']):.2f}%")
+            print(f"  Constraint weight used: {selected_constraint_weight:.8g}")
+            print("Optimized FIM:")
+            print(pipeline.compute_fim_matrix(window_length=args.window_length))
         if optimized_control_point_batch is None:
             pipeline.plot_trajectory(
                 window_length=args.window_length,

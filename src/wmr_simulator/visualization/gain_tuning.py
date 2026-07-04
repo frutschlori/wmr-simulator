@@ -4,6 +4,7 @@ import matplotlib
 
 matplotlib.use("Agg", force=False)
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 import numpy as np
 
 
@@ -51,6 +52,25 @@ def plot_gain_tuning_summary(
     ax_traj.legend(loc="upper left", bbox_to_anchor=(1.02, 1.0), borderaxespad=0.0, fontsize="small")
 
     ax_vel_omega = ax_vel.twinx()
+    reference_v = reference[:, 3] * np.cos(reference[:, 2]) + reference[:, 4] * np.sin(reference[:, 2])
+    line_ref_v = ax_vel.step(
+        reference_time,
+        reference_v,
+        where="post",
+        color="tab:cyan",
+        linestyle="--",
+        linewidth=0.8,
+        label="ref v",
+    )[0]
+    line_ref_w = ax_vel_omega.step(
+        reference_time,
+        reference[:, 5],
+        where="post",
+        color="tab:pink",
+        linestyle="--",
+        linewidth=0.8,
+        label=r"ref $\omega$",
+    )[0]
     tuned_vel_time, tuned_vel = _pose_vel_omega(tuned_time, tuned_pose)
     line_tuned_v = ax_vel.plot(tuned_vel_time, tuned_vel[:, 0], color="tab:blue", linewidth=1.0, label="tuned v")[0]
     line_tuned_w = ax_vel_omega.plot(
@@ -65,7 +85,7 @@ def plot_gain_tuning_summary(
     ax_vel_omega.set_ylabel("angular velocity [rad/s]")
     ax_vel.set_title("Velocity")
     ax_vel.grid(True)
-    ax_vel.legend(handles=[line_tuned_v, line_tuned_w], loc="best")
+    ax_vel.legend(handles=[line_ref_v, line_tuned_v, line_ref_w, line_tuned_w], loc="best")
 
     cmd_time, cmd_right = _stair_series(command_time, wheel_cmd[:, 0], wheel_time[-1] if len(wheel_time) else None)
     _, cmd_left = _stair_series(command_time, wheel_cmd[:, 1], wheel_time[-1] if len(wheel_time) else None)
@@ -133,6 +153,101 @@ def plot_gain_tuning_summary(
     fig.savefig(pdf_filename, bbox_inches="tight", transparent=False, facecolor="white")
     plt.close(fig)
     print(f"Gain tuning summary PDF saved at: {pdf_filename}")
+
+
+def plot_trajectory_set_summary(
+    pipeline,
+    robot_params,
+    tuned_gains,
+    reference_trajectories,
+    max_trajectories: int | None = None,
+    title: str = "Trajectories",
+    out_prefix="trajectory_summary",
+):
+    os.makedirs("visualize", exist_ok=True)
+    pdf_filename = os.path.join("visualize", f"{out_prefix}.pdf")
+
+    reference_trajectories = np.asarray(reference_trajectories, dtype=float)
+    if reference_trajectories.shape[0] == 0:
+        print(f"No trajectories available for {title}; skipping plot.")
+        return None
+    num_trajectories = reference_trajectories.shape[0]
+    if max_trajectories is not None:
+        num_trajectories = min(max_trajectories, num_trajectories)
+    colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+
+    fig, ax = plt.subplots(figsize=(8, 8))
+    for index, reference_states in enumerate(reference_trajectories[:num_trajectories]):
+        color = colors[index % len(colors)]
+        init_log = pipeline.run_closed_loop(
+            robot_params,
+            use_hidden_robot=True,
+            reference_states=reference_states,
+        )
+        tuned_log = pipeline.run_closed_loop(
+            robot_params,
+            use_hidden_robot=True,
+            controller_gains=tuned_gains,
+            reference_states=reference_states,
+        )
+        init_pose = np.asarray(init_log.pose.true_states, dtype=float)
+        tuned_pose = np.asarray(tuned_log.pose.true_states, dtype=float)
+
+        ax.plot(reference_states[:, 0], reference_states[:, 1], color=color, linestyle="--", linewidth=0.8)
+        ax.plot(init_pose[:, 0], init_pose[:, 1], color=color, linestyle=":", linewidth=0.7)
+        ax.plot(tuned_pose[:, 0], tuned_pose[:, 1], color=color, linestyle="-", linewidth=0.9)
+
+    legend_handles = [
+        Line2D([0], [0], color="black", linestyle="--", linewidth=0.8, label="Reference"),
+        Line2D([0], [0], color="black", linestyle=":", linewidth=0.7, label="Initial"),
+        Line2D([0], [0], color="black", linestyle="-", linewidth=0.9, label="Tuned"),
+    ]
+    ax.legend(handles=legend_handles, loc="best")
+    ax.set_xlabel("x [m]")
+    ax.set_ylabel("y [m]")
+    ax.set_title(f"{title} ({num_trajectories} shown)")
+    ax.set_aspect("equal", adjustable="box")
+    ax.grid(True)
+    fig.tight_layout()
+    fig.savefig(pdf_filename, bbox_inches="tight", transparent=False, facecolor="white")
+    plt.close(fig)
+    print(f"{title} summary PDF saved at: {pdf_filename}")
+    return pdf_filename
+
+
+def plot_training_trajectory_summary(
+    pipeline,
+    robot_params,
+    tuned_gains,
+    max_trajectories: int = 5,
+    out_prefix="summary_training",
+):
+    return plot_trajectory_set_summary(
+        pipeline=pipeline,
+        robot_params=robot_params,
+        tuned_gains=tuned_gains,
+        reference_trajectories=pipeline.training_reference_trajectories,
+        max_trajectories=max_trajectories,
+        title="Training Trajectories",
+        out_prefix=out_prefix,
+    )
+
+
+def plot_validation_trajectory_summary(
+    pipeline,
+    robot_params,
+    tuned_gains,
+    out_prefix="summary_validation",
+):
+    return plot_trajectory_set_summary(
+        pipeline=pipeline,
+        robot_params=robot_params,
+        tuned_gains=tuned_gains,
+        reference_trajectories=pipeline.validation_reference_trajectories,
+        max_trajectories=None,
+        title="Validation Trajectories",
+        out_prefix=out_prefix,
+    )
 
 
 def plot_controller_tuning_errors(pipeline, init_log, tuned_log, out_prefix="ctrl_tuning"):
