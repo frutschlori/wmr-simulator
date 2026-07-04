@@ -757,6 +757,8 @@ def _set_symmetric_ylim(ax, values: np.ndarray) -> None:
 def plot_loss_history(
     loss_history,
     validation_loss_history=None,
+    loss_component_history=None,
+    validation_loss_component_history=None,
     hidden_loss_history=None,
     parameter_error_history=None,
     motor_loss_history=None,
@@ -769,16 +771,38 @@ def plot_loss_history(
 
     fig, ax = plt.subplots(1, 1, figsize=(8, 4.5))
     legend_handles = []
-    ax.plot(steps, np.asarray(loss_history), 'b-', linewidth=2, label='Normalized Geometry Error')
-    legend_handles.extend(ax.get_lines()[-1:])
-    if motor_loss_history is not None and len(motor_loss_history) > 0:
-        motor_steps = np.arange(1, len(motor_loss_history) + 1)
-        ax.plot(motor_steps, np.asarray(motor_loss_history), color='C1', linewidth=2, label='Normalized Motor Error')
+
+    if loss_component_history is not None:
+        component_styles = {
+            "tracking": ("-", "Tracking"),
+            "velocity_tracking": ("-.", "Velocity tracking"),
+            "input": ("--", "Input"),
+            "input_delta": (":", "Input delta"),
+        }
+        for name, (linestyle, label) in component_styles.items():
+            values = np.asarray(loss_component_history[name], dtype=float)
+            plot_values = np.maximum(values, 1e-12)
+            component_steps = np.arange(1, len(values) + 1)
+            ax.plot(component_steps, plot_values, color="C0", linestyle=linestyle, linewidth=1.8, label=f"Train {label}")
+            legend_handles.extend(ax.get_lines()[-1:])
+        if validation_loss_component_history is not None:
+            for name, (linestyle, label) in component_styles.items():
+                values = np.asarray(validation_loss_component_history[name], dtype=float)
+                plot_values = np.maximum(values, 1e-12)
+                component_steps = np.arange(1, len(values) + 1)
+                ax.plot(component_steps, plot_values, color="C3", linestyle=linestyle, linewidth=1.8, label=f"Validation {label}")
+                legend_handles.extend(ax.get_lines()[-1:])
+    else:
+        ax.plot(steps, np.asarray(loss_history), 'b-', linewidth=2, label='Normalized Geometry Error')
         legend_handles.extend(ax.get_lines()[-1:])
-    if validation_loss_history is not None and len(validation_loss_history) > 0:
-        validation_steps = np.arange(1, len(validation_loss_history) + 1)
-        ax.plot(validation_steps, np.asarray(validation_loss_history), 'r-', linewidth=2, label='Validation')
-        legend_handles.extend(ax.get_lines()[-1:])
+        if motor_loss_history is not None and len(motor_loss_history) > 0:
+            motor_steps = np.arange(1, len(motor_loss_history) + 1)
+            ax.plot(motor_steps, np.asarray(motor_loss_history), color='C1', linewidth=2, label='Normalized Motor Error')
+            legend_handles.extend(ax.get_lines()[-1:])
+        if validation_loss_history is not None and len(validation_loss_history) > 0:
+            validation_steps = np.arange(1, len(validation_loss_history) + 1)
+            ax.plot(validation_steps, np.asarray(validation_loss_history), 'r-', linewidth=2, label='Validation')
+            legend_handles.extend(ax.get_lines()[-1:])
     hidden_ax = None
     parameter_history = parameter_error_history if parameter_error_history is not None else hidden_loss_history
     if parameter_history is not None and len(parameter_history) > 0:
