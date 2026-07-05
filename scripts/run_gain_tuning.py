@@ -42,11 +42,11 @@ def main():
     # Loss weights
     parser.add_argument("--velocity-tracking-weight", type=float, default=1)
     parser.add_argument("--input-weight", type=float, default=0.0)
-    parser.add_argument("--input-delta-weight", type=float, default=0.1)
+    parser.add_argument("--input-delta-weight", type=float, default=1)
     # Gain bounds
     parser.add_argument("--k-min-stab", type=float, default=1e-3)
     parser.add_argument("--k-max-stab", type=float, default=30.0)
-    parser.add_argument("--k-max-rest", type=float, default=30.0)
+    parser.add_argument("--k-max-rest", type=float, default=100.0)
     # Optional overwrite of robot model parameters
     parser.add_argument("--fixed-wheel-radius", type=float, default=None)
     parser.add_argument("--fixed-base-diameter", type=float, default=None)
@@ -54,7 +54,19 @@ def main():
     # Gain schedule: jointly tune base gains + outer-gain schedule (W), default follows problem yaml, --no-gain-schedule forces W=0 (static)
     parser.add_argument("--gain-schedule", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--gain-delta-weight", type=float, default=0.0)
+    # Learned residual dynamics checkpoint (scripts/train_residual_model.py); tuning
+    # then rolls out the residual-augmented dynamics (model params stay fixed).
+    # parser.add_argument("--residual-model", type=str, default="models/residual_pololu.pkl")
+    parser.add_argument("--residual-model", type=str, default=None)
     args = parser.parse_args()
+
+    residual_model = None
+    if args.residual_model is not None:
+        from wmr_simulator.models import load_residual_model
+
+        residual_model, checkpoint = load_residual_model(args.residual_model)
+        print(f"Loaded residual dynamics model: {args.residual_model}")
+        print(f"  config: {checkpoint['config']}")
 
     robot_params = resolve_gain_robot_params(args.problem, args.fixed_wheel_radius, args.fixed_base_diameter)
     result = run_gain_tuning_experiment(
@@ -76,6 +88,7 @@ def main():
         num_adam_optimizations=args.num_adam_optimizations,
         schedule_enabled=args.gain_schedule,
         gain_delta_weight=args.gain_delta_weight,
+        residual_model=residual_model,
     )
     pipeline = result["pipeline"]
     print_physical_params("Robot parameters used for gain tuning:", robot_params)

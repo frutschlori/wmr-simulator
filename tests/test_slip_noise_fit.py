@@ -11,7 +11,7 @@ import numpy as np
 from wmr_simulator.identification.slip_noise import estimate_slip_noise, estimate_slip_noise_from_log
 from wmr_simulator.pololu.log_loader import zero_phase_moving_average
 from wmr_simulator.simulation import SimulationPipeline
-from wmr_simulator.slip import ar1_slip_update, integrate_planar_pose, slip_body_velocities
+from wmr_simulator.models.slip import ar1_slip_update, integrate_planar_pose, slip_body_velocities
 from wmr_simulator.types import PhysicalParams
 
 

@@ -14,9 +14,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from wmr_simulator.robot import DiffDrive
+from wmr_simulator.models.robot import DiffDrive
 from wmr_simulator.simulation import SimulationPipeline
-from wmr_simulator.slip import ar1_slip_update, fit_ar1_moments, slip_body_velocities
+from wmr_simulator.models.slip import ar1_slip_update, fit_ar1_moments, slip_body_velocities
 from wmr_simulator.types import PhysicalParams, physical_params_from_array, physical_params_to_array
 
 ROBOT_CFG = {
@@ -84,7 +84,7 @@ def test_traction_limit_disabled_matches_ideal():
 def test_backlash_reversal_absorbs_gap():
     # Direction reversal: the first 2*b radians of motor motion are swallowed by the
     # gap while the wheel holds still (Nordin & Gutman 2002).
-    from wmr_simulator.slip import backlash_transmission
+    from wmr_simulator.models.slip import backlash_transmission
 
     b, dt = 0.03, 0.01
     offset = jnp.asarray([b, b])  # engaged forward
@@ -102,7 +102,7 @@ def test_backlash_reversal_absorbs_gap():
 
 
 def test_backlash_engaged_is_transparent():
-    from wmr_simulator.slip import backlash_transmission
+    from wmr_simulator.models.slip import backlash_transmission
 
     b, dt = 0.03, 0.01
     offset = jnp.asarray([b, b])  # engaged forward
@@ -114,7 +114,7 @@ def test_backlash_engaged_is_transparent():
 def test_backlash_dither_keeps_wheel_still():
     # Encoder-side dithering inside the gap: wheel speed stays exactly zero, so the
     # measured wheel-speed sign can flip while the body keeps its motion trend.
-    from wmr_simulator.slip import backlash_transmission
+    from wmr_simulator.models.slip import backlash_transmission
 
     b, dt = 0.03, 0.01
     offset = jnp.asarray([0.0, 0.0])  # mid-gap
@@ -125,7 +125,7 @@ def test_backlash_dither_keeps_wheel_still():
 
 
 def test_backlash_disabled_is_identity():
-    from wmr_simulator.slip import backlash_transmission
+    from wmr_simulator.models.slip import backlash_transmission
 
     offset = jnp.asarray([0.0, 0.0])
     u = jnp.asarray([12.0, -7.0])

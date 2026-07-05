@@ -10,7 +10,7 @@ import yaml
 
 from wmr_simulator.controller import Controller
 from wmr_simulator.estimator import DiffDriveEstimator
-from wmr_simulator.robot import DiffDrive
+from wmr_simulator.models.robot import DiffDrive
 from wmr_simulator.simulation import SimulationPipeline, make_replay_segment_plan, replay_simulation_log
 from wmr_simulator.trajectory_optimization.bezier import (
     clamp_control_points,
