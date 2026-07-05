@@ -28,7 +28,7 @@ biases tau_hat low; apply the zero-phase mocap filter in the log loader first
 
 import numpy as np
 
-from wmr_simulator.slip import fit_ar1_moments
+from wmr_simulator.models.slip import fit_ar1_moments
 from wmr_simulator.types import PhysicalParams, SimulationLog
 
 

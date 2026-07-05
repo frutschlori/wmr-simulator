@@ -13,12 +13,24 @@ def main():
     parser.add_argument("--output", type=str, default="simulation")
     parser.add_argument("--skip-pdf", action="store_true")
     parser.add_argument("--skip-ref-meshcat", action="store_true", default=False)
+    # Learned residual dynamics checkpoint (scripts/train_residual_model.py);
+    # the closed loop then runs the residual-augmented dynamics.
+    parser.add_argument("--residual-model", type=str, default=None)
     args = parser.parse_args()
+
+    residual_model = None
+    if args.residual_model is not None:
+        from wmr_simulator.models import load_residual_model
+
+        residual_model, checkpoint = load_residual_model(args.residual_model)
+        print(f"Loaded residual dynamics model: {args.residual_model}")
+        print(f"  config: {checkpoint['config']}")
 
     pipeline = SimulationPipeline(
         problem_path=args.problem,
         seed=args.seed,
         reference_trajectories_dir=args.reference_trajectories_dir,
+        residual_model=residual_model,
     )
     log = pipeline.run_closed_loop(
         pipeline.hidden_params,

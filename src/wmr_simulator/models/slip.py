@@ -102,6 +102,25 @@ def integrate_planar_pose(pose, v, omega, dt):
     )
 
 
+def integrate_planar_pose_lateral(pose, v_x, v_y, omega, dt):
+    """Euler-integrate a planar pose from a full body twist (v_x, v_y, omega).
+
+    A learned residual can introduce a lateral body velocity v_y (chassis
+    side-slip) that the ideal differential-drive kinematics exclude; with
+    v_y = 0 this reduces exactly to :func:`integrate_planar_pose`.
+    """
+    x, y, theta = pose
+    cos_t = jnp.cos(theta)
+    sin_t = jnp.sin(theta)
+    return jnp.array(
+        [
+            x + (v_x * cos_t - v_y * sin_t) * dt,
+            y + (v_x * sin_t + v_y * cos_t) * dt,
+            _wrap_to_pi(theta + omega * dt),
+        ]
+    )
+
+
 def backlash_transmission(gap_offset, motor_speeds, b_backlash, dt):
     """Kinematic gearbox backlash element (Nordin & Gutman 2002).
 

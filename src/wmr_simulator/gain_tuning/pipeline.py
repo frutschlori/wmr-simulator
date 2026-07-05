@@ -23,11 +23,13 @@ class ControllerTuningPipeline(SimulationPipeline):
         seed=0,
         reference_trajectories_dir: str | None = None,
         validation_split: float = 0.0,
+        residual_model=None,
     ):
         super().__init__(
             problem_path=problem_path,
             seed=seed,
             reference_trajectories_dir=None,
+            residual_model=residual_model,
         )
         robot_params = self.hidden_params if robot_params is None else robot_params
         self.robot_params = clip_physical_params(robot_params)
@@ -195,6 +197,7 @@ def run_gain_tuning_experiment(
     num_adam_optimizations: int = 1,
     schedule_enabled: bool | None = None,
     gain_delta_weight: float = 0.0,
+    residual_model=None,
 ):
     pipeline = ControllerTuningPipeline(
         problem_path=problem_path,
@@ -202,6 +205,7 @@ def run_gain_tuning_experiment(
         seed=seed,
         reference_trajectories_dir=reference_trajectories_dir,
         validation_split=validation_split,
+        residual_model=residual_model,
     )
     schedule_enabled = pipeline.gain_schedule_enabled if schedule_enabled is None else bool(schedule_enabled)
     init_hidden_log = pipeline.run_closed_loop(robot_params, use_hidden_robot=True)

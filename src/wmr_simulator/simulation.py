@@ -10,7 +10,7 @@ from wmr_simulator.controller import Controller
 from wmr_simulator.estimator import DiffDriveEstimator
 from wmr_simulator.gain_schedule import apply_gain_schedule, gain_schedule_params_from_cfg
 from wmr_simulator.planner import compute_reference_trajectory
-from wmr_simulator.robot import DiffDrive, DiffDriveState
+from wmr_simulator.models.robot import DiffDrive, DiffDriveState
 from wmr_simulator.types import PhysicalParams, PoseLog, ReferenceLog, SimulationLog, WheelLog
 
 
@@ -21,7 +21,11 @@ class SimulationPipeline:
         seed: int = 0,
         reference_trajectories_dir: str | None = None,
         window_length: int | None = None,
+        residual_model=None,
     ):
+        # Optional learned residual dynamics (models.residual.ResidualDynamicsModel);
+        # None keeps the nominal dynamics untouched.
+        self.residual_model = residual_model
         with open(problem_path, "r", encoding="utf-8") as file:
             self.problem = yaml.safe_load(file)
 
@@ -187,9 +191,11 @@ class SimulationPipeline:
         estimator_key=None,
         wheel_speed_log_source: str = "estimated",
         reference_states=None,
+        residual_model=None,
     ) -> SimulationLog:
         if wheel_speed_log_source not in {"estimated", "true"}:
             raise ValueError("wheel_speed_log_source must be 'estimated' or 'true'.")
+        residual_model = self.residual_model if residual_model is None else residual_model
         robot_key = self.target_robot_key if robot_key is None else robot_key
         estimator_key = self.target_estimator_key if estimator_key is None else estimator_key
         model_params = robot_params if est_params is None else est_params
@@ -227,7 +233,13 @@ class SimulationPipeline:
                     max_wheel_speed=robot_params.max_wheel_speed,
                 )
                 if use_hidden_robot:
-                    next_robot_state = self.robot.step(inner_robot_state, applied_duty_cycle, dt=self.wheel_dt)
+                    next_robot_state = self.robot.step(
+                        inner_robot_state,
+                        applied_duty_cycle,
+                        dt=self.wheel_dt,
+                        residual_model=residual_model,
+                        wheel_speed_cmd=applied_wheel_ref,
+                    )
                 else:
                     next_robot_state = self.robot.step(
                         inner_robot_state,
@@ -241,6 +253,8 @@ class SimulationPipeline:
                         slip_sigma=robot_params.slip_sigma,
                         slip_tau=robot_params.slip_tau,
                         dt=self.wheel_dt,
+                        residual_model=residual_model,
+                        wheel_speed_cmd=applied_wheel_ref,
                     )
                 next_estimator_state = self.estimator.update(
                     inner_estimator_state,
@@ -442,6 +456,7 @@ def replay_pose_states(
         vel_omega=jnp.zeros(2, dtype=jnp.float32),
         duty_cycle=jnp.zeros(2, dtype=jnp.float32),
         wheel_speed_cmd=jnp.zeros(2, dtype=jnp.float32),
+        vel_lateral=jnp.zeros((), dtype=jnp.float32),
     )
     segment_speeds = wheel_speeds[wheel_indices]
     segment_duty = duty_cycles[wheel_indices]

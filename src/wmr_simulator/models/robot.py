@@ -3,11 +3,13 @@ from typing import NamedTuple
 import jax
 import jax.numpy as np
 
-from wmr_simulator.slip import (
+from wmr_simulator.models.residual import residual_corrected_twist, residual_features
+from wmr_simulator.models.slip import (
     apply_wheel_slip,
     ar1_slip_update,
     backlash_transmission,
     integrate_planar_pose,
+    integrate_planar_pose_lateral,
     slip_body_velocities,
     traction_limited_ground_speeds,
 )
@@ -26,6 +28,11 @@ class DiffDriveState(NamedTuple):
     vel_omega: jax.Array      #  [v, w]
     duty_cycle: jax.Array     # motor duty cycles in [-1, 1]
     wheel_speed_cmd: jax.Array  # desired wheel speed command for diagnostics
+    # Lateral body velocity (scalar). Always 0 for the nominal model; the learned
+    # residual (models.residual) can introduce chassis side-slip, and the next
+    # step's residual features condition on it. Kept separate from vel_omega so
+    # the logged [v, omega] shape stays backward compatible.
+    vel_lateral: jax.Array
 
 
 class DiffDrive:
@@ -88,6 +95,8 @@ class DiffDrive:
         slip_sigma=None,
         slip_tau=None,
         dt=None,
+        residual_model=None,
+        wheel_speed_cmd=None,
     ):
         duty_cycle = np.array(duty_cycle, dtype=np.float32)
         r, L, max_speed, tau, a_slip_max, b_backlash, slip_sigma, slip_tau = self._resolve_params(
@@ -122,8 +131,25 @@ class DiffDrive:
         # 6) Body velocities (effective wheelbase, ideal differential-drive kinematics)
         v, w = slip_body_velocities(effective_wheel_speeds, r, L)
 
-        # 7) Pose integration
-        next_pose = integrate_planar_pose(state.pose, v, w, dt)
+        # 7) Optional learned state-action residual on the body twist (see
+        #    models.residual): conditioned on the *current* body twist (so the
+        #    model knows whether the robot is already slipping) and the current
+        #    actuation. The correction may include a lateral component that the
+        #    ideal kinematics exclude. The logged vel_omega stays [v_x_body, omega].
+        logged_wheel_speed_cmd = target_wheel_speeds if wheel_speed_cmd is None else wheel_speed_cmd
+        if residual_model is not None:
+            features = residual_features(
+                np.array([state.vel_omega[0], state.vel_lateral, state.vel_omega[1]]),
+                next_wheel_speeds,
+                duty_cycle,
+            )
+            v, v_y, w = residual_corrected_twist(residual_model, features, v, w)
+            next_pose = integrate_planar_pose_lateral(state.pose, v, v_y, w, dt)
+            next_vel_lateral = np.asarray(v_y, dtype=np.float32)
+        else:
+            # 8) Pose integration
+            next_pose = integrate_planar_pose(state.pose, v, w, dt)
+            next_vel_lateral = np.zeros((), dtype=np.float32)
 
         next_vel_omega = np.array([v, w])
 
@@ -136,7 +162,8 @@ class DiffDrive:
             next_gap_offset,
             next_vel_omega,
             duty_cycle,
-            target_wheel_speeds,
+            logged_wheel_speed_cmd,
+            next_vel_lateral,
         )
 
     def step_kinematic(
@@ -186,6 +213,7 @@ class DiffDrive:
             next_vel_omega,
             duty_cycle,
             wheel_speed_cmd,
+            np.zeros((), dtype=np.float32),
         )
 
     # getters
@@ -201,6 +229,7 @@ class DiffDrive:
             vel_omega=np.array((0.0, 0.0), dtype=np.float32),
             duty_cycle=np.array((0.0, 0.0), dtype=np.float32),
             wheel_speed_cmd=np.array((0.0, 0.0), dtype=np.float32),
+            vel_lateral=np.zeros((), dtype=np.float32),
         )
 
     @staticmethod
