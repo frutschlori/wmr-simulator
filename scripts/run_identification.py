@@ -28,6 +28,10 @@ def print_param_block(label: str, params: PhysicalParams, signed: bool = False, 
 
     print(f"  max_wheel_speed = {float(params.max_wheel_speed):{value_format}} rad/s")
     print(f"  time_constant  = {float(params.time_constant):{".3f"}} s")
+    print(f"  a_slip_max (traction limit) = {float(params.a_slip_max):{value_format}} m/s^2")
+    print(f"  b_backlash (gear play) = {np.degrees(float(params.b_backlash)):{value_format}} deg")
+    print(f"  slip_sigma (AR1 std, cfg) = {100.0 * float(params.slip_sigma):{value_format}} %")
+    print(f"  slip_tau (AR1 corr., cfg) = {float(params.slip_tau):{".3f"}} s")
 
 
 def main():
@@ -44,6 +48,13 @@ def main():
     parser.add_argument("--init-base-diameter", type=float, default=0.1)
     parser.add_argument("--init-max-wheel-speed", type=float, default=300.0)
     parser.add_argument("--init-time-constant", type=float, default=0.3)
+    # Slip model init (a_slip_max/b_backlash are gradient-identified; a zero init
+    # keeps the respective component disabled. sigma/tau are carried through fixed --
+    # fit them from residuals via wmr_simulator.slip.fit_ar1_moments)
+    parser.add_argument("--init-a-slip-max", type=float, default=0.0)
+    parser.add_argument("--init-b-backlash", type=float, default=0.0)
+    parser.add_argument("--init-slip-sigma", type=float, default=0.0)
+    parser.add_argument("--init-slip-tau", type=float, default=0.0)
     parser.add_argument("--seed", type=int, default=2)
     # Optionally load target trajectory from disk
     parser.add_argument("--reference-trajectories-dir", type=str, default="trajectory_exports")
@@ -56,6 +67,10 @@ def main():
         base_diameter=jnp.asarray(args.init_base_diameter),
         max_wheel_speed=jnp.asarray(args.init_max_wheel_speed),
         time_constant=jnp.asarray(args.init_time_constant),
+        a_slip_max=jnp.asarray(args.init_a_slip_max),
+        b_backlash=jnp.asarray(args.init_b_backlash),
+        slip_sigma=jnp.asarray(args.init_slip_sigma),
+        slip_tau=jnp.asarray(args.init_slip_tau),
     )
 
     result = run_single_experiment_identification(
@@ -79,13 +94,18 @@ def main():
             bootstrap["parameter_mean"] - physical_params_to_array(pipeline.hidden_params)
         )
         covariance = np.asarray(bootstrap["parameter_covariance"], dtype=float)
-        covariance_scales = np.asarray([1000.0, 1000.0, 1.0, 1.0], dtype=float)
+        # mm-scale for lengths, native units otherwise (order matches physical_params_to_array)
+        covariance_scales = np.asarray([1000.0, 1000.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0], dtype=float)
         covariance_scaled = covariance * np.outer(covariance_scales, covariance_scales)
         std_params = PhysicalParams(
             wheel_radius=jnp.asarray(np.sqrt(covariance_scaled[0, 0]) / 1000.0),
             base_diameter=jnp.asarray(np.sqrt(covariance_scaled[1, 1]) / 1000.0),
             max_wheel_speed=jnp.asarray(np.sqrt(covariance_scaled[2, 2])),
             time_constant=jnp.asarray(np.sqrt(covariance_scaled[3, 3])),
+            a_slip_max=jnp.asarray(np.sqrt(covariance_scaled[4, 4])),
+            b_backlash=jnp.asarray(np.sqrt(covariance_scaled[5, 5])),
+            slip_sigma=jnp.asarray(np.sqrt(covariance_scaled[6, 6])),
+            slip_tau=jnp.asarray(np.sqrt(covariance_scaled[7, 7])),
         )
         print()
         print(f"Bootstrap samples: {args.bootstrap_samples}")
@@ -98,6 +118,9 @@ def main():
     else:
         print()
         print_param_block("Estimated parameters:", result["estimated_params"])
+        # Note: base_diameter is the *effective* wheelbase (tire scrub in turns is
+        # absorbed into it; Borenstein & Feng 1996, E_b) -- it may legitimately differ
+        # from the geometric wheelbase.
         print()
         print(f"Final normalized geometry loss: {result['loss_history'][-1]:.8f}")
         print(f"Final normalized motor loss:    {result['motor_loss_history'][-1]:.8f}")

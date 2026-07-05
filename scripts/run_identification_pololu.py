@@ -6,6 +6,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from wmr_simulator.identification.pipeline import run_single_experiment_identification
+from wmr_simulator.identification.slip_noise import estimate_slip_noise_from_log
 from wmr_simulator.pololu import load_pololu_traj_control_log
 from wmr_simulator.types import (
     PhysicalParams,
@@ -21,9 +22,17 @@ def print_param_block(label: str, params: PhysicalParams):
     values = np.asarray(physical_params_to_array(params), dtype=float)
     print(label)
     print(f"  wheel_radius    = {1000.0 * values[0]:.2f} mm")
-    print(f"  base_diameter   = {1000.0 * values[1]:.2f} mm")
+    # base_diameter is the *effective* wheelbase: tire scrub in turns is absorbed
+    # into it (Borenstein & Feng 1996, E_b), so it may differ from the geometric one.
+    print(f"  base_diameter   = {1000.0 * values[1]:.2f} mm (effective wheelbase)")
     print(f"  max_wheel_speed = {values[2]:.2f} rad/s")
     print(f"  time_constant   = {values[3]:.4f} s")
+    # Slip model (see src/wmr_simulator/slip.py): a_slip_max and b_backlash are
+    # gradient-fitted; sigma/tau are noise params, fitted from residuals below.
+    print(f"  a_slip_max (traction limit, fitted) = {values[4]:.3f} m/s^2")
+    print(f"  b_backlash (gear play, fitted) = {np.degrees(values[5]):.3f} deg")
+    print(f"  slip_sigma (not gradient-fitted, see AR(1) residual fit) = {100.0 * values[6]:.3f} %")
+    print(f"  slip_tau   (not gradient-fitted, see AR(1) residual fit) = {values[7]:.4f} s")
 
 
 def main():
@@ -31,7 +40,7 @@ def main():
     # Problem configuration (contains robot configuration and optimization defaults)
     parser.add_argument("--problem", type=str, default="problems/pololu.yaml")
     # Optimization hyper-parameters
-    parser.add_argument("--window-length", type=int, default=100)
+    parser.add_argument("--window-length", type=int, default=None)
     parser.add_argument("--steps", type=int, default=2000)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     # Initial guess robot parameters
@@ -39,11 +48,22 @@ def main():
     parser.add_argument("--init-base-diameter", type=float, default=0.1)
     parser.add_argument("--init-max-wheel-speed", type=float, default=300.0)
     parser.add_argument("--init-time-constant", type=float, default=0.3)
+    # Traction limit init (m/s^2, ~ mu*g). Must be positive to be identified; a zero
+    # init keeps the limit disabled (0 * exp(theta) = 0 in the log-space optimizer).
+    parser.add_argument("--init-a-slip-max", type=float, default=5.0)
+    # Gear play half-width init (rad at the wheel output; ~2 deg = 0.035). Must be
+    # positive to be identified; a zero init keeps backlash disabled.
+    parser.add_argument("--init-b-backlash", type=float, default=0.035)
 
     # Path to real experiment log
     parser.add_argument("--pololu-log", type=str,
-                        default="Pololu Data/Experiments/2026_07_01/TR07")
+                        default="Pololu Data/Experiments/2026_07_01/TR03.csv")
     parser.add_argument("--clip-after-first-trajectory", action="store_true", default=True)
+    # Zero-phase moving-average window (seconds) applied to the mocap positions in the
+    # log loader; 0 disables. Mitigates differentiation noise in the slip-noise fit.
+    parser.add_argument("--mocap-filter-window", type=float, default=0.0)
+    # Minimum encoder wheel speed (rad/s) for slip residual samples.
+    parser.add_argument("--slip-fit-min-wheel-speed", type=float, default=5.0)
     args = parser.parse_args()
 
     init_params = PhysicalParams(
@@ -51,11 +71,14 @@ def main():
         base_diameter=jnp.asarray(args.init_base_diameter),
         max_wheel_speed=jnp.asarray(args.init_max_wheel_speed),
         time_constant=jnp.asarray(args.init_time_constant),
+        a_slip_max=jnp.asarray(args.init_a_slip_max),
+        b_backlash=jnp.asarray(args.init_b_backlash),
     )
 
     pololu_log = load_pololu_traj_control_log(
         args.pololu_log,
         clip_after_first_trajectory=args.clip_after_first_trajectory,
+        mocap_filter_window_s=args.mocap_filter_window,
     )
 
     result = run_single_experiment_identification(
@@ -75,6 +98,25 @@ def main():
     print()
     print(f"Final normalized geometry loss: {result['loss_history'][-1]:.8f}")
     print(f"Final normalized motor loss:    {result['motor_loss_history'][-1]:.8f}")
+
+    # Fit the AR(1) slip noise parameters from the fractional wheel-slip residual
+    # (mocap-vs-encoder, see wmr_simulator.identification.slip_noise). These cannot be
+    # gradient-identified; this moment fit is where sigma/tau come from.
+    slip_fit = estimate_slip_noise_from_log(
+        pipeline.target_log,
+        result["estimated_params"],
+        min_wheel_speed=args.slip_fit_min_wheel_speed,
+    )
+    print()
+    print("Fitted AR(1) slip noise from log residuals (moment matching):")
+    print(f"  right wheel: sigma = {100.0 * slip_fit['sigma_r']:.3f} %, tau = {slip_fit['tau_r']:.4f} s "
+          f"({slip_fit['num_samples_r']} samples)")
+    print(f"  left wheel:  sigma = {100.0 * slip_fit['sigma_l']:.3f} %, tau = {slip_fit['tau_l']:.4f} s "
+          f"({slip_fit['num_samples_l']} samples)")
+    print(f"  averaged ->  slip_sigma: {slip_fit['sigma']:.4f}, slip_tau: {slip_fit['tau']:.4f}  (YAML robot block values)")
+    if args.mocap_filter_window <= 0.0:
+        print("  note: mocap positions unfiltered; differentiation noise inflates sigma and biases tau low."
+              " Consider --mocap-filter-window (e.g. 0.05).")
 
     out_prefix = "identification_log_{name}".format(name=args.pololu_log[-4:])
     plot_system_id(

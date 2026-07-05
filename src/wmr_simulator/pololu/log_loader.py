@@ -45,7 +45,50 @@ POLOLU_TRAJ_CONTROL_COLUMNS = (
 )
 
 
-def load_pololu_traj_control_log(path: str | Path, *, clip_after_first_trajectory: bool = False) -> SimulationLog:
+def zero_phase_moving_average(values: np.ndarray, window_samples: int) -> np.ndarray:
+    """Centered moving average with no phase delay.
+
+    Uses a symmetric window around each sample ('same' convolution) and
+    normalizes by the actual number of contributing samples, so the edges are
+    unbiased and the filter introduces no time shift.
+    """
+    if window_samples <= 1:
+        return values
+    kernel = np.ones(int(window_samples), dtype=float)
+    counts = np.convolve(np.ones(len(values), dtype=float), kernel, mode="same")
+    if values.ndim == 1:
+        return (np.convolve(values.astype(float), kernel, mode="same") / counts).astype(values.dtype)
+    filtered = [
+        np.convolve(values[:, i].astype(float), kernel, mode="same") / counts
+        for i in range(values.shape[1])
+    ]
+    return np.column_stack(filtered).astype(values.dtype)
+
+
+def _filter_mocap_poses(pose_time_s: np.ndarray, pose_states: np.ndarray, window_s: float) -> np.ndarray:
+    """Zero-phase moving average on mocap poses; yaw is filtered unwrapped."""
+    if window_s <= 0.0 or len(pose_time_s) < 3:
+        return pose_states
+    median_dt = float(np.median(np.diff(pose_time_s)))
+    if median_dt <= 0.0:
+        return pose_states
+    window_samples = max(int(round(window_s / median_dt)), 1)
+    window_samples += 1 - window_samples % 2  # force odd for a symmetric window
+    if window_samples <= 1:
+        return pose_states
+    xy = zero_phase_moving_average(pose_states[:, :2], window_samples)
+    yaw_unwrapped = np.unwrap(pose_states[:, 2].astype(float))
+    yaw = zero_phase_moving_average(yaw_unwrapped, window_samples)
+    yaw = (yaw + np.pi) % (2.0 * np.pi) - np.pi
+    return np.column_stack([xy, yaw]).astype(pose_states.dtype)
+
+
+def load_pololu_traj_control_log(
+    path: str | Path,
+    *,
+    clip_after_first_trajectory: bool = False,
+    mocap_filter_window_s: float = 0.0,
+) -> SimulationLog:
     columns, data = _read_csv(Path(path))
     if tuple(columns) != POLOLU_TRAJ_CONTROL_COLUMNS:
         raise ValueError(f"Unexpected columns in {path}: {tuple(columns)}")
@@ -67,6 +110,7 @@ def load_pololu_traj_control_log(path: str | Path, *, clip_after_first_trajector
         ("x_des", "y_des", "yaw_des", "v_ff", "w_ff"),
     )
     pose_time, pose_states = _sparse_stream(columns, data, ("x_raw", "y_raw", "yaw_raw"))
+    pose_states = _filter_mocap_poses(pose_time, pose_states, mocap_filter_window_s)
     wheel_time, wheel_speeds = _sparse_stream(
         columns,
         data,
@@ -256,6 +300,8 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=str, default=None, help="Output filename prefix")
     parser.add_argument("--out-dir", type=str, default="visualize")
     parser.add_argument("--clip-after-first-trajectory", default=True, action="store_true")
+    # Zero-phase moving-average window (seconds) on the mocap positions; 0 disables.
+    parser.add_argument("--mocap-filter-window", type=float, default=0.0)
     args = parser.parse_args()
 
     log_path = Path(args.log)
@@ -265,6 +311,7 @@ if __name__ == "__main__":
             log = load_pololu_traj_control_log(
                 path,
                 clip_after_first_trajectory=args.clip_after_first_trajectory,
+                mocap_filter_window_s=args.mocap_filter_window,
             )
             print_log_summary(path, log)
             out_prefix = f"{args.output}_{path.stem}" if args.output is not None else f"pololu_{path.stem}"
@@ -274,6 +321,7 @@ if __name__ == "__main__":
     log = load_pololu_traj_control_log(
         log_path,
         clip_after_first_trajectory=args.clip_after_first_trajectory,
+        mocap_filter_window_s=args.mocap_filter_window,
     )
     print_log_summary(log_path, log)
     out_prefix = args.output if args.output is not None else f"pololu_{log_path.stem}"

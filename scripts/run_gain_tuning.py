@@ -19,10 +19,12 @@ def print_loss_breakdown(label: str, component_history: dict[str, list[float]] |
     final_terms = {name: float(values[-1]) for name, values in component_history.items()}
     total = sum(final_terms.values())
     print(label)
-    for name in ("tracking", "velocity_tracking", "input", "input_delta"):
+    for name in ("tracking", "velocity_tracking", "input", "input_delta", "gain_delta"):
+        if name not in final_terms:
+            continue
         value = final_terms[name]
         share = 100.0 * value / total if total > 0.0 else 0.0
-        print(f"  {name:<11}: {value:.8f} ({share:.2f}%)")
+        print(f"  {name:<16}: {value:.8f} ({share:.2f}%)")
 
 
 def main():
@@ -38,17 +40,20 @@ def main():
     parser.add_argument("--num-realizations", type=int, default=16) # noise realizations over 1 trajectory
     parser.add_argument("--seed", type=int, default=2)
     # Loss weights
-    parser.add_argument("--velocity-tracking-weight", type=float, default=0.05)
+    parser.add_argument("--velocity-tracking-weight", type=float, default=1)
     parser.add_argument("--input-weight", type=float, default=0.0)
     parser.add_argument("--input-delta-weight", type=float, default=0.1)
     # Gain bounds
     parser.add_argument("--k-min-stab", type=float, default=1e-3)
-    parser.add_argument("--k-max-stab", type=float, default=20.0)
-    parser.add_argument("--k-max-rest", type=float, default=100.0)
+    parser.add_argument("--k-max-stab", type=float, default=30.0)
+    parser.add_argument("--k-max-rest", type=float, default=30.0)
     # Optional overwrite of robot model parameters
     parser.add_argument("--fixed-wheel-radius", type=float, default=None)
     parser.add_argument("--fixed-base-diameter", type=float, default=None)
     parser.add_argument("--num-summary-training-trajectories", type=int, default=None)
+    # Gain schedule: jointly tune base gains + outer-gain schedule (W), default follows problem yaml, --no-gain-schedule forces W=0 (static)
+    parser.add_argument("--gain-schedule", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--gain-delta-weight", type=float, default=0.0)
     args = parser.parse_args()
 
     robot_params = resolve_gain_robot_params(args.problem, args.fixed_wheel_radius, args.fixed_base_diameter)
@@ -69,6 +74,8 @@ def main():
         k_max_rest=args.k_max_rest,
         num_lhs_points=args.num_lhs_points,
         num_adam_optimizations=args.num_adam_optimizations,
+        schedule_enabled=args.gain_schedule,
+        gain_delta_weight=args.gain_delta_weight,
     )
     pipeline = result["pipeline"]
     print_physical_params("Robot parameters used for gain tuning:", robot_params)
@@ -88,6 +95,17 @@ def main():
     if result["validation_loss_history"] is not None:
         print(f"Final validation loss: {result['validation_loss_history'][-1]:.8f}")
         print_loss_breakdown("Final validation loss components:", result["validation_loss_component_history"])
+
+    print(f"Gain schedule enabled: {result['schedule_enabled']}")
+    if result.get("schedule_params") is not None:
+        import numpy as _np
+        schedule_params = result["schedule_params"]
+        print(f"Gain delta weight: {args.gain_delta_weight:.8g}")
+        print("Scheduled indices:", list(map(int, schedule_params.scheduled_indices)))
+        print("Feature scale [v_max, omega_max]:", list(map(float, pipeline.gain_schedule_feature_scale)))
+        print("rho:", _np.array2string(_np.asarray(schedule_params.rho), precision=5))
+        print("W (rows = scheduled gains, cols = [v_d, |omega_d|]):")
+        print(_np.array2string(_np.asarray(schedule_params.W), precision=5))
 
     plot_gain_tuning_summary(
         pipeline,

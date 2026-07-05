@@ -15,20 +15,37 @@ planner:
 controller:
   # Motor gains are dimensionless here, but in duty / (rad/s) in pololu firmware -> divide gains by motor gain for conversion
   # gains: [5.0, 5.0, 3.5, 5.0, 0.0, 0.0] # [kx, ky, kth, kpmotor, kimotor, kdmotor]
-  # gains: [4.5, 6.0, 12.0, 2.5, 5.0, 0.0] # stock pololu firmware gains
-  gains: [5.0, 5.0, 3.0, 0.4, 0.2, 0.0] # stock wmr simulator gains
+  gains: [4.5, 6.0, 12.0, 2.5, 5.0, 0.0] # stock pololu firmware gains
+  # gains: [5.0, 5.0, 3.0, 0.4, 0.2, 0.0] # stock wmr simulator gains
+
+  # Bounded multiplicative gain schedule for the outer tracking gains:
+  #   gain_i = base_i * (1 + rho_i * clip(W_i . z, -1, 1)),  z = [v_d/v_max, |omega_d|/omega_max]
+  # base_i are controller.gains[0:3]; W is trained jointly with the gains. W = 0
+  # reproduces the static controller exactly. feature_scale is auto-derived from the
+  # robot velocity limits (v_max, omega_max). --no-gain-schedule forces W = 0.
+  gain_schedule:
+    enabled: true
+    scheduled_indices: [0, 1, 2]      # kx, ky, kth
+    rho: [0.5, 0.5, 0.5]
+    W:                                # optional init (defaults to zeros = static baseline)
+      - [0.0, 0.0]
+      - [0.0, 0.0]
+      - [0.0, 0.0]
 robot:
   type: differential_drive
   wheel_radius: 0.01637   # m
-  base_diameter: 0.08525 # m
+  base_diameter: 0.08525 # m, *effective* wheelbase (absorbs tire scrub in turns, Borenstein & Feng 1996; may differ from geometric)
   max_wheel_speed: 248.17  # rad/s
   time_constant:  0.2237  # time constant for first-order wheel dynamics (set to 0 for ideal actuation)
-  slip_r: 0.0          # std of fractional slip on ur (40%) [0 -> 1.0]
-  slip_l: 0.0          # std of fractional slip on ul (50%) [0 -> 1.0]
+  # Slip model (see sli.py module for formulas and references)
+  a_slip_max: 3.5     # traction limit ~ mu*g in m/s^2, 0 to disable (burnout model, Wong 2008)
+  b_backlash: 0.035   # gear play half-width at wheel output in rad (~2 deg), 0 disables (Nordin & Gutman 2002)
+  slip_sigma: 0.0     # stationary std of AR(1) fractional wheel slip (Gauss-Markov, Maybeck 1979)
+  slip_tau: 0.3       # correlation time of AR(1) wheel slip in s
   v_max: 2.0          # m/s
   a_max: 3.0         # m/s^2
-  a_max_lateral: 8.0 # m/s^2
-  omega_max: 10.0    # rad/s
+  a_max_lateral: 4.0 # m/s^2
+  omega_max: 5.0    # rad/s
   alpha_max: 5.0    # rad/s^2
 
 estimator:
