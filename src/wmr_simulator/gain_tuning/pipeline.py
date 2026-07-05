@@ -124,9 +124,11 @@ class ControllerTuningPipeline(SimulationPipeline):
         num_steps: int,
         learning_rate: float,
         num_realizations: int,
+        schedule_enabled: bool = False,
         velocity_tracking_weight: float = 0.0,
         input_weight: float = 0.0,
         input_delta_weight: float = 0.0,
+        gain_delta_weight: float = 0.0,
         k_min_stab: float = 1e-3,
         k_max_stab: float = 20.0,
         k_max_rest: float = 20.0,
@@ -139,9 +141,12 @@ class ControllerTuningPipeline(SimulationPipeline):
             num_steps=num_steps,
             learning_rate=learning_rate,
             num_realizations=num_realizations,
+            schedule_template=self.gain_schedule_params,
+            schedule_enabled=schedule_enabled,
             velocity_tracking_weight=velocity_tracking_weight,
             input_weight=input_weight,
             input_delta_weight=input_delta_weight,
+            gain_delta_weight=gain_delta_weight,
             k_min_stab=k_min_stab,
             k_max_stab=k_max_stab,
             k_max_rest=k_max_rest,
@@ -188,6 +193,8 @@ def run_gain_tuning_experiment(
     k_max_rest: float = 20.0,
     num_lhs_points: int = 0,
     num_adam_optimizations: int = 1,
+    schedule_enabled: bool | None = None,
+    gain_delta_weight: float = 0.0,
 ):
     pipeline = ControllerTuningPipeline(
         problem_path=problem_path,
@@ -196,10 +203,12 @@ def run_gain_tuning_experiment(
         reference_trajectories_dir=reference_trajectories_dir,
         validation_split=validation_split,
     )
+    schedule_enabled = pipeline.gain_schedule_enabled if schedule_enabled is None else bool(schedule_enabled)
     init_hidden_log = pipeline.run_closed_loop(robot_params, use_hidden_robot=True)
     init_model_log = pipeline.run_closed_loop(robot_params)
     (
         optimized_gains,
+        schedule_params,
         loss_history,
         validation_loss_history,
         loss_component_history,
@@ -209,9 +218,11 @@ def run_gain_tuning_experiment(
         num_steps=num_steps,
         learning_rate=learning_rate,
         num_realizations=num_realizations,
+        schedule_enabled=schedule_enabled,
         velocity_tracking_weight=velocity_tracking_weight,
         input_weight=input_weight,
         input_delta_weight=input_delta_weight,
+        gain_delta_weight=gain_delta_weight,
         k_min_stab=k_min_stab,
         k_max_stab=k_max_stab,
         k_max_rest=k_max_rest,
@@ -222,16 +233,20 @@ def run_gain_tuning_experiment(
         robot_params,
         use_hidden_robot=True,
         controller_gains=optimized_gains,
+        schedule_params=schedule_params,
     )
     final_model_log = pipeline.run_closed_loop(
         robot_params,
         controller_gains=optimized_gains,
+        schedule_params=schedule_params,
     )
     return {
         "pipeline": pipeline,
         "init_hidden_log": init_hidden_log,
         "init_model_log": init_model_log,
         "optimized_gains": optimized_gains,
+        "schedule_enabled": schedule_enabled,
+        "schedule_params": schedule_params,
         "loss_history": loss_history,
         "validation_loss_history": validation_loss_history,
         "loss_component_history": loss_component_history,

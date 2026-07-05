@@ -12,15 +12,37 @@ from wmr_simulator.types import (
 )
 
 
-def _params_from_log_relative(log_relative: jax.Array, scale_values: jax.Array) -> PhysicalParams:
-    # Optimize dimensionless log offsets: log_relative = log(params / initial_params).
-    # exp(log_relative) is always positive, so physical parameters stay positive without clipping.
-    values = scale_values * jnp.exp(log_relative)
+# Optimizer vector layout: 6 log-relative dims for the positive physical parameters
+# (r, L_effective, u_max, tau_motor, a_slip_max, b_backlash).
+# Notes:
+#   - base_diameter is the *effective* wheelbase; tire-scrub in turns is absorbed into
+#     it because a separate correction would be structurally non-identifiable
+#     (Borenstein & Feng 1996, E_b; see wmr_simulator.slip module docstring).
+#   - a_slip_max / b_backlash = init * exp(theta): a zero init keeps the component
+#     disabled (0 * exp(theta) = 0 with zero gradient) -- pass a positive init to
+#     identify it.
+#   - slip_sigma, slip_tau are NOT gradient-identified: noise parameters; a
+#     deterministic replay loss has zero sensitivity to them. Fit from residual
+#     statistics instead (wmr_simulator.slip.fit_ar1_moments). Carried from the init.
+_NUM_POSITIVE_DIMS = 6
+_NUM_OPTIMIZER_DIMS = 6
+
+
+def _params_from_optimizer_values(values: jax.Array, init_params: PhysicalParams) -> PhysicalParams:
+    # Log-relative for positive params: value = init * exp(theta) stays positive without clipping.
+    scale_values = physical_params_to_array(init_params)[..., :_NUM_POSITIVE_DIMS]
+    log_relative = values[..., :_NUM_POSITIVE_DIMS]
+    positive = scale_values * jnp.exp(log_relative)
+    fixed_shape = values[..., 0].shape
     return PhysicalParams(
-        wheel_radius=values[..., 0],
-        base_diameter=values[..., 1],
-        max_wheel_speed=values[..., 2],
-        time_constant=values[..., 3],
+        wheel_radius=positive[..., 0],
+        base_diameter=positive[..., 1],
+        max_wheel_speed=positive[..., 2],
+        time_constant=positive[..., 3],
+        a_slip_max=positive[..., 4],
+        b_backlash=positive[..., 5],
+        slip_sigma=jnp.broadcast_to(init_params.slip_sigma, fixed_shape),
+        slip_tau=jnp.broadcast_to(init_params.slip_tau, fixed_shape),
     )
 
 
@@ -35,15 +57,14 @@ def optimize_physical_params_adam(
     learning_rate: float,
 ):
     optimizer = optax.adam(learning_rate)
-    scale_values = physical_params_to_array(init_params)
-    current_log_relative = jnp.zeros(4, dtype=jnp.float32)
+    current_log_relative = jnp.zeros(_NUM_OPTIMIZER_DIMS, dtype=jnp.float32)
     opt_state = optimizer.init(current_log_relative)
 
     if num_steps <= 0:
         return init_params, [], [], []
 
-    def params_from_optimizer_values(log_relative):
-        return _params_from_log_relative(log_relative, scale_values)
+    def params_from_optimizer_values(values):
+        return _params_from_optimizer_values(values, init_params)
 
     def pose_loss_for_params(params):
         return pose_window_replay_mse(
@@ -116,7 +137,6 @@ def _make_bootstrap_batch_optimizer(
 ):
     optimizer = optax.adam(learning_rate)
     initial_params = init_params
-    scale_values = physical_params_to_array(initial_params)
     replay_segment_plan = pipeline.replay_segment_plan
 
     def make_target_log(robot_key, estimator_key):
@@ -129,8 +149,8 @@ def _make_bootstrap_batch_optimizer(
             wheel_speed_log_source=pipeline.replay_wheel_speed_source,
         )
 
-    def params_from_optimizer_values(log_relative):
-        return _params_from_log_relative(log_relative, scale_values)
+    def params_from_optimizer_values(values):
+        return _params_from_optimizer_values(values, initial_params)
 
     def pose_loss_one(
         log_relative,
@@ -173,7 +193,7 @@ def _make_bootstrap_batch_optimizer(
         target_estimator_keys: jax.Array,
     ):
         batch_size = target_robot_keys.shape[0]
-        current_log_relative = jnp.zeros((batch_size, 4), dtype=jnp.float32)
+        current_log_relative = jnp.zeros((batch_size, _NUM_OPTIMIZER_DIMS), dtype=jnp.float32)
         current_opt_state = optimizer.init(current_log_relative)
         target_logs = jax.vmap(make_target_log)(target_robot_keys, target_estimator_keys)
         pose_loss_scales = _loss_normalization_scale(
@@ -245,10 +265,10 @@ def bootstrap_identification_adam(
 
     if num_steps <= 0:
         estimated_params = PhysicalParams(
-            wheel_radius=jnp.full((bootstrap_samples,), initial_params.wheel_radius, dtype=jnp.float32),
-            base_diameter=jnp.full((bootstrap_samples,), initial_params.base_diameter, dtype=jnp.float32),
-            max_wheel_speed=jnp.full((bootstrap_samples,), initial_params.max_wheel_speed, dtype=jnp.float32),
-            time_constant=jnp.full((bootstrap_samples,), initial_params.time_constant, dtype=jnp.float32),
+            *(
+                jnp.full((bootstrap_samples,), value, dtype=jnp.float32)
+                for value in physical_params_to_array(initial_params)
+            )
         )
         parameter_samples = physical_params_to_array(estimated_params)
         parameter_mean, parameter_covariance = empirical_moments(parameter_samples)

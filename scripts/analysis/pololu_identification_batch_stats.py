@@ -28,6 +28,9 @@ PARAMETER_LABELS = (
     "Time constant [s]",
 )
 PARAMETER_SCALES = np.asarray([1000.0, 1000.0, 1.0, 1.0], dtype=float)
+# This batch report only covers the geometry + motor parameters (the leading entries
+# of physical_params_to_array); the slip parameters are excluded here.
+_NUM_REPORTED_PARAMS = len(PARAMETER_SCALES)
 
 
 def make_initial_params(args) -> PhysicalParams:
@@ -54,7 +57,8 @@ def estimate_log_params(args, log_path: Path, init_params: PhysicalParams) -> np
         window_length=args.window_length,
         target_log=target_log,
     )
-    return PARAMETER_SCALES * np.asarray(physical_params_to_array(result["estimated_params"]), dtype=float)
+    values = np.asarray(physical_params_to_array(result["estimated_params"]), dtype=float)
+    return PARAMETER_SCALES * values[:_NUM_REPORTED_PARAMS]
 
 
 def summarize_group(group_name: str, estimates: np.ndarray) -> dict[str, float | str | int]:

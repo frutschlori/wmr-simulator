@@ -8,6 +8,7 @@ import yaml
 
 from wmr_simulator.controller import Controller
 from wmr_simulator.estimator import DiffDriveEstimator
+from wmr_simulator.gain_schedule import apply_gain_schedule, gain_schedule_params_from_cfg
 from wmr_simulator.planner import compute_reference_trajectory
 from wmr_simulator.robot import DiffDrive, DiffDriveState
 from wmr_simulator.types import PhysicalParams, PoseLog, ReferenceLog, SimulationLog, WheelLog
@@ -81,8 +82,26 @@ class SimulationPipeline:
             base_diameter=jnp.asarray(self.robot_cfg["base_diameter"], dtype=jnp.float32),
             max_wheel_speed=jnp.asarray(self.robot_cfg["max_wheel_speed"], dtype=jnp.float32),
             time_constant=jnp.asarray(self.robot_cfg["time_constant"], dtype=jnp.float32),
+            a_slip_max=jnp.asarray(self.robot_cfg.get("a_slip_max", 0.0), dtype=jnp.float32),
+            b_backlash=jnp.asarray(self.robot_cfg.get("b_backlash", 0.0), dtype=jnp.float32),
+            slip_sigma=jnp.asarray(self.robot_cfg.get("slip_sigma", 0.0), dtype=jnp.float32),
+            slip_tau=jnp.asarray(self.robot_cfg.get("slip_tau", 0.0), dtype=jnp.float32),
         )
         self.gains = jnp.asarray(self.controller_cfg["gains"], dtype=jnp.float32)
+
+        gain_schedule_cfg = self.controller_cfg.get("gain_schedule")
+        self.gain_schedule_cfg = gain_schedule_cfg
+        self.gain_schedule_enabled = bool(gain_schedule_cfg.get("enabled", False)) if gain_schedule_cfg else False
+        # Feature scales are auto-derived from the robot velocity limits so that the
+        # normalized features z = [v_d/v_max, |omega_d|/omega_max] land in ~[0, 1].
+        v_max = float(self.robot_cfg.get("v_max", 1.0)) or 1.0
+        omega_max = float(self.robot_cfg.get("omega_max", 1.0)) or 1.0
+        self.v_max = v_max
+        self.omega_max = omega_max
+        self.gain_schedule_feature_scale = [v_max, omega_max]
+        self.gain_schedule_params = gain_schedule_params_from_cfg(
+            gain_schedule_cfg, self.gain_schedule_feature_scale
+        )
 
         master_key = jax.random.PRNGKey(seed)
         target_key, replay_key = jax.random.split(master_key, 2)
@@ -163,6 +182,7 @@ class SimulationPipeline:
         est_params: PhysicalParams | None = None,
         use_hidden_robot: bool = False,
         controller_gains=None,
+        schedule_params=None,
         robot_key=None,
         estimator_key=None,
         wheel_speed_log_source: str = "estimated",
@@ -176,13 +196,21 @@ class SimulationPipeline:
         reference_states = self.reference_states if reference_states is None else reference_states
         carry0 = self._init_states(robot_key, estimator_key, reference_states)
 
+        nominal_gains = self.gains if controller_gains is None else controller_gains
+
         def geometry_step(carry, ref_state):
             robot_state, estimator_state, controller_state, delayed_wheel_ref = carry
             pose_est = self.estimator.get_est_pose(estimator_state)
+            # Scheduling depends only on reference features and is computed once per
+            # geometry step; the scheduled 6-gain vector is reused by the inner loop.
+            if schedule_params is None:
+                step_gains = controller_gains
+            else:
+                step_gains = apply_gain_schedule(nominal_gains, schedule_params, ref_state)
             wheel_ref = self.controller.compute_wheel_reference(
                 ref_state,
                 pose_est,
-                gains=controller_gains,
+                gains=step_gains,
                 wheel_radius=robot_params.wheel_radius,
                 base_diameter=robot_params.base_diameter,
             )
@@ -195,7 +223,7 @@ class SimulationPipeline:
                     inner_controller_state,
                     applied_wheel_ref,
                     wheel_est,
-                    gains=controller_gains,
+                    gains=step_gains,
                     max_wheel_speed=robot_params.max_wheel_speed,
                 )
                 if use_hidden_robot:
@@ -208,6 +236,10 @@ class SimulationPipeline:
                         base_diameter=robot_params.base_diameter,
                         max_wheel_speed=robot_params.max_wheel_speed,
                         time_constant=robot_params.time_constant,
+                        a_slip_max=robot_params.a_slip_max,
+                        b_backlash=robot_params.b_backlash,
+                        slip_sigma=robot_params.slip_sigma,
+                        slip_tau=robot_params.slip_tau,
                         dt=self.wheel_dt,
                     )
                 next_estimator_state = self.estimator.update(
@@ -404,6 +436,9 @@ def replay_pose_states(
         pose=initial_pose,
         wheel_speeds=initial_wheel_speeds,
         key=robot_key,
+        slip_noise=jnp.zeros(2, dtype=jnp.float32),
+        ground_wheel_speeds=initial_wheel_speeds,
+        gear_gap_offset=robot_params.b_backlash * jnp.sign(initial_wheel_speeds),
         vel_omega=jnp.zeros(2, dtype=jnp.float32),
         duty_cycle=jnp.zeros(2, dtype=jnp.float32),
         wheel_speed_cmd=jnp.zeros(2, dtype=jnp.float32),
@@ -416,7 +451,16 @@ def replay_pose_states(
         dt, speed, duty, do_reset, reset_pose = inputs
 
         def reset_state(state):
-            return state._replace(pose=reset_pose, wheel_speeds=speed)
+            # Window reset: re-anchor pose, assume no slip, and assume the gear play is
+            # engaged on the flank matching the current direction of motion (a robot in
+            # steady motion drives through the gap; centered would bias the replay).
+            engaged_gap = robot_params.b_backlash * jnp.sign(speed)
+            return state._replace(
+                pose=reset_pose,
+                wheel_speeds=speed,
+                ground_wheel_speeds=speed,
+                gear_gap_offset=engaged_gap,
+            )
 
         carry = jax.lax.cond(do_reset, reset_state, lambda state: state, carry)
         next_state = robot.step_kinematic(
@@ -425,6 +469,8 @@ def replay_pose_states(
             duty,
             wheel_radius=robot_params.wheel_radius,
             base_diameter=robot_params.base_diameter,
+            a_slip_max=robot_params.a_slip_max,
+            b_backlash=robot_params.b_backlash,
             dt=dt,
         )
         return next_state, next_state.pose
