@@ -88,7 +88,15 @@ def load_pololu_traj_control_log(
     *,
     clip_after_first_trajectory: bool = False,
     mocap_filter_window_s: float = 0.0,
+    mocap_delay_s: float = 0.0,
 ) -> SimulationLog:
+    """Load one Pololu traj-control csv into a SimulationLog.
+
+    ``mocap_delay_s`` > 0 compensates the mocap transport latency (network +
+    radio/UART; see identification.mocap_delay): the pose logged at time t was
+    assumed at t - mocap_delay_s, so all mocap timestamps are shifted back by
+    that amount before use.
+    """
     columns, data = _read_csv(Path(path))
     if tuple(columns) != POLOLU_TRAJ_CONTROL_COLUMNS:
         raise ValueError(f"Unexpected columns in {path}: {tuple(columns)}")
@@ -110,6 +118,7 @@ def load_pololu_traj_control_log(
         ("x_des", "y_des", "yaw_des", "v_ff", "w_ff"),
     )
     pose_time, pose_states = _sparse_stream(columns, data, ("x_raw", "y_raw", "yaw_raw"))
+    pose_time = pose_time - np.float32(mocap_delay_s)
     pose_states = _filter_mocap_poses(pose_time, pose_states, mocap_filter_window_s)
     wheel_time, wheel_speeds = _sparse_stream(
         columns,

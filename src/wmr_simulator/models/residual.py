@@ -530,6 +530,7 @@ def train_from_logs(
     output_reg_weight: float = 1.0,
     clip_after_first_trajectory: bool = True,
     mocap_filter_window_s: float = 0.05,
+    mocap_delay_s: float = 0.0,
     resample_uniform: bool = True,
     out_dir: str = "visualize",
 ) -> ResidualDynamicsModel:
@@ -554,6 +555,7 @@ def train_from_logs(
             path,
             clip_after_first_trajectory=clip_after_first_trajectory,
             mocap_filter_window_s=mocap_filter_window_s,
+            mocap_delay_s=mocap_delay_s,
         )
         dataset = build_residual_dataset(log, params, resample_uniform=resample_uniform)
         datasets.append(dataset)
@@ -604,6 +606,7 @@ def train_from_logs(
         "train_files": train_files,
         "validation_files": validation_files,
         "mocap_filter_window_s": mocap_filter_window_s,
+        "mocap_delay_s": mocap_delay_s,
         "resample_uniform": resample_uniform,
         "epochs": epochs,
         "batch_size": batch_size,
@@ -764,6 +767,9 @@ def train_main(argv=None):
     # Zero-phase moving-average window (seconds) on mocap positions; mitigates
     # differentiation noise in the twist targets. 0 disables.
     parser.add_argument("--mocap-filter-window", type=float, default=0.1)
+    # Mocap transport latency (seconds); timestamps shifted back before
+    # differencing so twist targets align with the actions (identification/mocap_delay.py).
+    parser.add_argument("--mocap-delay", type=float, default=0.0)
     parser.add_argument("--out-dir", type=str, default="visualize")
     args = parser.parse_args(argv)
 
@@ -781,6 +787,7 @@ def train_main(argv=None):
         output_reg_weight=args.output_reg_weight,
         clip_after_first_trajectory=args.clip_after_first_trajectory,
         mocap_filter_window_s=args.mocap_filter_window,
+        mocap_delay_s=args.mocap_delay,
         resample_uniform=args.resample_uniform,
         out_dir=args.out_dir,
     )

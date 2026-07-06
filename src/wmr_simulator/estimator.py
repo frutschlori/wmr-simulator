@@ -10,6 +10,10 @@ class EstimatorState(NamedTuple):
     u_true: jax.Array
     P: jax.Array
     key: jax.Array
+    # Rolling buffer of the last `delay_steps` poses feeding the simulated mocap
+    # measurement (shape (delay_steps, 3), empty when mocap_delay is 0). Models
+    # the network + radio/UART transport latency of the real mocap stream.
+    pose_delay_buffer: jax.Array
 
 class DiffDriveEstimator:
     def __init__(self, estimator_cfg, dt):
@@ -39,6 +43,13 @@ class DiffDriveEstimator:
         self.proc_theta_std = float(estimator_cfg.get("proc_theta_std", 0.0))
         self.slip_r_var = (float(estimator_cfg.get("slip_r", 0.0)) ** 2) / 3
         self.slip_l_var = (float(estimator_cfg.get("slip_l", 0.0)) ** 2) / 3
+
+        # Mocap transport latency (network + radio/UART, seconds): the simulated
+        # pose measurement is served from a rolling buffer, so the controller
+        # sees poses that are mocap_delay old -- like on the real robot.
+        # Identified via identification.mocap_delay (IMU gyro cross-correlation).
+        self.mocap_delay = float(estimator_cfg.get("mocap_delay", 0.0))
+        self.delay_steps = int(round(self.mocap_delay / self.dt))
 
     # ------------------------------------------------------------------ #
     # Initialization utilities
@@ -75,7 +86,10 @@ class DiffDriveEstimator:
 
         self.I3 = np.eye(3)
 
-        return EstimatorState(pose_hat, pose_meas, u_hat, u_true, P, key)
+        # Delay buffer pre-filled with the start pose (robot at rest before t=0).
+        pose_delay_buffer = np.tile(pose_hat[None, :], (self.delay_steps, 1))
+
+        return EstimatorState(pose_hat, pose_meas, u_hat, u_true, P, key, pose_delay_buffer)
 
     # ------------------------------------------------------------------ #
     # Main update
@@ -85,6 +99,18 @@ class DiffDriveEstimator:
         r_est = self.r_est if wheel_radius is None else wheel_radius
         L_est = self.L_est if base_diameter is None else base_diameter
         return r_est, L_est
+
+    def _delayed_pose(self, pose_delay_buffer, current_pose):
+        """Push the current pose into the delay buffer, pop the delayed one.
+
+        With delay_steps == 0 the buffer stays empty and the pose passes
+        through undelayed (the shapes are static, so this stays scan-safe).
+        """
+        if self.delay_steps == 0:
+            return current_pose, pose_delay_buffer
+        delayed_pose = pose_delay_buffer[0]
+        pose_delay_buffer = np.concatenate([pose_delay_buffer[1:], current_pose[None, :]], axis=0)
+        return delayed_pose, pose_delay_buffer
 
     def update(self, est_state: EstimatorState, ur_true: float, ul_true: float, pose_true=None,
                wheel_radius=None, base_diameter=None, dt=None):
@@ -120,6 +146,8 @@ class DiffDriveEstimator:
         v_hat = 0.5 * r_est * (ur_hat + ul_hat)
         w_hat = (r_est / L_est) * (ur_hat - ul_hat)
 
+        pose_delay_buffer = est_state.pose_delay_buffer
+
         if self.filter_type == "dr":
             # ----- DEAD-RECKONING: simple integration + noisy measurement
             x_hat, y_hat, theta_hat = est_state.pose_hat
@@ -128,11 +156,13 @@ class DiffDriveEstimator:
             theta_hat = self._wrap_to_pi(theta_hat + w_hat * dt) # changed order to match robot model and EKF
             pose_hat = np.array([x_hat, y_hat, theta_hat])
 
-            # simulate one noisy pose measurement (mocap + IMU)
-            x_meas = x_hat + self.noise_pos * jax.random.normal(k_x_meas)
-            y_meas = y_hat + self.noise_pos * jax.random.normal(k_y_meas)
+            # simulate one noisy pose measurement (mocap + IMU), served with the
+            # mocap transport delay
+            delayed_pose, pose_delay_buffer = self._delayed_pose(pose_delay_buffer, pose_hat)
+            x_meas = delayed_pose[0] + self.noise_pos * jax.random.normal(k_x_meas)
+            y_meas = delayed_pose[1] + self.noise_pos * jax.random.normal(k_y_meas)
             th_meas = self._wrap_to_pi(
-                theta_hat + self.noise_angle * jax.random.normal(k_th_meas)
+                delayed_pose[2] + self.noise_angle * jax.random.normal(k_th_meas)
             )
             pose_meas = np.array([x_meas, y_meas, th_meas])
 
@@ -180,13 +210,17 @@ class DiffDriveEstimator:
 
             # ----- Measurement simulation (mocap + IMU) -----
             if pose_true is not None:
-                x_true, y_true, th_true = pose_true
+                # The mocap sample reaching the filter now was taken delay_steps
+                # ago (transport latency), exactly like on the real robot.
+                delayed_pose, pose_delay_buffer = self._delayed_pose(
+                    pose_delay_buffer, np.asarray(pose_true)
+                )
 
                 z = np.array([
-                    x_true + self.noise_pos * jax.random.normal(k_x_meas),
-                    y_true + self.noise_pos * jax.random.normal(k_y_meas),
+                    delayed_pose[0] + self.noise_pos * jax.random.normal(k_x_meas),
+                    delayed_pose[1] + self.noise_pos * jax.random.normal(k_y_meas),
                     self._wrap_to_pi(
-                        th_true + self.noise_angle * jax.random.normal(k_th_meas)
+                        delayed_pose[2] + self.noise_angle * jax.random.normal(k_th_meas)
                     ),
                 ])
                 pose_meas = z.copy()
@@ -220,7 +254,7 @@ class DiffDriveEstimator:
         else:
             raise ValueError(f"Unknown filter_type: {self.filter_type}")
 
-        return EstimatorState(pose_hat, pose_meas, u_hat, u_true, P, key)
+        return EstimatorState(pose_hat, pose_meas, u_hat, u_true, P, key, pose_delay_buffer)
 
     # ------------------------------------------------------------------ #
     # Outputs to controller

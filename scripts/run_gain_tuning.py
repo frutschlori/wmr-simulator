@@ -52,7 +52,7 @@ def main():
     parser.add_argument("--fixed-base-diameter", type=float, default=None)
     parser.add_argument("--num-summary-training-trajectories", type=int, default=None)
     # Gain schedule: jointly tune base gains + outer-gain schedule (W), default follows problem yaml, --no-gain-schedule forces W=0 (static)
-    parser.add_argument("--gain-schedule", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--gain-schedule", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--gain-delta-weight", type=float, default=0.0)
     # Learned residual dynamics checkpoint (scripts/train_residual_model.py); tuning
     # then rolls out the residual-augmented dynamics (model params stay fixed).

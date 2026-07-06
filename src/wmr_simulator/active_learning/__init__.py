@@ -1,14 +1,18 @@
 __all__ = [
-    "optimize_informative_trajectory",
-    "run_active_learning_iteration",
-    "run_sequential_pipeline",
-    "run_si_then_gain_tuning",
+    "Experiment",
+    "stages",
 ]
 
 
 def __getattr__(name):
-    if name in __all__:
-        from wmr_simulator.active_learning import sequential_pipeline
+    if name == "Experiment":
+        from wmr_simulator.active_learning.experiment import Experiment
 
-        return getattr(sequential_pipeline, name)
+        return Experiment
+    if name == "stages":
+        # importlib avoids recursing into this __getattr__ (the attribute name
+        # equals the submodule name).
+        import importlib
+
+        return importlib.import_module("wmr_simulator.active_learning.stages")
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

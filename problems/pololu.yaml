@@ -18,6 +18,7 @@ controller:
   # gains: [5.0, 5.0, 3.5, 2.0, 5.0, 1.0] # [kx, ky, kth, kpmotor, kimotor, kdmotor]
   gains: [5.0, 5.0, 3.0, 0.4, 0.2, 0.0] # [kx, ky, kth, kpmotor, kimotor, kdmotor]
   # gains: [5.0, 5.0, 3.0, 0.1, 5.0, 0.0] # [kx, ky, kth, kpmotor, kimotor, kdmotor]
+noise_enabled: true # false zeroes slip_sigma/slip_tau and estimator measurement noise everywhere (sim, gain tuning, traj-opt FIM)
 robot:
   type: differential_drive
   wheel_radius: 0.01637   # m
@@ -36,6 +37,7 @@ robot:
   alpha_max: 10.0     # rad/s^2
 
 estimator:
+  mocap_delay: 0.0        # mocap transport latency [s] (network+radio/UART); controller sees poses this old. Identify via identification/mocap_delay.py
   type: "kf"              # estimator type: "kf" (Kalman Filter) or "dr" (Dead Reckoning)
   wheel_radius: 0.016     # estimator's wheel_radius [m]
   base_diameter: 0.0842   # estimator's base_diameter [m]
