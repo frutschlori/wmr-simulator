@@ -3,6 +3,7 @@ __all__ = [
     "ProblemDefinition",
     "TrajectoryOptimizationPipeline",
     "compute_bezier_reference",
+    "generate_baseline_reference",
 ]
 
 
@@ -11,6 +12,10 @@ def __getattr__(name):
         from wmr_simulator.trajectory_optimization import bezier
 
         return getattr(bezier, name)
+    if name == "generate_baseline_reference":
+        from wmr_simulator.trajectory_optimization import baselines
+
+        return baselines.generate_baseline_reference
     if name in {"ProblemDefinition", "TrajectoryOptimizationPipeline"}:
         from wmr_simulator.trajectory_optimization import pipeline
 
