@@ -93,7 +93,8 @@ def report_motion(reference_states: np.ndarray, dt: float, robot_cfg: dict) -> N
 def main():
     parser = argparse.ArgumentParser(description="Generate a baseline reference trajectory.")
     parser.add_argument("--problem", default="problems/pololu_gains.yaml")
-    parser.add_argument("--type", choices=list(BASELINE_TYPES), default="circle")
+    # BASELINE_TYPES = ("circle", "lemniscate", "lemniscate-ramp", "spin")
+    parser.add_argument("--type", choices=list(BASELINE_TYPES), default="lemniscate-ramp")
     parser.add_argument("--export-dir", default="trajectory_exports/baselines")
     parser.add_argument("--name", default=None, help="Export stem (default: baseline_<type>_<timestamp>).")
     # Shared parameters
