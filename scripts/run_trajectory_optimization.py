@@ -40,11 +40,11 @@ def main():
                         default="gain-tuning")
     # Settings for multiple trajectory synthesis
     parser.add_argument("--num-trajectories", type=int, default=20)
-    parser.add_argument("--constraint-weight-jitter", type=float, default=0.5) # factor for diverse constraints
+    parser.add_argument("--constraint-weight-jitter", type=float, default=0.2) # factor for diverse constraints
     parser.add_argument("--vectorize-trajectories", action="store_true", default=True)
     # Path settings
     parser.add_argument("--time-scaling", choices=["s-curve", "linear"], default="s-curve")
-    parser.add_argument("--bezier-order", type=int, default=15)
+    parser.add_argument("--bezier-order", type=int, default=10)
     parser.add_argument("--trajectory-seed", type=int, default=0)
     # Constraints
     parser.add_argument("--constraint-weight", type=float, default=1.0)

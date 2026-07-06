@@ -4,7 +4,12 @@ os.environ["JAX_PLATFORMS"] = "cpu"
 
 import jax.numpy as jnp
 import numpy as np
+import yaml
 
+from wmr_simulator.identification.mocap_delay import (
+    estimate_mocap_delay_from_log_file,
+    print_delay_result,
+)
 from wmr_simulator.identification.pipeline import run_single_experiment_identification
 from wmr_simulator.identification.slip_noise import estimate_slip_noise_from_log
 from wmr_simulator.pololu import load_pololu_traj_control_log
@@ -64,6 +69,13 @@ def main():
     parser.add_argument("--mocap-filter-window", type=float, default=0.0)
     # Minimum encoder wheel speed (rad/s) for slip residual samples.
     parser.add_argument("--slip-fit-min-wheel-speed", type=float, default=5.0)
+    # Mocap transport latency (seconds); mocap timestamps are shifted back by this
+    # before identification. Default: estimator.mocap_delay from the problem yaml.
+    parser.add_argument("--mocap-delay", type=float, default=None)
+    # Estimate the delay from the log first (mocap yaw rate vs IMU gyro z
+    # cross-correlation, see identification/mocap_delay.py) and use the estimate.
+    parser.add_argument("--estimate-mocap-delay", action="store_true", default=False)
+    parser.add_argument("--mocap-delay-search-range", type=float, default=0.2)
     args = parser.parse_args()
 
     init_params = PhysicalParams(
@@ -75,10 +87,31 @@ def main():
         b_backlash=jnp.asarray(args.init_b_backlash),
     )
 
+    mocap_delay = args.mocap_delay
+    mocap_delay_source = "--mocap-delay"
+    if mocap_delay is None:
+        with open(args.problem, "r", encoding="utf-8") as file:
+            mocap_delay = float(yaml.safe_load(file).get("estimator", {}).get("mocap_delay", 0.0))
+        mocap_delay_source = "problem yaml"
+    if args.estimate_mocap_delay:
+        try:
+            delay_result = estimate_mocap_delay_from_log_file(
+                args.pololu_log,
+                max_delay_s=args.mocap_delay_search_range,
+                mocap_filter_window_s=args.mocap_filter_window,
+            )
+            print_delay_result(delay_result)
+            mocap_delay = delay_result["delay_s"]
+            mocap_delay_source = "estimated from log"
+        except ValueError as error:
+            print(f"Mocap delay estimation skipped: {error}")
+    print(f"Mocap delay compensation: {1000.0 * mocap_delay:.2f} ms ({mocap_delay_source})")
+
     pololu_log = load_pololu_traj_control_log(
         args.pololu_log,
         clip_after_first_trajectory=args.clip_after_first_trajectory,
         mocap_filter_window_s=args.mocap_filter_window,
+        mocap_delay_s=mocap_delay,
     )
 
     result = run_single_experiment_identification(

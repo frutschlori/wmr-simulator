@@ -208,6 +208,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cost", type=float, default=100.0)
     parser.add_argument("--time-stamp", type=float, default=0.0)
     parser.add_argument("--decimals", type=int, default=6)
+    # Every exported JSN also gets a repeatable variant (<name>_bridge.JSN, same
+    # directory) that waits at the goal and bridges back to the start pose; see
+    # pololu.bridge_exporter.
+    parser.add_argument("--bridge-wait-time", type=float, default=2.0)
+    parser.add_argument("--bridge-time", type=float, default=10.0)
     args = parser.parse_args(argv)
 
     if args.all and args.output_name is not None:
@@ -222,20 +227,34 @@ def main(argv: list[str] | None = None) -> int:
             time_stamp=args.time_stamp,
             decimals=args.decimals,
         )
-        for output_path in output_paths:
-            print(output_path)
-        return 0
+    else:
+        output_paths = [
+            export_latest_reference(
+                args.input_dir,
+                args.output_dir,
+                output_name=args.output_name,
+                recursive=args.recursive,
+                cost=args.cost,
+                time_stamp=args.time_stamp,
+                decimals=args.decimals,
+            )
+        ]
+    for output_path in output_paths:
+        print(output_path)
 
-    output_path = export_latest_reference(
-        args.input_dir,
-        args.output_dir,
-        output_name=args.output_name,
-        recursive=args.recursive,
-        cost=args.cost,
-        time_stamp=args.time_stamp,
-        decimals=args.decimals,
-    )
-    print(output_path)
+    from wmr_simulator.pololu.bridge_exporter import append_bridge_reference, bridged_output_path
+
+    for output_path in output_paths:
+        bridged_path = append_bridge_reference(
+            output_path,
+            wait_time=args.bridge_wait_time,
+            bridge_time=args.bridge_time,
+            cost=args.cost,
+            time_stamp=args.time_stamp,
+            decimals=args.decimals,
+            plot_path=bridged_output_path(output_path).with_suffix(".pdf"),
+        )
+        print(bridged_path)
     return 0
 
 

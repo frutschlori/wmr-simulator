@@ -13,6 +13,38 @@ from wmr_simulator.planner import compute_reference_trajectory
 from wmr_simulator.models.robot import DiffDrive, DiffDriveState
 from wmr_simulator.types import PhysicalParams, PoseLog, ReferenceLog, SimulationLog, WheelLog
 
+# Stochastic model entries zeroed by `noise_enabled: false` in the problem yaml.
+# KF process-noise tuning (proc_pos_std, proc_theta_std) is left untouched: it
+# shapes the filter, not the simulated world.
+NOISE_ROBOT_KEYS = ("slip_sigma", "slip_tau")
+NOISE_ESTIMATOR_KEYS = ("noise_pos", "noise_angle", "enc_angle_noise")
+
+
+def apply_noise_configuration(problem_cfg: dict) -> dict:
+    """Zero all stochastic model parameters when the problem disables noise.
+
+    `noise_enabled: false` (top-level yaml key, default true) turns off the
+    AR(1) wheel slip and the simulated mocap/encoder measurement noise in
+    place, so every consumer of the config (simulation, gain tuning,
+    trajectory-optimization FIM variances) sees a deterministic model.
+
+    NB: the gain-tuning FIM relies on measurement/encoder noise for kd
+    observability (see trajectory_optimization.pipeline
+    closed_loop_gain_measurement_sequence); expect a near-singular FIM in that
+    mode with noise disabled.
+    """
+    if problem_cfg.get("noise_enabled", True):
+        return problem_cfg
+    robot_cfg = problem_cfg.get("robot", {})
+    for key in NOISE_ROBOT_KEYS:
+        if key in robot_cfg:
+            robot_cfg[key] = 0.0
+    estimator_cfg = problem_cfg.get("estimator", {})
+    for key in NOISE_ESTIMATOR_KEYS:
+        if key in estimator_cfg:
+            estimator_cfg[key] = 0.0
+    return problem_cfg
+
 
 class SimulationPipeline:
     def __init__(
@@ -27,7 +59,7 @@ class SimulationPipeline:
         # None keeps the nominal dynamics untouched.
         self.residual_model = residual_model
         with open(problem_path, "r", encoding="utf-8") as file:
-            self.problem = yaml.safe_load(file)
+            self.problem = apply_noise_configuration(yaml.safe_load(file))
 
         self.problem_path = problem_path
         self.reference_trajectories_dir = reference_trajectories_dir

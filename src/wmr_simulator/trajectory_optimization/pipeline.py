@@ -11,7 +11,12 @@ import yaml
 from wmr_simulator.controller import Controller
 from wmr_simulator.estimator import DiffDriveEstimator
 from wmr_simulator.models.robot import DiffDrive
-from wmr_simulator.simulation import SimulationPipeline, make_replay_segment_plan, replay_simulation_log
+from wmr_simulator.simulation import (
+    SimulationPipeline,
+    apply_noise_configuration,
+    make_replay_segment_plan,
+    replay_simulation_log,
+)
 from wmr_simulator.trajectory_optimization.bezier import (
     clamp_control_points,
     compute_bezier_reference,
@@ -43,7 +48,9 @@ from wmr_simulator.visualization.trajectories import (
 class ProblemDefinition:
     def __init__(self, problem_path: str):
         with open(problem_path, "r", encoding="utf-8") as file:
-            self.raw = yaml.safe_load(file)
+            # noise_enabled: false zeroes slip + measurement noise, so the FIM
+            # variances and any rollout built from this config are noise-free too.
+            self.raw = apply_noise_configuration(yaml.safe_load(file))
 
         self.path = problem_path
         self.geometry_dt = float(self.raw["geometry_controller_dt"])
