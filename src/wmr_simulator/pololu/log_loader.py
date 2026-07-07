@@ -9,6 +9,7 @@ os.environ["JAX_PLATFORMS"] = "cpu"
 import jax.numpy as jnp
 import numpy as np
 
+from wmr_simulator.pololu.pose_smoothing import fit_pose_splines
 from wmr_simulator.types import PoseLog, ReferenceLog, SimulationLog, WheelLog
 
 
@@ -89,6 +90,10 @@ def load_pololu_traj_control_log(
     clip_after_first_trajectory: bool = False,
     mocap_filter_window_s: float = 0.0,
     mocap_delay_s: float = 0.0,
+    spline_order: int = 3,
+    spline_noise_std_xy: float = 1e-3,
+    spline_noise_std_yaw: float = 5e-3,
+    spline_smoothing_factor: float = 1.0,
 ) -> SimulationLog:
     """Load one Pololu traj-control csv into a SimulationLog.
 
@@ -96,21 +101,15 @@ def load_pololu_traj_control_log(
     radio/UART; see identification.mocap_delay): the pose logged at time t was
     assumed at t - mocap_delay_s, so all mocap timestamps are shifted back by
     that amount before use.
+
+    The mocap poses are always smoothed with penalized B-splines
+    (pololu.pose_smoothing, ``spline_*`` parameters): repeated frames are
+    dropped from the fit and ``pose.states`` holds the spline-evaluated poses
+    while ``pose.twists`` holds the analytic-derivative body twists at the
+    pose times, so downstream consumers never finite-difference raw mocap.
+    The raw poses are kept in ``pose.true_states`` for diagnostics/plots.
     """
-    columns, data = _read_csv(Path(path))
-    if tuple(columns) != POLOLU_TRAJ_CONTROL_COLUMNS:
-        raise ValueError(f"Unexpected columns in {path}: {tuple(columns)}")
-
-    ts_index = columns.index("ts")
-    data = data[np.isfinite(data[:, ts_index])]
-    data = data[np.argsort(data[:, ts_index])]
-    time_s = data[:, ts_index] / 1000.0
-    time_s = time_s - time_s[0]
-    data = data.copy()
-    data[:, ts_index] = time_s
-
-    if clip_after_first_trajectory:
-        data = _clip_after_first_reference_stop(columns, data)
+    columns, data = _read_time_normalized(Path(path), clip_after_first_trajectory)
 
     reference_time, reference_values = _sparse_stream(
         columns,
@@ -119,7 +118,20 @@ def load_pololu_traj_control_log(
     )
     pose_time, pose_states = _sparse_stream(columns, data, ("x_raw", "y_raw", "yaw_raw"))
     pose_time = pose_time - np.float32(mocap_delay_s)
-    pose_states = _filter_mocap_poses(pose_time, pose_states, mocap_filter_window_s)
+    raw_pose_states = pose_states
+    filtered = _filter_mocap_poses(pose_time, pose_states, mocap_filter_window_s)
+    # Duplicate frames are dropped inside the fit but the spline is evaluated at
+    # all raw timestamps, so every stream keeps its original length/time base.
+    splines = fit_pose_splines(
+        pose_time,
+        filtered,
+        order=spline_order,
+        noise_std_xy=spline_noise_std_xy,
+        noise_std_yaw=spline_noise_std_yaw,
+        smoothing_factor=spline_smoothing_factor,
+    )
+    pose_states = splines.pose(pose_time)
+    pose_twists = splines.body_twist(pose_time)
     wheel_time, wheel_speeds = _sparse_stream(
         columns,
         data,
@@ -166,11 +178,48 @@ def load_pololu_traj_control_log(
         pose=PoseLog(
             time_s=jnp.asarray(pose_time, dtype=jnp.float32),
             states=jnp.asarray(pose_states, dtype=jnp.float32),
-            true_states=jnp.asarray(pose_states, dtype=jnp.float32),
+            true_states=jnp.asarray(raw_pose_states, dtype=jnp.float32),
             command_time_s=jnp.asarray(command_time, dtype=jnp.float32),
             wheel_cmd=jnp.asarray(wheel_cmd, dtype=jnp.float32),
+            twists=jnp.asarray(pose_twists, dtype=jnp.float32),
         ),
     )
+
+
+def load_imu_gyro_z(
+    path: str | Path,
+    *,
+    clip_after_first_trajectory: bool = False,
+) -> tuple[np.ndarray, np.ndarray]:
+    """IMU yaw rate stream from one traj-control csv, converted to rad/s.
+
+    The csv logs the gyro in deg/s; timestamps share the time base of
+    load_pololu_traj_control_log (seconds, zeroed at the first logged row).
+    Returns empty arrays for logs without IMU samples (older logs have the
+    gyro columns in the header but never fill them).
+    """
+    columns, data = _read_time_normalized(Path(path), clip_after_first_trajectory)
+    gyro_time, gyro = _sparse_stream(columns, data, ("gyro_z",), trigger_names=("gyro_z",))
+    return gyro_time, np.deg2rad(gyro[:, 0]) if len(gyro) else gyro.reshape(0)
+
+
+def _read_time_normalized(path: Path, clip_after_first_trajectory: bool) -> tuple[list[str], np.ndarray]:
+    """Read a traj-control csv with the ts column sorted and in seconds from the first row."""
+    columns, data = _read_csv(path)
+    if tuple(columns) != POLOLU_TRAJ_CONTROL_COLUMNS:
+        raise ValueError(f"Unexpected columns in {path}: {tuple(columns)}")
+
+    ts_index = columns.index("ts")
+    data = data[np.isfinite(data[:, ts_index])]
+    data = data[np.argsort(data[:, ts_index])]
+    time_s = data[:, ts_index] / 1000.0
+    time_s = time_s - time_s[0]
+    data = data.copy()
+    data[:, ts_index] = time_s
+
+    if clip_after_first_trajectory:
+        data = _clip_after_first_reference_stop(columns, data)
+    return columns, data
 
 
 def _read_csv(path: Path) -> tuple[list[str], np.ndarray]:
@@ -305,13 +354,27 @@ if __name__ == "__main__":
     from wmr_simulator.visualization.pololu import plot_logged_summary
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--log", type=str, default="Pololu Data/Experiments/2026_07_01/TR03.csv")
+    parser.add_argument("--log", type=str, default="Pololu Data/Experiments/2026_07_06/04_New_Mocap_timestamps/decoded/TR05.csv")
     parser.add_argument("--output", type=str, default=None, help="Output filename prefix")
     parser.add_argument("--out-dir", type=str, default="visualize")
     parser.add_argument("--clip-after-first-trajectory", default=True, action="store_true")
-    # Zero-phase moving-average window (seconds) on the mocap positions; 0 disables.
+    # Zero-phase moving-average window (seconds) on the mocap positions before the
+    # spline fit; 0 disables (the spline smoothing below is always applied).
     parser.add_argument("--mocap-filter-window", type=float, default=0.0)
+    # Smoothing-spline parameters (pololu.pose_smoothing.fit_pose_splines): degree,
+    # assumed per-sample mocap noise stds (m / rad, set the residual budget via
+    # weights 1/std), and a scale on that budget (>1 smooths harder, 0 interpolates).
+    parser.add_argument("--spline-order", type=int, default=3)
+    parser.add_argument("--spline-noise-std-xy", type=float, default=2e-3)
+    parser.add_argument("--spline-noise-std-yaw", type=float, default=5e-3)
+    parser.add_argument("--spline-smoothing-factor", type=float, default=1.0)
     args = parser.parse_args()
+    spline_kwargs = dict(
+        spline_order=args.spline_order,
+        spline_noise_std_xy=args.spline_noise_std_xy,
+        spline_noise_std_yaw=args.spline_noise_std_yaw,
+        spline_smoothing_factor=args.spline_smoothing_factor,
+    )
 
     log_path = Path(args.log)
     if log_path.is_dir():
@@ -321,17 +384,37 @@ if __name__ == "__main__":
                 path,
                 clip_after_first_trajectory=args.clip_after_first_trajectory,
                 mocap_filter_window_s=args.mocap_filter_window,
+                **spline_kwargs,
             )
             print_log_summary(path, log)
+            imu_time, imu_gyro_z = load_imu_gyro_z(
+                path, clip_after_first_trajectory=args.clip_after_first_trajectory
+            )
             out_prefix = f"{args.output}_{path.stem}" if args.output is not None else f"pololu_{path.stem}"
-            plot_logged_summary(log, out_prefix=out_prefix, out_dir=output_dir)
+            plot_logged_summary(
+                log,
+                out_prefix=out_prefix,
+                out_dir=output_dir,
+                imu_time_s=imu_time,
+                imu_gyro_z=imu_gyro_z,
+            )
         raise SystemExit(0)
 
     log = load_pololu_traj_control_log(
         log_path,
         clip_after_first_trajectory=args.clip_after_first_trajectory,
         mocap_filter_window_s=args.mocap_filter_window,
+        **spline_kwargs,
     )
     print_log_summary(log_path, log)
+    imu_time, imu_gyro_z = load_imu_gyro_z(
+        log_path, clip_after_first_trajectory=args.clip_after_first_trajectory
+    )
     out_prefix = args.output if args.output is not None else f"pololu_{log_path.stem}"
-    plot_logged_summary(log, out_prefix=out_prefix, out_dir=args.out_dir)
+    plot_logged_summary(
+        log,
+        out_prefix=out_prefix,
+        out_dir=args.out_dir,
+        imu_time_s=imu_time,
+        imu_gyro_z=imu_gyro_z,
+    )

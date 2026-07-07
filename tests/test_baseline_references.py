@@ -131,6 +131,20 @@ def test_generate_baseline_reference_dispatch_and_unknown_type():
         generate_baseline_reference("spiral", dt=DT)
 
 
+def test_check_firmware_limits_flags_oversized_references():
+    from wmr_simulator.pololu.reference_exporter import (
+        FIRMWARE_MAX_FILE_BYTES,
+        FIRMWARE_MAX_TRAJECTORY_POINTS,
+        check_firmware_limits,
+    )
+
+    assert check_firmware_limits(num_states=500, file_bytes=1000) == []
+    warnings = check_firmware_limits(num_states=601, file_bytes=85044)
+    assert len(warnings) == 2
+    assert str(FIRMWARE_MAX_TRAJECTORY_POINTS) in warnings[0]
+    assert str(FIRMWARE_MAX_FILE_BYTES) in warnings[1]
+
+
 def test_summarize_motion_reports_peaks():
     states = circle_reference(radius=0.5, total_time=10.0, dt=DT)
     summary = summarize_motion(states, DT)

@@ -17,6 +17,34 @@ class ReferenceTrajectory:
     dt: float
 
 
+# Hard limits of the pololu-rs firmware trajectory loader: states/actions are
+# parsed into heapless vectors of MAX_POINTS (trajectory_reading.rs; capacity
+# 1000, but ~500 is the safe bound for stack limits) and the raw JSN is read
+# into a scratch buffer (sdlog.rs, 48 KiB). Exceeding either makes the firmware
+# report that no trajectory is loaded. NB: at ~140 bytes per state the 48 KiB
+# buffer caps out near ~345 states, so it binds before the point limit unless
+# the firmware scratch buffer is enlarged as well.
+FIRMWARE_MAX_TRAJECTORY_POINTS = 500
+FIRMWARE_MAX_FILE_BYTES = 48 * 1024
+
+
+def check_firmware_limits(num_states: int, file_bytes: int, label: str = "reference") -> list[str]:
+    """Return human-readable warnings when a JSN exceeds the firmware limits."""
+    warnings = []
+    if num_states > FIRMWARE_MAX_TRAJECTORY_POINTS:
+        warnings.append(
+            f"{label}: {num_states} states exceed the firmware limit of "
+            f"{FIRMWARE_MAX_TRAJECTORY_POINTS} points; the robot will refuse to load it. "
+            f"Reduce the duration to at most {FIRMWARE_MAX_TRAJECTORY_POINTS - 1} dt intervals."
+        )
+    if file_bytes > FIRMWARE_MAX_FILE_BYTES:
+        warnings.append(
+            f"{label}: {file_bytes} bytes exceed the firmware scratch buffer of "
+            f"{FIRMWARE_MAX_FILE_BYTES} bytes; the robot will refuse to load it."
+        )
+    return warnings
+
+
 def load_latest_reference_trajectory(
     input_dir: str | Path,
     *,
@@ -157,6 +185,12 @@ def export_reference_trajectory(
     with output_path.open("w", encoding="utf-8") as file:
         json.dump(formatted, file, indent=2)
         file.write("\n")
+    for warning in check_firmware_limits(
+        num_states=trajectory.reference_states.shape[0],
+        file_bytes=output_path.stat().st_size,
+        label=str(output_path),
+    ):
+        print(f"WARNING: {warning}")
     return output_path
 
 

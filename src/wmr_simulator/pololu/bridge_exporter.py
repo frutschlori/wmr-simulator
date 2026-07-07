@@ -112,6 +112,14 @@ def append_bridge_reference(
     with output_path.open("w", encoding="utf-8") as file:
         json.dump(formatted, file, indent=2)
         file.write("\n")
+    from wmr_simulator.pololu.reference_exporter import check_firmware_limits
+
+    for warning in check_firmware_limits(
+        num_states=full_reference_states.shape[0],
+        file_bytes=output_path.stat().st_size,
+        label=str(output_path),
+    ):
+        print(f"WARNING: {warning}")
     return output_path
 
 

@@ -11,8 +11,14 @@ from wmr_simulator.models.residual import RESIDUAL_OUTPUT_DIM, TARGET_LABELS
 TWIST_LABELS = (r"$v_x$ [m/s]", r"$v_y$ [m/s]", r"$\omega$ [rad/s]")
 
 
-def plot_training_history(history: dict, *, out_dir: str | Path = "visualize") -> Path:
-    """Train/validation loss curves (MSE in normalized target space)."""
+def plot_training_history(
+    history: dict,
+    *,
+    out_dir: str | Path = "visualize",
+    out_name: str = "residual_training_loss.pdf",
+    ylabel: str = "MSE (normalized targets)",
+) -> Path:
+    """Train/validation loss curves."""
     plt = _plot_module()
     out_dir = _ensure_dir(out_dir)
     fig, ax = plt.subplots(figsize=(6, 4))
@@ -21,11 +27,11 @@ def plot_training_history(history: dict, *, out_dir: str | Path = "visualize") -
     if np.isfinite(history["validation_loss"]).any():
         ax.semilogy(epochs, history["validation_loss"], label="validation")
     ax.set_xlabel("epoch")
-    ax.set_ylabel("MSE (normalized targets)")
+    ax.set_ylabel(ylabel)
     ax.legend()
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
-    output_path = out_dir / "residual_training_loss.pdf"
+    output_path = out_dir / out_name
     fig.savefig(output_path)
     plt.close(fig)
     return output_path
