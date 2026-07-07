@@ -28,8 +28,8 @@ PARAMETER_LABELS = (
     "Time constant [s]",
 )
 PARAMETER_SCALES = np.asarray([1000.0, 1000.0, 1.0, 1.0], dtype=float)
-# This batch report only covers the geometry + motor parameters (the leading entries
-# of physical_params_to_array); the slip parameters are excluded here.
+# The batch report covers the geometry + motor parameters (the entries of
+# physical_params_to_array).
 _NUM_REPORTED_PARAMS = len(PARAMETER_SCALES)
 
 

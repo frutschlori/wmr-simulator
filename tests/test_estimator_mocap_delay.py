@@ -70,20 +70,15 @@ def test_delay_buffer_is_scan_compatible():
 def test_noise_configuration_toggle():
     problem_cfg = {
         "noise_enabled": False,
-        "robot": {"slip_sigma": 0.02, "slip_tau": 0.3, "a_slip_max": 3.0},
         "estimator": {"noise_pos": 0.002, "noise_angle": 0.017, "enc_angle_noise": 0.01,
                       "proc_pos_std": 0.02},
     }
     apply_noise_configuration(problem_cfg)
-    assert problem_cfg["robot"]["slip_sigma"] == 0.0
-    assert problem_cfg["robot"]["slip_tau"] == 0.0
-    assert problem_cfg["robot"]["a_slip_max"] == 3.0  # deterministic slip untouched
     assert problem_cfg["estimator"]["noise_pos"] == 0.0
     assert problem_cfg["estimator"]["noise_angle"] == 0.0
     assert problem_cfg["estimator"]["enc_angle_noise"] == 0.0
     assert problem_cfg["estimator"]["proc_pos_std"] == 0.02  # KF tuning untouched
 
-    enabled_cfg = {"noise_enabled": True, "robot": {"slip_sigma": 0.02}, "estimator": {"noise_pos": 0.002}}
+    enabled_cfg = {"noise_enabled": True, "estimator": {"noise_pos": 0.002}}
     apply_noise_configuration(enabled_cfg)
-    assert enabled_cfg["robot"]["slip_sigma"] == 0.02
     assert enabled_cfg["estimator"]["noise_pos"] == 0.002

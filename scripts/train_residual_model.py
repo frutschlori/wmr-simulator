@@ -1,6 +1,6 @@
 """Thin CLI wrapper: train the residual dynamics model from Pololu logs.
 
-All logic lives in wmr_simulator.models.residual (see train_from_logs);
+All logic lives in wmr_simulator.residual_model.residual (see train_from_logs);
 plotting lives in wmr_simulator.visualization.residual.
 
 Example:
@@ -14,7 +14,7 @@ import os
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
-from wmr_simulator.models.residual import train_main
+from wmr_simulator.residual_model.residual import train_main
 
 if __name__ == "__main__":
     train_main()

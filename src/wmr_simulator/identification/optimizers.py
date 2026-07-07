@@ -12,20 +12,13 @@ from wmr_simulator.types import (
 )
 
 
-# Optimizer vector layout: 6 log-relative dims for the positive physical parameters
-# (r, L_effective, u_max, tau_motor, a_slip_max, b_backlash).
-# Notes:
-#   - base_diameter is the *effective* wheelbase; tire-scrub in turns is absorbed into
-#     it because a separate correction would be structurally non-identifiable
-#     (Borenstein & Feng 1996, E_b; see wmr_simulator.slip module docstring).
-#   - a_slip_max / b_backlash = init * exp(theta): a zero init keeps the component
-#     disabled (0 * exp(theta) = 0 with zero gradient) -- pass a positive init to
-#     identify it.
-#   - slip_sigma, slip_tau are NOT gradient-identified: noise parameters; a
-#     deterministic replay loss has zero sensitivity to them. Fit from residual
-#     statistics instead (wmr_simulator.slip.fit_ar1_moments). Carried from the init.
-_NUM_POSITIVE_DIMS = 6
-_NUM_OPTIMIZER_DIMS = 6
+# Optimizer vector layout: 4 log-relative dims for the positive physical parameters
+# (r, L_effective, u_max, tau_motor).
+# Note: base_diameter is the *effective* wheelbase; tire-scrub in turns is absorbed
+# into it because a separate correction would be structurally non-identifiable
+# (Borenstein & Feng 1996, E_b).
+_NUM_POSITIVE_DIMS = 4
+_NUM_OPTIMIZER_DIMS = 4
 
 
 def _params_from_optimizer_values(values: jax.Array, init_params: PhysicalParams) -> PhysicalParams:
@@ -33,16 +26,11 @@ def _params_from_optimizer_values(values: jax.Array, init_params: PhysicalParams
     scale_values = physical_params_to_array(init_params)[..., :_NUM_POSITIVE_DIMS]
     log_relative = values[..., :_NUM_POSITIVE_DIMS]
     positive = scale_values * jnp.exp(log_relative)
-    fixed_shape = values[..., 0].shape
     return PhysicalParams(
         wheel_radius=positive[..., 0],
         base_diameter=positive[..., 1],
         max_wheel_speed=positive[..., 2],
         time_constant=positive[..., 3],
-        a_slip_max=positive[..., 4],
-        b_backlash=positive[..., 5],
-        slip_sigma=jnp.broadcast_to(init_params.slip_sigma, fixed_shape),
-        slip_tau=jnp.broadcast_to(init_params.slip_tau, fixed_shape),
     )
 
 

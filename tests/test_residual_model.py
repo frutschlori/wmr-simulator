@@ -7,7 +7,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from wmr_simulator.models import (
+from wmr_simulator.residual_model import (
     apply_residual_model,
     init_residual_model,
     load_residual_model,
@@ -15,8 +15,8 @@ from wmr_simulator.models import (
     residual_corrected_twist,
     save_residual_model,
 )
-from wmr_simulator.models.residual import RESIDUAL_INPUT_DIM, RESIDUAL_OUTPUT_DIM
-from wmr_simulator.models.robot import DiffDrive
+from wmr_simulator.residual_model.residual import RESIDUAL_INPUT_DIM, RESIDUAL_OUTPUT_DIM
+from wmr_simulator.robot import DiffDrive
 
 ROBOT_CFG = {
     "wheel_radius": 0.0164,
@@ -129,7 +129,7 @@ def test_residual_features_order():
 
 
 def test_state_action_features_exclude_cmd_and_nominal():
-    from wmr_simulator.models.residual import RESIDUAL_FEATURE_NAMES
+    from wmr_simulator.residual_model.residual import RESIDUAL_FEATURE_NAMES
 
     assert RESIDUAL_FEATURE_NAMES == (
         "vx_body",
@@ -160,7 +160,7 @@ def test_step_tracks_lateral_velocity_state():
             duty,
         ]
     )
-    from wmr_simulator.models import apply_residual_model as apply
+    from wmr_simulator.residual_model import apply_residual_model as apply
 
     delta = apply(model, features)
     np.testing.assert_allclose(float(with_residual.vel_lateral), float(delta[1]), rtol=1e-5)

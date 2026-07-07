@@ -14,7 +14,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from wmr_simulator.models.residual import ResidualDynamicsModel, init_residual_model
+from wmr_simulator.residual_model.residual import ResidualDynamicsModel, init_residual_model
 
 _CHECKPOINT_FORMAT = "wmr-residual-model-v1"
 

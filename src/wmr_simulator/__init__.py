@@ -23,7 +23,7 @@ def __getattr__(name):
 
         return {"DiffDriveEstimator": DiffDriveEstimator, "EstimatorState": EstimatorState}[name]
     if name in {"DiffDrive", "DiffDriveState"}:
-        from wmr_simulator.models.robot import DiffDrive, DiffDriveState
+        from wmr_simulator.robot import DiffDrive, DiffDriveState
 
         return {"DiffDrive": DiffDrive, "DiffDriveState": DiffDriveState}[name]
     if name == "SimulationPipeline":

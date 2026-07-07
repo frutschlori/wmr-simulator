@@ -20,7 +20,7 @@ def main():
 
     residual_model = None
     if args.residual_model is not None:
-        from wmr_simulator.models import load_residual_model
+        from wmr_simulator.residual_model import load_residual_model
 
         residual_model, checkpoint = load_residual_model(args.residual_model)
         print(f"Loaded residual dynamics model: {args.residual_model}")
