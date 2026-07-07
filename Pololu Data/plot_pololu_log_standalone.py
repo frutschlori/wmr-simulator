@@ -85,16 +85,77 @@ def col(columns: list[str], data: np.ndarray, name: str) -> np.ndarray:
     return data[:, columns.index(name)]
 
 
-def mocap_vel_omega(time_s: np.ndarray, pose: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def mocap_vel_omega(
+    time_s: np.ndarray,
+    pose: np.ndarray,
+    diff_window: int = 5,
+    min_dt: float = 0.005,
+) -> tuple[np.ndarray, np.ndarray]:
     if len(time_s) < 2:
         return time_s, np.zeros((len(time_s), 2))
-    dt = np.diff(time_s)
-    dxy = np.diff(pose[:, :2], axis=0)
+
+    order = np.argsort(time_s)
+    time_s = time_s[order]
+    pose = pose[order]
+    increasing = np.concatenate([[True], np.diff(time_s) > 0.0])
+    time_s = time_s[increasing]
+    pose = pose[increasing]
+    if len(time_s) < 2:
+        return time_s, np.zeros((len(time_s), 2))
+
     theta = np.unwrap(pose[:, 2])
-    heading = theta[1:]
+    diff_window = max(1, int(diff_window))
+
+    if diff_window <= 1 or len(time_s) < 3:
+        dt = np.diff(time_s)
+        valid = dt >= min_dt
+        dxy = np.diff(pose[:, :2], axis=0)[valid]
+        heading = theta[1:][valid]
+        if not np.any(valid):
+            return np.empty(0), np.empty((0, 2))
+        v = (dxy[:, 0] * np.cos(heading) + dxy[:, 1] * np.sin(heading)) / dt[valid]
+        omega = np.diff(theta)[valid] / dt[valid]
+        return time_s[1:][valid], np.column_stack([v, omega])
+
+    half_window = max(1, diff_window // 2)
+    if len(time_s) <= 2 * half_window:
+        half_window = 1
+
+    dt = time_s[2 * half_window :] - time_s[: -2 * half_window]
+    valid = dt >= min_dt
+    if not np.any(valid):
+        return np.empty(0), np.empty((0, 2))
+
+    dxy = pose[2 * half_window :, :2] - pose[: -2 * half_window, :2]
+    dtheta = theta[2 * half_window :] - theta[: -2 * half_window]
+    heading = theta[half_window:-half_window]
+    time_out = time_s[half_window:-half_window]
+
+    dt = dt[valid]
+    dxy = dxy[valid]
+    dtheta = dtheta[valid]
+    heading = heading[valid]
+    time_out = time_out[valid]
+
     v = (dxy[:, 0] * np.cos(heading) + dxy[:, 1] * np.sin(heading)) / dt
-    omega = np.diff(theta) / dt
-    return time_s[1:], np.column_stack([v, omega])
+    omega = dtheta / dt
+    return time_out, np.column_stack([v, omega])
+
+
+def print_mocap_timing_stats(log_path: str | Path, time_s: np.ndarray) -> None:
+    if len(time_s) < 2:
+        print(f"{Path(log_path).name}: mocap samples={len(time_s)}")
+        return
+    dt_ms = np.diff(np.sort(time_s)) * 1000.0
+    dt_ms = dt_ms[dt_ms > 0.0]
+    if len(dt_ms) == 0:
+        print(f"{Path(log_path).name}: mocap samples={len(time_s)}, no positive dt")
+        return
+    p = np.percentile(dt_ms, [1, 5, 50, 95, 99])
+    print(
+        f"{Path(log_path).name}: mocap samples={len(time_s)}, "
+        f"dt_ms p1/p5/median/p95/p99={p[0]:.1f}/{p[1]:.1f}/{p[2]:.1f}/{p[3]:.1f}/{p[4]:.1f}"
+    )
 
 
 def stair_series(time: np.ndarray, values: np.ndarray, end_time: float | None) -> tuple[np.ndarray, np.ndarray]:
@@ -148,6 +209,9 @@ def plot_log(
     output_path: str | Path,
     clip: bool = False,
     max_time: float | None = None,
+    mocap_diff_window: int = 5,
+    mocap_min_dt: float = 0.005,
+    print_mocap_stats: bool = True,
 ):
     columns, data = load_columns(log_path, max_time=max_time)
     if clip:
@@ -174,6 +238,8 @@ def plot_log(
     measured_pose = np.column_stack(
         [col(columns, pose_rows, "x_raw"), col(columns, pose_rows, "y_raw"), col(columns, pose_rows, "yaw_raw")]
     )
+    if print_mocap_stats:
+        print_mocap_timing_stats(log_path, pose_time)
     wheel_time = col(columns, wheel_rows, "ts")
     wheel_speeds = np.column_stack(
         [col(columns, wheel_rows, "omega_r_meas"), col(columns, wheel_rows, "omega_l_meas")]
@@ -182,7 +248,12 @@ def plot_log(
     wheel_cmd = np.column_stack(
         [col(columns, command_rows, "omega_r_cmd"), col(columns, command_rows, "omega_l_cmd")]
     )
-    mocap_time, mocap_vel = mocap_vel_omega(pose_time, measured_pose)
+    mocap_time, mocap_vel = mocap_vel_omega(
+        pose_time,
+        measured_pose,
+        diff_window=mocap_diff_window,
+        min_dt=mocap_min_dt,
+    )
 
     fig, axes = plt.subplots(2, 3, figsize=(18, 10))
     fig.suptitle(f"Pololu Log Summary ({Path(log_path).stem})", fontsize=16)
@@ -288,6 +359,9 @@ def main():
     parser.add_argument("--output", default=None)
     parser.add_argument("--clip-after-first-trajectory", default=True)
     parser.add_argument("--max-time", type=float, default=5)
+    parser.add_argument("--mocap-diff-window", type=int, default=5)
+    parser.add_argument("--mocap-min-dt", type=float, default=0.005)
+    parser.add_argument("--no-mocap-stats", action="store_true")
     args = parser.parse_args()
 
     log_path = Path(args.log)
@@ -296,12 +370,28 @@ def main():
         output_dir.mkdir(parents=True, exist_ok=True)
         for path in log_files(log_path):
             output_path = output_dir / f"{path.stem}.pdf"
-            plot_log(path, output_path, clip=args.clip_after_first_trajectory, max_time=args.max_time)
+            plot_log(
+                path,
+                output_path,
+                clip=args.clip_after_first_trajectory,
+                max_time=args.max_time,
+                mocap_diff_window=args.mocap_diff_window,
+                mocap_min_dt=args.mocap_min_dt,
+                print_mocap_stats=not args.no_mocap_stats,
+            )
             print(output_path)
         return
 
     output_path = Path(args.output) if args.output is not None else log_path.with_suffix(".pdf")
-    plot_log(log_path, output_path, clip=args.clip_after_first_trajectory, max_time=args.max_time)
+    plot_log(
+        log_path,
+        output_path,
+        clip=args.clip_after_first_trajectory,
+        max_time=args.max_time,
+        mocap_diff_window=args.mocap_diff_window,
+        mocap_min_dt=args.mocap_min_dt,
+        print_mocap_stats=not args.no_mocap_stats,
+    )
     print(output_path)
 
 

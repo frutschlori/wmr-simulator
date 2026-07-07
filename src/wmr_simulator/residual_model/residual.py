@@ -1041,7 +1041,7 @@ def train_main(argv=None):
     # corrected twist, supervised by pose error against the smooth mocap poses.
     # This trains the self-fed regime the model faces in closed loop. 0 disables.
     parser.add_argument("--multistep-window", type=int, default=50)
-    parser.add_argument("--multistep-epochs", type=int, default=10000)
+    parser.add_argument("--multistep-epochs", type=int, default=100)
     parser.add_argument("--multistep-stride", type=int, default=20)
     parser.add_argument("--multistep-batch-size", type=int, default=12000)
     parser.add_argument("--multistep-learning-rate", type=float, default=1e-5)

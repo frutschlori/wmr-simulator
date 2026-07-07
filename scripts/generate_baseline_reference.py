@@ -110,7 +110,7 @@ def main():
     # Lemniscate parameters
     parser.add_argument("--max-speed", type=float, default=None,
                         help="Peak speed in m/s (required for lemniscate, optional amplitude override for ramp).")
-    parser.add_argument("--cycles", type=int, default=1, help="Figure-eight cycles (lemniscate modes).")
+    parser.add_argument("--cycles", type=int, default=3, help="Figure-eight cycles (lemniscate modes).")
     # Lemniscate ramp parameters
     parser.add_argument("--speed-rate", type=float, default=1.5,
                         help="Phase-rate growth factor per completed cycle (lemniscate-ramp).")
