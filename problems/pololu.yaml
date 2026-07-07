@@ -18,18 +18,13 @@ controller:
   # gains: [5.0, 5.0, 3.5, 2.0, 5.0, 1.0] # [kx, ky, kth, kpmotor, kimotor, kdmotor]
   gains: [5.0, 5.0, 3.0, 0.4, 0.2, 0.0] # [kx, ky, kth, kpmotor, kimotor, kdmotor]
   # gains: [5.0, 5.0, 3.0, 0.1, 5.0, 0.0] # [kx, ky, kth, kpmotor, kimotor, kdmotor]
-noise_enabled: true # false zeroes slip_sigma/slip_tau and estimator measurement noise everywhere (sim, gain tuning, traj-opt FIM)
+noise_enabled: true # false zeroes the estimator measurement noise everywhere (sim, gain tuning, traj-opt FIM)
 robot:
   type: differential_drive
   wheel_radius: 0.01637   # m
   base_diameter: 0.08525 # m, *effective* wheelbase (absorbs tire scrub in turns, Borenstein & Feng 1996; may differ from geometric)
   max_wheel_speed: 248.17  # rad/s
   time_constant:  0.2237  # time constant for first-order wheel dynamics (set to 0 for ideal actuation)
-  # Slip model (see src/wmr_simulator/slip.py for formulas and references)
-  a_slip_max: 6.0     # traction limit ~ mu*g in m/s^2, 0 disables (burnout model, Wong 2008)
-  b_backlash: 0.035   # gear play half-width at wheel output in rad (~2 deg), 0 disables (Nordin & Gutman 2002)
-  slip_sigma: 0.01     # stationary std of AR(1) fractional wheel slip (Gauss-Markov, Maybeck 1979)
-  slip_tau: 0.3       # correlation time of AR(1) wheel slip in s
   v_max: 2.0          # m/s
   a_max: 3.0         # m/s^2
   a_max_lateral: 10.0 # m/s^2
@@ -43,7 +38,7 @@ estimator:
   base_diameter: 0.0842   # estimator's base_diameter [m]
   noise_pos: 0.002        # position measurement noise [m] (from mocap almost no noise)
   noise_angle: 0.035      # orientation noise [rad] ~  2 degrees
-  enc_angle_noise: 0.01  # 2 degrees encoder noise
+  enc_angle_noise: 0.01   # 2 degrees encoder noise
   
   proc_pos_std: 0.02      # [m]   process noise on x,y per step
   proc_theta_std: 0.05    # [rad] process noise on θ per step

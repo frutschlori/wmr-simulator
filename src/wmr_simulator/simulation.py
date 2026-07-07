@@ -10,13 +10,12 @@ from wmr_simulator.controller import Controller
 from wmr_simulator.estimator import DiffDriveEstimator
 from wmr_simulator.gain_schedule import apply_gain_schedule, gain_schedule_params_from_cfg
 from wmr_simulator.planner import compute_reference_trajectory
-from wmr_simulator.models.robot import DiffDrive, DiffDriveState
+from wmr_simulator.robot import DiffDrive, DiffDriveState
 from wmr_simulator.types import PhysicalParams, PoseLog, ReferenceLog, SimulationLog, WheelLog
 
 # Stochastic model entries zeroed by `noise_enabled: false` in the problem yaml.
 # KF process-noise tuning (proc_pos_std, proc_theta_std) is left untouched: it
 # shapes the filter, not the simulated world.
-NOISE_ROBOT_KEYS = ("slip_sigma", "slip_tau")
 NOISE_ESTIMATOR_KEYS = ("noise_pos", "noise_angle", "enc_angle_noise")
 
 
@@ -24,9 +23,9 @@ def apply_noise_configuration(problem_cfg: dict) -> dict:
     """Zero all stochastic model parameters when the problem disables noise.
 
     `noise_enabled: false` (top-level yaml key, default true) turns off the
-    AR(1) wheel slip and the simulated mocap/encoder measurement noise in
-    place, so every consumer of the config (simulation, gain tuning,
-    trajectory-optimization FIM variances) sees a deterministic model.
+    simulated mocap/encoder measurement noise in place, so every consumer of
+    the config (simulation, gain tuning, trajectory-optimization FIM
+    variances) sees a deterministic model.
 
     NB: the gain-tuning FIM relies on measurement/encoder noise for kd
     observability (see trajectory_optimization.pipeline
@@ -35,10 +34,6 @@ def apply_noise_configuration(problem_cfg: dict) -> dict:
     """
     if problem_cfg.get("noise_enabled", True):
         return problem_cfg
-    robot_cfg = problem_cfg.get("robot", {})
-    for key in NOISE_ROBOT_KEYS:
-        if key in robot_cfg:
-            robot_cfg[key] = 0.0
     estimator_cfg = problem_cfg.get("estimator", {})
     for key in NOISE_ESTIMATOR_KEYS:
         if key in estimator_cfg:
@@ -55,7 +50,7 @@ class SimulationPipeline:
         window_length: int | None = None,
         residual_model=None,
     ):
-        # Optional learned residual dynamics (models.residual.ResidualDynamicsModel);
+        # Optional learned residual dynamics (residual_model.residual.ResidualDynamicsModel);
         # None keeps the nominal dynamics untouched.
         self.residual_model = residual_model
         with open(problem_path, "r", encoding="utf-8") as file:
@@ -118,10 +113,6 @@ class SimulationPipeline:
             base_diameter=jnp.asarray(self.robot_cfg["base_diameter"], dtype=jnp.float32),
             max_wheel_speed=jnp.asarray(self.robot_cfg["max_wheel_speed"], dtype=jnp.float32),
             time_constant=jnp.asarray(self.robot_cfg["time_constant"], dtype=jnp.float32),
-            a_slip_max=jnp.asarray(self.robot_cfg.get("a_slip_max", 0.0), dtype=jnp.float32),
-            b_backlash=jnp.asarray(self.robot_cfg.get("b_backlash", 0.0), dtype=jnp.float32),
-            slip_sigma=jnp.asarray(self.robot_cfg.get("slip_sigma", 0.0), dtype=jnp.float32),
-            slip_tau=jnp.asarray(self.robot_cfg.get("slip_tau", 0.0), dtype=jnp.float32),
         )
         self.gains = jnp.asarray(self.controller_cfg["gains"], dtype=jnp.float32)
 
@@ -280,10 +271,6 @@ class SimulationPipeline:
                         base_diameter=robot_params.base_diameter,
                         max_wheel_speed=robot_params.max_wheel_speed,
                         time_constant=robot_params.time_constant,
-                        a_slip_max=robot_params.a_slip_max,
-                        b_backlash=robot_params.b_backlash,
-                        slip_sigma=robot_params.slip_sigma,
-                        slip_tau=robot_params.slip_tau,
                         dt=self.wheel_dt,
                         residual_model=residual_model,
                         wheel_speed_cmd=applied_wheel_ref,
@@ -482,9 +469,6 @@ def replay_pose_states(
         pose=initial_pose,
         wheel_speeds=initial_wheel_speeds,
         key=robot_key,
-        slip_noise=jnp.zeros(2, dtype=jnp.float32),
-        ground_wheel_speeds=initial_wheel_speeds,
-        gear_gap_offset=robot_params.b_backlash * jnp.sign(initial_wheel_speeds),
         vel_omega=jnp.zeros(2, dtype=jnp.float32),
         duty_cycle=jnp.zeros(2, dtype=jnp.float32),
         wheel_speed_cmd=jnp.zeros(2, dtype=jnp.float32),
@@ -498,15 +482,10 @@ def replay_pose_states(
         dt, speed, duty, do_reset, reset_pose = inputs
 
         def reset_state(state):
-            # Window reset: re-anchor pose, assume no slip, and assume the gear play is
-            # engaged on the flank matching the current direction of motion (a robot in
-            # steady motion drives through the gap; centered would bias the replay).
-            engaged_gap = robot_params.b_backlash * jnp.sign(speed)
+            # Window reset: re-anchor the pose on the measured one.
             return state._replace(
                 pose=reset_pose,
                 wheel_speeds=speed,
-                ground_wheel_speeds=speed,
-                gear_gap_offset=engaged_gap,
             )
 
         carry = jax.lax.cond(do_reset, reset_state, lambda state: state, carry)
@@ -516,8 +495,6 @@ def replay_pose_states(
             duty,
             wheel_radius=robot_params.wheel_radius,
             base_diameter=robot_params.base_diameter,
-            a_slip_max=robot_params.a_slip_max,
-            b_backlash=robot_params.b_backlash,
             dt=dt,
         )
         return next_state, next_state.pose

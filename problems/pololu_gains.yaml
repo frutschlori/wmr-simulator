@@ -1,12 +1,12 @@
-sim_time: 5.0 # seconds
+sim_time: 10.0 # seconds
 geometry_controller_dt: 0.05 # seconds
 wheel_controller_dt: 0.01 # seconds
 environment:
   min: [-1.5, -2.5]
   max: [1.5, 2.5]
   obstacles: []
-start: [-0.5, -1.5]
-goal:  [0.5, 1.5]
+start: [-1.0, -1, 0.0]
+goal:  [0.0, 1]
 planner: 
   waypoints:
     - [0.5,0.0, -1.57]
@@ -31,32 +31,27 @@ controller:
       - [0.0, 0.0]
       - [0.0, 0.0]
       - [0.0, 0.0]
-noise_enabled: false # false zeroes slip_sigma/slip_tau and estimator measurement noise everywhere (sim, gain tuning, traj-opt FIM)
+noise_enabled: true # false zeroes the estimator measurement noise everywhere (sim, gain tuning, traj-opt FIM)
 robot:
   type: differential_drive
   wheel_radius: 0.01637   # m
   base_diameter: 0.08525 # m, *effective* wheelbase (absorbs tire scrub in turns, Borenstein & Feng 1996; may differ from geometric)
   max_wheel_speed: 248.17  # rad/s
   time_constant:  0.2237  # time constant for first-order wheel dynamics (set to 0 for ideal actuation)
-  # Slip model (see sli.py module for formulas and references)
-  a_slip_max:  1    # traction limit ~ mu*g in m/s^2, 0 to disable (burnout model, Wong 2008)
-  b_backlash:  0.04   # gear play half-width at wheel output in rad (~2 deg), 0 disables (Nordin & Gutman 2002)
-  slip_sigma: 0.0    # stationary std of AR(1) fractional wheel slip (Gauss-Markov, Maybeck 1979)
-  slip_tau: 0.3       # correlation time of AR(1) wheel slip in s
-  v_max: 3.0          # m/s
+  v_max: 2.0          # m/s
   a_max: 5.0         # m/s^2
   a_max_lateral: 6.0 # m/s^2
-  omega_max: 6.0    # rad/s
-  alpha_max: 6.0    # rad/s^2
+  omega_max: 10.0    # rad/s
+  alpha_max: 20.0    # rad/s^2
 
 estimator:
   mocap_delay: 0.0        # mocap transport latency [s] (network+radio/UART); controller sees poses this old. Identify via identification/mocap_delay.py
   type: "kf"              # estimator type: "kf" (Kalman Filter) or "dr" (Dead Reckoning)
   wheel_radius: 0.016     # estimator's wheel_radius [m]
   base_diameter: 0.078    # estimator's base_diameter [m]
-  noise_pos: 0.0001 # pololu firmware value 0.002        # position measurement noise [m] (from mocap almost no noise)
-  noise_angle: 0.001  # pololu firmware value     # orientation noise [rad] ~  2 degrees
-  enc_angle_noise: 0.002  # encoder noise
+  noise_pos: 0.002        # position measurement noise [m] (from mocap almost no noise)
+  noise_angle: 0.035      # orientation noise [rad] ~  2 degrees
+  enc_angle_noise: 0.01   # encoder noise [rad]
   
   proc_pos_std: 0.001     # [m]   process noise on x,y per step
   proc_theta_std: 0.01    # [rad] process noise on θ per step

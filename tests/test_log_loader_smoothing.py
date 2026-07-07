@@ -84,7 +84,7 @@ def test_load_imu_gyro_z_converts_to_rad_s(synthetic_log):
 def test_residual_dataset_uses_spline_twists(synthetic_log):
     import jax.numpy as jnp
 
-    from wmr_simulator.models.residual import build_residual_dataset
+    from wmr_simulator.residual_model.residual import build_residual_dataset
     from wmr_simulator.types import PhysicalParams
 
     params = PhysicalParams(

@@ -2,7 +2,7 @@
 
 Model
 -----
-The nominal differential-drive model (wheel dynamics + slip + ideal kinematics)
+The nominal differential-drive model (wheel dynamics + ideal kinematics)
 predicts a body twist (v_x, omega) with zero lateral velocity. A small MLP
 learns the *residual* twist between that prediction and the twist measured by
 mocap on the real robot, conditioned on the current **state and action**:
@@ -19,7 +19,7 @@ mocap on the real robot, conditioned on the current **state and action**:
 
 The corrected twist is integrated with the full planar kinematics (including
 the lateral term), which lets the model capture chassis side-slip during
-high-speed turns and braking that the structured slip model cannot represent.
+high-speed turns and braking that the ideal kinematics cannot represent.
 
 Target convention (documented choice)
 -------------------------------------
@@ -42,7 +42,8 @@ Everything used during simulation/gain tuning is pure JAX, so gradients flow
 controller gains -> duty cycles -> nominal dynamics + residual -> rollout loss;
 the residual parameters are constants of the rollout closure and stay fixed.
 Input/target normalization statistics live inside the module as arrays, so a
-saved model is a single self-contained pytree (see models.io for checkpoints).
+saved model is a single self-contained pytree (see residual_model.io for
+checkpoints).
 
 This module also hosts the dataset construction from Pololu logs, the training
 loop, and evaluation helpers; plotting lives in
@@ -180,8 +181,7 @@ def build_residual_dataset(
     fall back to finite-differencing the poses over each mocap interval and
     rotating the world-frame displacement into the body frame at the interval
     start. Nominal twist: encoder wheel speeds interpolated to the interval
-    starts, passed through the identified deterministic slip elements (gearbox
-    backlash, traction limit) and the ideal differential-drive kinematics.
+    starts, passed through the ideal differential-drive kinematics.
     Sample t uses interval t-1's measured twist as the state input (see module
     docstring), so the first interval is consumed as state only.
 
@@ -197,8 +197,6 @@ def build_residual_dataset(
     Returns float32 ``features`` (N, 7), ``targets`` (N, 3), ``time_s``, ``dt``,
     and the measured/nominal twists plus pose arrays for diagnostics.
     """
-    from wmr_simulator.identification.slip_noise import _backlash, _rate_limited
-
     pose_time_s = np.asarray(log.pose.time_s, dtype=float)
     pose_states = np.asarray(log.pose.states, dtype=float)
     pose_twists = getattr(log.pose, "twists", None)
@@ -231,18 +229,14 @@ def build_residual_dataset(
         omega_meas = np.diff(theta_unwrapped) / safe_dt
         measured_twist = np.column_stack([v_x_meas, v_y_meas, omega_meas])
 
-    # Nominal twist from encoder speeds through the deterministic slip elements.
+    # Nominal twist from encoder speeds through the ideal kinematics.
     interval_time = pose_time_s[:-1]
     u_r_enc = np.interp(interval_time, wheel_time_s, wheel_speeds[:, 0])
     u_l_enc = np.interp(interval_time, wheel_time_s, wheel_speeds[:, 1])
     r = float(params.wheel_radius)
     effective_wheelbase = float(params.base_diameter)
-    b_backlash = float(params.b_backlash)
-    max_rate = float(params.a_slip_max) / r
-    u_r_nom = _rate_limited(_backlash(u_r_enc, dt, b_backlash), dt, max_rate)
-    u_l_nom = _rate_limited(_backlash(u_l_enc, dt, b_backlash), dt, max_rate)
-    v_nom = 0.5 * r * (u_r_nom + u_l_nom)
-    omega_nom = r * (u_r_nom - u_l_nom) / effective_wheelbase
+    v_nom = 0.5 * r * (u_r_enc + u_l_enc)
+    omega_nom = r * (u_r_enc - u_l_enc) / effective_wheelbase
     nominal_twist = np.column_stack([v_nom, np.zeros_like(v_nom), omega_nom])
 
     # Action context, zero-order hold at the interval starts.
@@ -701,8 +695,6 @@ def robot_params_from_problem(problem_path: str):
         base_diameter=jnp.asarray(robot_cfg["base_diameter"], dtype=jnp.float32),
         max_wheel_speed=jnp.asarray(robot_cfg["max_wheel_speed"], dtype=jnp.float32),
         time_constant=jnp.asarray(robot_cfg["time_constant"], dtype=jnp.float32),
-        a_slip_max=jnp.asarray(robot_cfg.get("a_slip_max", 0.0), dtype=jnp.float32),
-        b_backlash=jnp.asarray(robot_cfg.get("b_backlash", 0.0), dtype=jnp.float32),
     )
 
 
@@ -750,7 +742,7 @@ def train_from_logs(
     from datetime import datetime
     from pathlib import Path
 
-    from wmr_simulator.models.io import save_residual_model
+    from wmr_simulator.residual_model.io import save_residual_model
     from wmr_simulator.pololu.log_loader import list_pololu_log_paths, load_pololu_traj_control_log
     from wmr_simulator.visualization.residual import plot_predictions, plot_training_history
 
@@ -953,7 +945,7 @@ def evaluate_on_log(
     """
     from pathlib import Path
 
-    from wmr_simulator.models.io import load_residual_model
+    from wmr_simulator.residual_model.io import load_residual_model
     from wmr_simulator.pololu.log_loader import load_pololu_traj_control_log
     from wmr_simulator.visualization.residual import plot_rollout_comparison
 

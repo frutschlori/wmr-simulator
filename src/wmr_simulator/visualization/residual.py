@@ -1,4 +1,4 @@
-"""Plots for the learned residual dynamics model (models.residual)."""
+"""Plots for the learned residual dynamics model (residual_model.residual)."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
-from wmr_simulator.models.residual import RESIDUAL_OUTPUT_DIM, TARGET_LABELS
+from wmr_simulator.residual_model.residual import RESIDUAL_OUTPUT_DIM, TARGET_LABELS
 
 TWIST_LABELS = (r"$v_x$ [m/s]", r"$v_y$ [m/s]", r"$\omega$ [rad/s]")
 

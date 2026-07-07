@@ -68,11 +68,6 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         "steps": 2000,
         "learning_rate": 1e-3,
         "window_length": None,
-        # Slip elements must start positive to be identified (log-space optimizer);
-        # used when the current robot config carries a zero value.
-        "init_a_slip_max": 5.0,
-        "init_b_backlash": 0.035,
-        "slip_fit_min_wheel_speed": 5.0,
         # Estimate the mocap delay from the identification log (mocap yaw rate
         # vs IMU gyro z, identification/mocap_delay.py) before identifying; the
         # estimate overrides log_loading.mocap_delay and is folded into
@@ -284,8 +279,6 @@ def robot_config_from_problem(problem_cfg: dict) -> dict:
             "gains": [float(gain) for gain in problem_cfg["controller"]["gains"]],
         },
     }
-    for key in ("a_slip_max", "b_backlash", "slip_sigma", "slip_tau"):
-        payload["robot"][key] = float(robot_cfg.get(key, 0.0))
     gain_schedule = problem_cfg["controller"].get("gain_schedule")
     if gain_schedule is not None:
         payload["controller"]["gain_schedule"] = copy.deepcopy(gain_schedule)

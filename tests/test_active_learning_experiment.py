@@ -53,10 +53,7 @@ def test_finalize_rolls_results_into_next_iteration(tmp_path):
             "base_diameter": 0.0912,
             "max_wheel_speed": 240.0,
             "time_constant": 0.21,
-            "a_slip_max": 3.4,
-            "b_backlash": 0.02,
         },
-        "slip_noise": {"sigma": 0.012, "tau": 0.28},
     }
     gains = {
         "gains": [9.1, 8.2, 6.3, 7.0, 11.0, 0.5],
@@ -73,7 +70,6 @@ def test_finalize_rolls_results_into_next_iteration(tmp_path):
 
     next_robot_config = load_yaml(next_paths.robot_config)
     assert next_robot_config["robot"]["wheel_radius"] == 0.0171
-    assert next_robot_config["robot"]["slip_sigma"] == 0.012
     assert next_robot_config["controller"]["gains"] == gains["gains"]
     assert next_robot_config["controller"]["gain_schedule"]["W"] == [[0.1, 0.0]] * 3
 

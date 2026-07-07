@@ -66,8 +66,6 @@ def stage_finalize(experiment: Experiment, iteration: int) -> IterationPaths:
     gains_result = load_yaml(paths.gains_result)
     robot_config = load_yaml(paths.robot_config)
     robot_config["robot"].update(identification["estimated_params"])
-    robot_config["robot"]["slip_sigma"] = float(identification["slip_noise"]["sigma"])
-    robot_config["robot"]["slip_tau"] = float(identification["slip_noise"]["tau"])
     if "mocap_delay" in identification:
         robot_config.setdefault("estimator", {})["mocap_delay"] = float(identification["mocap_delay"])
     robot_config["controller"]["gains"] = [float(gain) for gain in gains_result["gains"]]
@@ -323,7 +321,6 @@ def stage_identify(
         print_delay_result,
     )
     from wmr_simulator.identification.pipeline import run_single_experiment_identification
-    from wmr_simulator.identification.slip_noise import estimate_slip_noise_from_log
     from wmr_simulator.pololu.log_loader import load_pololu_traj_control_log
     from wmr_simulator.types import PhysicalParams, print_physical_params
     from wmr_simulator.visualization.identification import plot_loss_history, plot_system_id
@@ -357,8 +354,6 @@ def stage_identify(
         base_diameter=jnp.asarray(robot_config["base_diameter"]),
         max_wheel_speed=jnp.asarray(robot_config["max_wheel_speed"]),
         time_constant=jnp.asarray(robot_config["time_constant"]),
-        a_slip_max=jnp.asarray(robot_config["a_slip_max"] or config["init_a_slip_max"]),
-        b_backlash=jnp.asarray(robot_config["b_backlash"] or config["init_b_backlash"]),
     )
 
     pololu_log = load_pololu_traj_control_log(
@@ -381,13 +376,6 @@ def stage_identify(
     print(f"Final normalized geometry loss: {float(result['loss_history'][-1]):.8f}")
     print(f"Final normalized motor loss:    {float(result['motor_loss_history'][-1]):.8f}")
 
-    slip_fit = estimate_slip_noise_from_log(
-        result["pipeline"].target_log,
-        estimated_params,
-        min_wheel_speed=float(config["slip_fit_min_wheel_speed"]),
-    )
-    print(f"Fitted AR(1) slip noise: sigma={float(slip_fit['sigma']):.4f}, tau={float(slip_fit['tau']):.4f} s")
-
     payload = {
         "log": str(log_path),
         "estimated_params": {
@@ -395,10 +383,7 @@ def stage_identify(
             "base_diameter": float(estimated_params.base_diameter),
             "max_wheel_speed": float(estimated_params.max_wheel_speed),
             "time_constant": float(estimated_params.time_constant),
-            "a_slip_max": float(estimated_params.a_slip_max),
-            "b_backlash": float(estimated_params.b_backlash),
         },
-        "slip_noise": {key: float(slip_fit[key]) for key in ("sigma", "tau", "sigma_r", "tau_r", "sigma_l", "tau_l")},
         "mocap_delay": mocap_delay,
         "mocap_delay_estimated": bool(estimate_mocap_delay),
         "final_loss": float(result["loss_history"][-1]),
@@ -408,8 +393,6 @@ def stage_identify(
 
     identified_robot_config = load_yaml(paths.robot_config)
     identified_robot_config["robot"].update(payload["estimated_params"])
-    identified_robot_config["robot"]["slip_sigma"] = payload["slip_noise"]["sigma"]
-    identified_robot_config["robot"]["slip_tau"] = payload["slip_noise"]["tau"]
     identified_robot_config.setdefault("estimator", {})["mocap_delay"] = mocap_delay
     write_iteration_problem(experiment.config["problem"], identified_robot_config, paths.problem_identified)
     print(f"Wrote {paths.identification_result} and {paths.problem_identified}")
@@ -456,7 +439,7 @@ def _resolve_log_path(paths: IterationPaths, log: str | None) -> Path:
 
 def stage_train_residual(experiment: Experiment, iteration: int) -> Path:
     """Train the residual dynamics model on all decoded logs of this iteration."""
-    from wmr_simulator.models.residual import train_from_logs
+    from wmr_simulator.residual_model.residual import train_from_logs
 
     paths = experiment.paths(iteration)
     config = experiment.config["residual"]
@@ -529,7 +512,7 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
                 f"use_residual_model is enabled but {paths.residual_model} is missing; "
                 "run train-residual first (or disable the flag in experiment.yaml)."
             )
-        from wmr_simulator.models import load_residual_model
+        from wmr_simulator.residual_model import load_residual_model
 
         residual_model, checkpoint = load_residual_model(paths.residual_model)
         print(f"Loaded residual model {paths.residual_model} (config: {checkpoint['config']})")
