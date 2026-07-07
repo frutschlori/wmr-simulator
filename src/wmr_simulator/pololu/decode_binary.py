@@ -6,6 +6,7 @@ import math
 
 CSV_HEADER = "ts,x,y,yaw,x_des,y_des,yaw_des,v_ff,w_ff,v_actual,w_actual,omega_l_cmd,omega_r_cmd,omega_l_meas,omega_r_meas,duty_l,duty_r,x_err,y_err,yaw_err,x_raw,y_raw,yaw_raw,acc_x,acc_y,acc_z,gyro_x,gyro_y,gyro_z\n"
 MAGIC_HEADER = b"\xaa\xbb\xcc\xdd"
+FLOAT_COUNTS = {1: 6, 2: 5, 3: 2, 4: 3, 5: 2, 6: 2, 7: 6, 8: 5, 9: 6}
 
 
 def format_value(val):
@@ -55,9 +56,14 @@ def map_tag_to_row(tag, unpacked, row):
         row[28] = format_value(unpacked[5])  # gyro_z
 
 
+def new_csv_row(t_ms):
+    row = [""] * 29
+    row[0] = str(t_ms)
+    return row
+
+
 def is_compact_format(bin_file, start_pos):
     bin_file.seek(start_pos)
-    float_counts = {1: 6, 2: 5, 3: 2, 4: 3, 5: 2, 6: 2, 7: 6, 8: 5, 9: 6}
     count = 0
     while count < 10:
         header = bin_file.read(5)
@@ -66,9 +72,9 @@ def is_compact_format(bin_file, start_pos):
         if len(header) < 5:
             return count > 0
         t_ms, tag = struct.unpack("<IB", header)
-        if tag not in float_counts:
+        if tag not in FLOAT_COUNTS:
             return False
-        num_floats = float_counts[tag]
+        num_floats = FLOAT_COUNTS[tag]
         payload = bin_file.read(num_floats * 4)
         if len(payload) < num_floats * 4:
             return count > 0
@@ -106,7 +112,8 @@ def decode_file(input_path, output_path=None):
         if is_compact:
             print("Detected Compact Tagged Binary format")
             csv_header = CSV_HEADER
-            float_counts = {1: 6, 2: 5, 3: 2, 4: 3, 5: 2, 6: 2, 7: 6, 8: 5, 9: 6}
+            timestamp_order = []
+            rows_by_timestamp = {}
             while True:
                 header_chunk = bin_file.read(5)
                 if not header_chunk:
@@ -115,20 +122,23 @@ def decode_file(input_path, output_path=None):
                     print("Warning: Trailing partial header ignored")
                     break
                 t_ms, tag = struct.unpack("<IB", header_chunk)
-                if tag not in float_counts:
+                if tag not in FLOAT_COUNTS:
                     print(f"Warning: Invalid tag {tag} at timestamp {t_ms}, skipping rest of file")
                     break
-                num_floats = float_counts[tag]
+                num_floats = FLOAT_COUNTS[tag]
                 payload_chunk = bin_file.read(num_floats * 4)
                 if len(payload_chunk) < num_floats * 4:
                     print("Warning: Trailing partial payload ignored")
                     break
                 unpacked = struct.unpack(f"<{num_floats}f", payload_chunk)
 
-                current_row = [""] * 29
-                current_row[0] = str(t_ms)
-                map_tag_to_row(tag, unpacked, current_row)
-                records.append(",".join(current_row))
+                # Exact millisecond bucketing only: adjacent timestamps such as
+                # 1000 and 1001 ms stay on separate CSV rows.
+                if t_ms not in rows_by_timestamp:
+                    timestamp_order.append(t_ms)
+                    rows_by_timestamp[t_ms] = new_csv_row(t_ms)
+                map_tag_to_row(tag, unpacked, rows_by_timestamp[t_ms])
+            records = [",".join(rows_by_timestamp[t_ms]) for t_ms in timestamp_order]
         else:
             print(f"Error: Unsupported legacy binary format. Only Compact Tagged Binary logs can be decoded.")
             return False

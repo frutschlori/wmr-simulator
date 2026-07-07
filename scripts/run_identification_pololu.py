@@ -65,8 +65,15 @@ def main():
                         default="Pololu Data/Experiments/2026_07_01/TR03.csv")
     parser.add_argument("--clip-after-first-trajectory", action="store_true", default=True)
     # Zero-phase moving-average window (seconds) applied to the mocap positions in the
-    # log loader; 0 disables. Mitigates differentiation noise in the slip-noise fit.
+    # log loader before the spline fit; 0 disables.
     parser.add_argument("--mocap-filter-window", type=float, default=0.0)
+    # Smoothing-spline parameters for the mocap poses/twists (see
+    # pololu.pose_smoothing.fit_pose_splines and the log loader). The spline
+    # twists feed the slip-noise fit directly.
+    parser.add_argument("--spline-order", type=int, default=3)
+    parser.add_argument("--spline-noise-std-xy", type=float, default=1e-3)
+    parser.add_argument("--spline-noise-std-yaw", type=float, default=5e-3)
+    parser.add_argument("--spline-smoothing-factor", type=float, default=1.0)
     # Minimum encoder wheel speed (rad/s) for slip residual samples.
     parser.add_argument("--slip-fit-min-wheel-speed", type=float, default=5.0)
     # Mocap transport latency (seconds); mocap timestamps are shifted back by this
@@ -112,6 +119,10 @@ def main():
         clip_after_first_trajectory=args.clip_after_first_trajectory,
         mocap_filter_window_s=args.mocap_filter_window,
         mocap_delay_s=mocap_delay,
+        spline_order=args.spline_order,
+        spline_noise_std_xy=args.spline_noise_std_xy,
+        spline_noise_std_yaw=args.spline_noise_std_yaw,
+        spline_smoothing_factor=args.spline_smoothing_factor,
     )
 
     result = run_single_experiment_identification(
@@ -147,9 +158,8 @@ def main():
     print(f"  left wheel:  sigma = {100.0 * slip_fit['sigma_l']:.3f} %, tau = {slip_fit['tau_l']:.4f} s "
           f"({slip_fit['num_samples_l']} samples)")
     print(f"  averaged ->  slip_sigma: {slip_fit['sigma']:.4f}, slip_tau: {slip_fit['tau']:.4f}  (YAML robot block values)")
-    if args.mocap_filter_window <= 0.0:
-        print("  note: mocap positions unfiltered; differentiation noise inflates sigma and biases tau low."
-              " Consider --mocap-filter-window (e.g. 0.05).")
+    print("  note: velocities come from the smoothing-spline derivative"
+          " (--spline-* options); harder smoothing shrinks sigma.")
 
     out_prefix = "identification_log_{name}".format(name=args.pololu_log[-4:])
     plot_system_id(

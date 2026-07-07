@@ -205,7 +205,14 @@ def plot_log(
     line_mocap_w = ax_w.plot(mocap_time, mocap_vel[:, 1], color="goldenrod", linewidth=0.65, label="mocap omega")[0]
     velocity_lines = [line_ref_v, line_mocap_v, line_ref_w, line_mocap_w]
     if len(imu_time):
-        line_gyro_z = ax_w.plot(imu_time, gyro_z[:, 0], color="tab:purple", linewidth=0.45, alpha=0.8, label="imu gyro z")[0]
+        line_gyro_z = ax_w.plot(
+            imu_time,
+            np.deg2rad(gyro_z[:, 0]),
+            color="tab:purple",
+            linewidth=0.45,
+            alpha=0.8,
+            label="imu gyro z",
+        )[0]
         velocity_lines.append(line_gyro_z)
     ax_v.set_xlabel("time [s]")
     ax_v.set_ylabel("linear velocity [m/s]")
@@ -225,12 +232,13 @@ def plot_log(
         ax.plot(wheel_time, wheel_speeds[:, 1], color="tab:orange", linewidth=0.8, label="meas left")[0],
     ]
     if len(duty_time):
-        duty_time, duty_right = stair_series(duty_time, duty_cycle[:, 0], wheel_time[-1] if len(wheel_time) else None)
-        _, duty_left = stair_series(duty_time, duty_cycle[:, 1], wheel_time[-1] if len(wheel_time) else None)
+        duty_end_time = wheel_time[-1] if len(wheel_time) else None
+        duty_right_time, duty_right = stair_series(duty_time, duty_cycle[:, 0], duty_end_time)
+        duty_left_time, duty_left = stair_series(duty_time, duty_cycle[:, 1], duty_end_time)
         lines.extend(
             [
                 ax_duty.step(
-                    duty_time,
+                    duty_right_time,
                     duty_right,
                     where="post",
                     color="tab:green",
@@ -240,7 +248,7 @@ def plot_log(
                     label="duty right",
                 )[0],
                 ax_duty.step(
-                    duty_time,
+                    duty_left_time,
                     duty_left,
                     where="post",
                     color="tab:orange",

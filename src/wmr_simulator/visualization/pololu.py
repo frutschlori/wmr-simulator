@@ -10,7 +10,11 @@ def plot_logged_summary(
     *,
     out_prefix: str = "pololu_log",
     out_dir: str | Path = "visualize",
+    imu_time_s: np.ndarray | None = None,
+    imu_gyro_z: np.ndarray | None = None,
 ) -> Path:
+    """Six-panel overview of one log; ``imu_gyro_z`` (rad/s, see
+    pololu.log_loader.load_imu_gyro_z) is overlaid on the mocap omega."""
     plt = _plot_module()
 
     out_dir = Path(out_dir)
@@ -25,13 +29,28 @@ def plot_logged_summary(
     wheel_cmd = np.asarray(log.pose.wheel_cmd, dtype=float)
     wheel_time = np.asarray(log.wheel.time_s, dtype=float)
     wheel_speeds = np.asarray(log.wheel.speeds, dtype=float)
-    mocap_vel_time, mocap_vel = _mocap_vel_omega(pose_time, measured_pose)
+
+    # Pololu logs carry spline-smoothed poses in states, the raw mocap in
+    # true_states and spline-derivative twists; show the raw stream as slim
+    # background lines. Simulated logs (twists None) keep the single-stream plot.
+    pose_twists = getattr(log.pose, "twists", None)
+    raw_pose = np.asarray(log.pose.true_states, dtype=float) if pose_twists is not None else None
+    if pose_twists is not None:
+        mocap_vel_time = pose_time
+        mocap_vel = np.asarray(pose_twists, dtype=float)[:, [0, 2]]
+        raw_vel_time, raw_vel = _mocap_vel_omega(pose_time, raw_pose)
+    else:
+        mocap_vel_time, mocap_vel = _mocap_vel_omega(pose_time, measured_pose)
+        raw_vel_time = raw_vel = None
+    raw_style = dict(linewidth=0.4, alpha=0.7)
 
     fig, axes = plt.subplots(2, 3, figsize=(18, 10))
     fig.suptitle(f"Pololu Log Summary ({out_prefix})", fontsize=16)
 
     ax_traj = axes[0, 0]
     ax_traj.plot(reference[:, 0], reference[:, 1], color="tab:red", linestyle="--", linewidth=1.0, label="Reference")
+    if raw_pose is not None:
+        ax_traj.plot(raw_pose[:, 0], raw_pose[:, 1], color="tab:blue", **raw_style, label="Measured (raw)")
     ax_traj.plot(measured_pose[:, 0], measured_pose[:, 1], color="tab:blue", linewidth=0.8, label="Measured")
     ax_traj.set_xlabel("x [m]")
     ax_traj.set_ylabel("y [m]")
@@ -44,6 +63,11 @@ def plot_logged_summary(
     ax_vel_omega = ax_vel.twinx()
     reference_speed = np.linalg.norm(reference[:, 3:5], axis=1)
     line_ref_v = ax_vel.step(ref_time, reference_speed, where="post", color="lightskyblue", linestyle="--", linewidth=0.9, label="ref v")[0]
+    velocity_handles_raw = []
+    if raw_vel is not None:
+        velocity_handles_raw.append(
+            ax_vel.plot(raw_vel_time, raw_vel[:, 0], color="tab:blue", **raw_style, label="mocap v (raw)")[0]
+        )
     line_mocap_v = ax_vel.plot(
         mocap_vel_time,
         mocap_vel[:, 0],
@@ -52,6 +76,21 @@ def plot_logged_summary(
         label="mocap v",
     )[0]
     line_ref_w = ax_vel_omega.step(ref_time, reference[:, 5], where="post", color="khaki", linestyle="--", linewidth=0.9, label=r"ref $\omega$")[0]
+    if raw_vel is not None:
+        velocity_handles_raw.append(
+            ax_vel_omega.plot(raw_vel_time, raw_vel[:, 1], color="goldenrod", **raw_style, label=r"mocap $\omega$ (raw)")[0]
+        )
+    if imu_gyro_z is not None and imu_time_s is not None and len(imu_time_s):
+        velocity_handles_raw.append(
+            ax_vel_omega.plot(
+                np.asarray(imu_time_s, dtype=float),
+                np.asarray(imu_gyro_z, dtype=float),
+                color="tab:purple",
+                linewidth=0.5,
+                alpha=0.7,
+                label=r"IMU $\omega$",
+            )[0]
+        )
     line_mocap_w = ax_vel_omega.plot(
         mocap_vel_time,
         mocap_vel[:, 1],
@@ -65,7 +104,7 @@ def plot_logged_summary(
     ax_vel.set_title("Velocity")
     ax_vel.grid(True)
     ax_vel.legend(
-        handles=[line_ref_v, line_mocap_v, line_ref_w, line_mocap_w],
+        handles=[line_ref_v, line_mocap_v, line_ref_w, line_mocap_w, *velocity_handles_raw],
         loc="best",
     )
 
@@ -86,6 +125,8 @@ def plot_logged_summary(
     titles = ("x State", "y State", "theta State")
     for index, ax in enumerate(axes[1, :]):
         ax.step(ref_time, reference[:, index], where="post", color="tab:red", linestyle="--", linewidth=0.9, label="Reference")
+        if raw_pose is not None:
+            ax.plot(pose_time, raw_pose[:, index], color="tab:blue", **raw_style, label="Measured (raw)")
         ax.plot(pose_time, measured_pose[:, index], color="tab:blue", linewidth=0.95, label="Measured")
         ax.set_xlabel("time [s]")
         ax.set_ylabel(labels[index])

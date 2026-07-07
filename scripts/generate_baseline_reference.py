@@ -98,7 +98,7 @@ def main():
     parser.add_argument("--export-dir", default="trajectory_exports/baselines")
     parser.add_argument("--name", default=None, help="Export stem (default: baseline_<type>_<timestamp>).")
     # Shared parameters
-    parser.add_argument("--time", type=float, default=10.0, help="Total trajectory time in seconds.")
+    parser.add_argument("--time", type=float, default=15.0, help="Total trajectory time in seconds.")
     parser.add_argument("--center", type=float, nargs=2, default=[0.0, 0.0], help="Path center [x y] in meters.")
     # Circle parameters
     parser.add_argument("--radius", type=float, default=0.5, help="Circle radius in meters.")
@@ -114,7 +114,7 @@ def main():
     # Lemniscate ramp parameters
     parser.add_argument("--speed-rate", type=float, default=1.5,
                         help="Phase-rate growth factor per completed cycle (lemniscate-ramp).")
-    parser.add_argument("--amplitude", type=float, default=0.5, help="Lemniscate amplitude in meters (ramp mode).")
+    parser.add_argument("--amplitude", type=float, default=1, help="Lemniscate amplitude in meters (ramp mode).")
     parser.add_argument("--ramp-up-fraction", type=float, default=0.2)
     parser.add_argument("--ramp-down-fraction", type=float, default=0.1)
     # Simulation settings

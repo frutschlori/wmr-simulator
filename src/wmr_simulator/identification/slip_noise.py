@@ -22,8 +22,10 @@ defines as slip (u_eff = u_enc * (1 - eta)):
    (wmr_simulator.slip.fit_ar1_moments; first-order Gauss-Markov, Maybeck 1979).
 
 Mocap differentiation amplifies measurement noise, which inflates sigma_hat and
-biases tau_hat low; apply the zero-phase mocap filter in the log loader first
-(pololu.log_loader, mocap_filter_window_s) to mitigate this.
+biases tau_hat low; logs loaded through pololu.log_loader carry spline-derived
+body twists (pose.twists) which are used directly instead of finite
+differences. The finite-difference path remains as a fallback for arrays
+without twists.
 """
 
 import numpy as np
@@ -39,12 +41,16 @@ def slip_residual_series(
     wheel_speeds: np.ndarray,
     params: PhysicalParams,
     min_wheel_speed: float = 5.0,
+    pose_twists: np.ndarray | None = None,
 ) -> dict:
     """Fractional wheel slip residuals eta_r, eta_l from pose and encoder streams.
 
     ``pose_states`` are [x, y, theta] (mocap), ``wheel_speeds`` are the encoder
-    wheel speeds [u_r, u_l]. Returns the per-wheel residual series, the validity
-    mask (encoder speed above ``min_wheel_speed`` rad/s) and the median sample dt.
+    wheel speeds [u_r, u_l]. ``pose_twists`` are spline-derived body twists
+    [v_x, v_y, omega] at the pose times (pololu.pose_smoothing); when given,
+    they replace the finite-difference velocities. Returns the per-wheel
+    residual series, the validity mask (encoder speed above
+    ``min_wheel_speed`` rad/s) and the median sample dt.
     """
     pose_time_s = np.asarray(pose_time_s, dtype=float)
     pose_states = np.asarray(pose_states, dtype=float)
@@ -53,15 +59,20 @@ def slip_residual_series(
 
     dt = np.diff(pose_time_s)
     valid_dt = dt > 1e-6
-    dx = np.diff(pose_states[:, 0])
-    dy = np.diff(pose_states[:, 1])
-    dyaw = _wrap_to_pi(np.diff(pose_states[:, 2]))
-    theta = pose_states[:-1, 2]  # interval start, consistent with Euler integration
+    if pose_twists is not None:
+        pose_twists = np.asarray(pose_twists, dtype=float)
+        v_meas = pose_twists[:-1, 0]  # interval start, consistent with Euler integration
+        omega_meas = pose_twists[:-1, 2]
+    else:
+        dx = np.diff(pose_states[:, 0])
+        dy = np.diff(pose_states[:, 1])
+        dyaw = _wrap_to_pi(np.diff(pose_states[:, 2]))
+        theta = pose_states[:-1, 2]  # interval start, consistent with Euler integration
 
-    safe_dt = np.maximum(dt, 1e-9)
-    # Body-frame projection: forward displacement -> v, heading change -> omega.
-    v_meas = (dx * np.cos(theta) + dy * np.sin(theta)) / safe_dt
-    omega_meas = dyaw / safe_dt
+        safe_dt = np.maximum(dt, 1e-9)
+        # Body-frame projection: forward displacement -> v, heading change -> omega.
+        v_meas = (dx * np.cos(theta) + dy * np.sin(theta)) / safe_dt
+        omega_meas = dyaw / safe_dt
 
     r = float(params.wheel_radius)
     effective_wheelbase = float(params.base_diameter)
@@ -99,6 +110,7 @@ def estimate_slip_noise(
     wheel_speeds: np.ndarray,
     params: PhysicalParams,
     min_wheel_speed: float = 5.0,
+    pose_twists: np.ndarray | None = None,
 ) -> dict:
     """Fit AR(1) slip noise (sigma, tau) per wheel and averaged.
 
@@ -107,7 +119,13 @@ def estimate_slip_noise(
     with sustained motion for the fit.
     """
     residuals = slip_residual_series(
-        pose_time_s, pose_states, wheel_time_s, wheel_speeds, params, min_wheel_speed
+        pose_time_s,
+        pose_states,
+        wheel_time_s,
+        wheel_speeds,
+        params,
+        min_wheel_speed,
+        pose_twists=pose_twists,
     )
     results = {}
     sigmas, taus = [], []
@@ -136,6 +154,7 @@ def estimate_slip_noise_from_log(
     min_wheel_speed: float = 5.0,
 ) -> dict:
     """Convenience wrapper: fit AR(1) slip noise from a SimulationLog (e.g. a Pololu log)."""
+    pose_twists = getattr(target_log.pose, "twists", None)
     return estimate_slip_noise(
         np.asarray(target_log.pose.time_s),
         np.asarray(target_log.pose.states),
@@ -143,6 +162,7 @@ def estimate_slip_noise_from_log(
         np.asarray(target_log.wheel.speeds),
         params,
         min_wheel_speed=min_wheel_speed,
+        pose_twists=None if pose_twists is None else np.asarray(pose_twists),
     )
 
 

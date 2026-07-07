@@ -143,7 +143,16 @@ def estimate_mocap_delay_from_log_file(
         raise ValueError(f"{log_path} contains too few mocap samples for delay estimation.")
 
     pose_states = _filter_mocap_poses(pose_time, pose_states, mocap_filter_window_s)
-    omega_time, omega_mocap = mocap_yaw_rate(pose_time, pose_states[:, 2])
+    # Smooth yaw rate from the analytic spline derivative (pololu.pose_smoothing);
+    # finite differences remain the fallback for very short pose streams.
+    from wmr_simulator.pololu.pose_smoothing import fit_pose_splines
+
+    try:
+        splines = fit_pose_splines(pose_time, pose_states)
+        omega_time = np.asarray(pose_time, dtype=float)
+        omega_mocap = splines.world_velocity(omega_time)[:, 2]
+    except ValueError:
+        omega_time, omega_mocap = mocap_yaw_rate(pose_time, pose_states[:, 2])
 
     result = estimate_delay_by_crosscorrelation(
         omega_time,
@@ -176,7 +185,7 @@ def main(argv: list[str] | None = None) -> int:
         "the finite-difference mocap yaw rate with the IMU gyro z."
     )
     parser.add_argument("--log", type=str, required=True, help="Pololu csv log with IMU data.")
-    parser.add_argument("--max-delay", type=float, default=0.2, help="Search range in seconds (both directions).")
+    parser.add_argument("--max-delay", type=float, default=0.05, help="Search range in seconds (both directions).")
     # Zero-phase moving-average window (seconds) on mocap poses before differencing.
     parser.add_argument("--mocap-filter-window", type=float, default=0.0)
     parser.add_argument("--plot", action="store_true", help="Save the correlation-vs-lag curve to visualize/.")

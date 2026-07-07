@@ -174,22 +174,22 @@ def build_residual_dataset(
 ) -> dict:
     """Supervised state-action samples from one experiment log.
 
-    Measured twist: unwrap the mocap yaw, finite-difference the poses over each
-    mocap interval, rotate the world-frame displacement into the body frame at
-    the interval start (consistent with Euler integration). Nominal twist:
-    encoder wheel speeds interpolated to the interval starts, passed through
-    the identified deterministic slip elements (gearbox backlash, traction
-    limit) and the ideal differential-drive kinematics. Sample t uses interval
-    t-1's measured twist as the state input (see module docstring), so the
-    first interval is consumed as state only.
+    Measured twist: the log's spline-derived body twists (``log.pose.twists``,
+    see pololu.pose_smoothing) taken at the interval starts, consistent with
+    Euler integration. Logs without twists (older pickles, simulated logs)
+    fall back to finite-differencing the poses over each mocap interval and
+    rotating the world-frame displacement into the body frame at the interval
+    start. Nominal twist: encoder wheel speeds interpolated to the interval
+    starts, passed through the identified deterministic slip elements (gearbox
+    backlash, traction limit) and the ideal differential-drive kinematics.
+    Sample t uses interval t-1's measured twist as the state input (see module
+    docstring), so the first interval is consumed as state only.
 
-    ``resample_uniform`` interpolates the (already filtered) poses onto a
-    uniform median-dt grid before differencing. Recorded mocap timestamps carry
-    logging jitter (the old 2 ms decode bucketing especially), and dividing a
-    real ~10 ms displacement by a jittered 3-5 ms dt fabricates 2-3 m/s
-    velocity spikes; interpolation error on a smooth trajectory (~a*dt^2/8,
-    sub-0.1 mm) is negligible against that. Disable to difference at the raw
-    event timestamps, e.g. for logs whose timestamps are trusted.
+    ``resample_uniform`` interpolates the poses (and twists) onto a uniform
+    median-dt grid. For the finite-difference fallback this protects against
+    logging-timestamp jitter (dividing a real ~10 ms displacement by a
+    jittered 3-5 ms dt fabricates 2-3 m/s velocity spikes); with spline twists
+    it merely regularizes the sample spacing.
 
     ``max_dt_factor`` drops mocap intervals longer than that multiple of the
     median interval (stream gaps make the finite-difference twist meaningless);
@@ -201,25 +201,35 @@ def build_residual_dataset(
 
     pose_time_s = np.asarray(log.pose.time_s, dtype=float)
     pose_states = np.asarray(log.pose.states, dtype=float)
+    pose_twists = getattr(log.pose, "twists", None)
+    if pose_twists is not None:
+        pose_twists = np.asarray(pose_twists, dtype=float)
     wheel_time_s = np.asarray(log.wheel.time_s, dtype=float)
     wheel_speeds = np.asarray(log.wheel.speeds, dtype=float)
     duty_cycle = np.asarray(log.wheel.duty_cycle, dtype=float)
 
     if resample_uniform:
-        pose_time_s, pose_states = _resample_poses_uniform(pose_time_s, pose_states)
+        pose_time_s, pose_states, pose_twists = _resample_poses_uniform(
+            pose_time_s, pose_states, pose_twists
+        )
 
-    # Measured body twist from mocap finite differences.
-    theta_unwrapped = np.unwrap(pose_states[:, 2])
     dt = np.diff(pose_time_s)
-    safe_dt = np.maximum(dt, 1e-9)
-    dx = np.diff(pose_states[:, 0])
-    dy = np.diff(pose_states[:, 1])
-    theta = pose_states[:-1, 2]  # interval start, consistent with Euler integration
-    cos_t, sin_t = np.cos(theta), np.sin(theta)
-    v_x_meas = (dx * cos_t + dy * sin_t) / safe_dt
-    v_y_meas = (-dx * sin_t + dy * cos_t) / safe_dt
-    omega_meas = np.diff(theta_unwrapped) / safe_dt
-    measured_twist = np.column_stack([v_x_meas, v_y_meas, omega_meas])
+    if pose_twists is not None:
+        # Spline-derived instantaneous twist at the interval start, consistent
+        # with the Euler-integration convention used for the nominal twist.
+        measured_twist = pose_twists[:-1]
+    else:
+        # Fallback: measured body twist from mocap finite differences.
+        theta_unwrapped = np.unwrap(pose_states[:, 2])
+        safe_dt = np.maximum(dt, 1e-9)
+        dx = np.diff(pose_states[:, 0])
+        dy = np.diff(pose_states[:, 1])
+        theta = pose_states[:-1, 2]  # interval start, consistent with Euler integration
+        cos_t, sin_t = np.cos(theta), np.sin(theta)
+        v_x_meas = (dx * cos_t + dy * sin_t) / safe_dt
+        v_y_meas = (-dx * sin_t + dy * cos_t) / safe_dt
+        omega_meas = np.diff(theta_unwrapped) / safe_dt
+        measured_twist = np.column_stack([v_x_meas, v_y_meas, omega_meas])
 
     # Nominal twist from encoder speeds through the deterministic slip elements.
     interval_time = pose_time_s[:-1]
@@ -260,6 +270,16 @@ def build_residual_dataset(
         "pose_states": pose_states.astype(np.float32),
         "pose_time_s": pose_time_s.astype(np.float32),
         "mask": mask,
+        # Contiguous (unmasked) per-interval arrays for multi-step rollout
+        # training; interval_ok flags which intervals a window may cover.
+        "seq": {
+            "dt": dt.astype(np.float32),
+            "measured_twist": measured_twist.astype(np.float32),
+            "nominal_twist": nominal_twist.astype(np.float32),
+            "actions": np.column_stack([u_r_enc, u_l_enc, duty]).astype(np.float32),
+            "poses": pose_states.astype(np.float32),
+            "interval_ok": interval_ok,
+        },
     }
 
 
@@ -414,6 +434,182 @@ def train_residual_model(
     return model, history
 
 
+def build_residual_sequences(dataset: dict, window_length: int, stride: int) -> dict:
+    """Contiguous rollout windows from one log's dataset for multi-step training.
+
+    A window starting at interval s needs intervals s-1 (initial state twist)
+    through s+K-1 all valid. Returns stacked float32 arrays:
+    ``init_twist`` (W, 3), ``nominal_twist`` (W, K, 3), ``actions`` (W, K, 4),
+    ``poses`` (W, K+1, 3) and ``dt`` (W, K); poses[i, 0] is the window's start
+    pose on the (uniform) mocap grid.
+    """
+    seq = dataset["seq"]
+    interval_ok = np.asarray(seq["interval_ok"], dtype=bool)
+    num_intervals = len(seq["dt"])
+    starts = [
+        s
+        for s in range(1, num_intervals - window_length + 1, max(stride, 1))
+        if interval_ok[s - 1 : s + window_length].all()
+    ]
+    if not starts:
+        empty = lambda *shape: np.empty(shape, dtype=np.float32)  # noqa: E731
+        return {
+            "init_twist": empty(0, 3),
+            "nominal_twist": empty(0, window_length, 3),
+            "actions": empty(0, window_length, 4),
+            "poses": empty(0, window_length + 1, 3),
+            "dt": empty(0, window_length),
+        }
+    return {
+        "init_twist": np.stack([seq["measured_twist"][s - 1] for s in starts]),
+        "nominal_twist": np.stack([seq["nominal_twist"][s : s + window_length] for s in starts]),
+        "actions": np.stack([seq["actions"][s : s + window_length] for s in starts]),
+        "poses": np.stack([seq["poses"][s : s + window_length + 1] for s in starts]),
+        "dt": np.stack([seq["dt"][s : s + window_length] for s in starts]),
+    }
+
+
+def stack_sequences(sequence_sets: list[dict]) -> dict:
+    keys = ("init_twist", "nominal_twist", "actions", "poses", "dt")
+    return {key: np.concatenate([s[key] for s in sequence_sets], axis=0) for key in keys}
+
+
+def train_residual_model_multistep(
+    train_sequences: dict,
+    validation_sequences: dict,
+    normalization: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+    *,
+    initial_mlp=None,
+    seed: int = 0,
+    hidden_width: int = 200,
+    hidden_depth: int = 4,
+    epochs: int = 2000,
+    batch_size: int = 64,
+    learning_rate: float = 1e-4,
+    heading_weight: float = 0.1,
+    output_reg_weight: float = 1e-3,
+):
+    """Fine-tune the residual MLP on multi-step open-loop rollouts.
+
+    Each window is rolled out with the model feeding back its *own* corrected
+    twist as the next state input (exactly the regime it faces in closed-loop
+    simulation), integrating the corrected twists into poses. The loss is the
+    mean squared position error against the (smooth) mocap poses plus a
+    heading term ``2 - 2 cos(dtheta)`` weighted by ``heading_weight`` and a
+    small std-scaled output-magnitude penalty. Because the supervision lives
+    at the pose level, the twist-differentiation noise that dominates the
+    one-step targets is integrated away, and the compounding-error/covariate
+    shift of self-fed rollouts is trained on instead of ignored.
+
+    ``normalization`` is (input_mean, input_std, target_mean, target_std) from
+    the one-step dataset; ``initial_mlp`` warm-starts from a one-step
+    pretrained MLP. History losses are the full rollout objective (train) and
+    the same objective without the output penalty (validation).
+    """
+    import optax
+
+    input_mean, input_std, target_mean, target_std = (
+        jnp.asarray(v, dtype=jnp.float32) for v in normalization
+    )
+
+    if initial_mlp is None:
+        initial_mlp = init_residual_model(
+            jax.random.PRNGKey(seed),
+            input_dim=int(input_mean.shape[0]),
+            hidden_width=hidden_width,
+            hidden_depth=hidden_depth,
+            output_dim=int(target_mean.shape[0]),
+        ).mlp
+    mlp = initial_mlp
+    optimizer = optax.adam(learning_rate)
+    opt_state = optimizer.init(eqx.filter(mlp, eqx.is_array))
+
+    def to_jnp(sequences):
+        return {key: jnp.asarray(value, dtype=jnp.float32) for key, value in sequences.items()}
+
+    train_data = to_jnp(train_sequences)
+    has_validation = len(validation_sequences["dt"]) > 0
+    if has_validation:
+        validation_data = to_jnp(validation_sequences)
+
+    def rollout_terms(net, init_twist, nominal, actions, poses, dt):
+        def step(carry, inputs):
+            twist, pose = carry
+            nominal_t, action_t, pose_ref, step_dt = inputs
+            features = jnp.concatenate([twist, action_t])
+            normalized = (features - input_mean) / input_std
+            delta = net(normalized) * target_std + target_mean
+            new_twist = jnp.array(
+                [nominal_t[0] + delta[0], delta[1], nominal_t[2] + delta[2]]
+            )
+            x, y, theta = pose
+            cos_t, sin_t = jnp.cos(theta), jnp.sin(theta)
+            new_pose = jnp.array(
+                [
+                    x + (new_twist[0] * cos_t - new_twist[1] * sin_t) * step_dt,
+                    y + (new_twist[0] * sin_t + new_twist[1] * cos_t) * step_dt,
+                    theta + new_twist[2] * step_dt,  # unwrapped; compared via cos below
+                ]
+            )
+            position_error = jnp.sum((new_pose[:2] - pose_ref[:2]) ** 2)
+            heading_error = 2.0 - 2.0 * jnp.cos(new_pose[2] - pose_ref[2])
+            output_norm = jnp.sum((delta / target_std) ** 2)
+            return (new_twist, new_pose), (position_error, heading_error, output_norm)
+
+        _, (position_error, heading_error, output_norm) = jax.lax.scan(
+            step, (init_twist, poses[0]), (nominal, actions, poses[1:], dt)
+        )
+        return jnp.mean(position_error), jnp.mean(heading_error), jnp.mean(output_norm)
+
+    def batch_loss(net, data, with_reg: bool):
+        position_error, heading_error, output_norm = jax.vmap(
+            lambda i, n, a, p, d: rollout_terms(net, i, n, a, p, d)
+        )(data["init_twist"], data["nominal_twist"], data["actions"], data["poses"], data["dt"])
+        loss = jnp.mean(position_error) + heading_weight * jnp.mean(heading_error)
+        if with_reg:
+            loss = loss + output_reg_weight * jnp.mean(output_norm)
+        return loss
+
+    @eqx.filter_jit
+    def train_step(net, opt_state, data):
+        loss, grads = eqx.filter_value_and_grad(lambda m, d: batch_loss(m, d, True))(net, data)
+        updates, opt_state = optimizer.update(grads, opt_state)
+        net = eqx.apply_updates(net, updates)
+        return net, opt_state, loss
+
+    eval_loss = eqx.filter_jit(lambda net, data: batch_loss(net, data, False))
+
+    rng = np.random.default_rng(seed)
+    num_windows = len(train_sequences["dt"])
+    batch_size = min(batch_size, num_windows)
+    history = {"train_loss": [], "validation_loss": []}
+
+    for epoch in range(epochs):
+        permutation = rng.permutation(num_windows)
+        for start in range(0, num_windows, batch_size):
+            batch = permutation[start : start + batch_size]
+            batch_data = {key: value[batch] for key, value in train_data.items()}
+            mlp, opt_state, _ = train_step(mlp, opt_state, batch_data)
+        history["train_loss"].append(float(eval_loss(mlp, train_data)))
+        history["validation_loss"].append(
+            float(eval_loss(mlp, validation_data)) if has_validation else float("nan")
+        )
+        if epoch % max(epochs // 20, 1) == 0 or epoch == epochs - 1:
+            print(
+                f"rollout epoch {epoch + 1:4d}/{epochs}: train {history['train_loss'][-1]:.6f}"
+                f"  validation {history['validation_loss'][-1]:.6f}"
+            )
+
+    model = ResidualDynamicsModel(
+        mlp=mlp,
+        input_mean=input_mean,
+        input_std=input_std,
+        target_mean=target_mean,
+        target_std=target_std,
+    )
+    return model, history
+
+
 # ---------------------------------------------------------------------------
 # Evaluation helpers
 # ---------------------------------------------------------------------------
@@ -528,9 +724,20 @@ def train_from_logs(
     validation_split: float = 0.25,
     seed: int = 0,
     output_reg_weight: float = 1.0,
+    multistep_window: int = 20,
+    multistep_epochs: int = 2000,
+    multistep_stride: int = 5,
+    multistep_batch_size: int = 64,
+    multistep_learning_rate: float = 1e-4,
+    multistep_heading_weight: float = 0.1,
+    multistep_output_reg_weight: float = 1e-3,
     clip_after_first_trajectory: bool = True,
-    mocap_filter_window_s: float = 0.05,
+    mocap_filter_window_s: float = 0.0,
     mocap_delay_s: float = 0.0,
+    spline_order: int = 3,
+    spline_noise_std_xy: float = 1e-3,
+    spline_noise_std_yaw: float = 5e-3,
+    spline_smoothing_factor: float = 1.0,
     resample_uniform: bool = True,
     out_dir: str = "visualize",
 ) -> ResidualDynamicsModel:
@@ -556,13 +763,18 @@ def train_from_logs(
             clip_after_first_trajectory=clip_after_first_trajectory,
             mocap_filter_window_s=mocap_filter_window_s,
             mocap_delay_s=mocap_delay_s,
+            spline_order=spline_order,
+            spline_noise_std_xy=spline_noise_std_xy,
+            spline_noise_std_yaw=spline_noise_std_yaw,
+            spline_smoothing_factor=spline_smoothing_factor,
         )
         dataset = build_residual_dataset(log, params, resample_uniform=resample_uniform)
         datasets.append(dataset)
         print(f"{path}: {len(dataset['features'])} samples")
 
     num_validation_files = int(np.floor(len(datasets) * validation_split))
-    if num_validation_files >= 1 and len(datasets) - num_validation_files >= 1:
+    file_split = num_validation_files >= 1 and len(datasets) - num_validation_files >= 1
+    if file_split:
         train_indices, validation_indices = split_datasets_by_file(datasets, validation_split, seed)
         train_features, train_targets = stack_datasets([datasets[i] for i in train_indices])
         validation_features, validation_targets = stack_datasets([datasets[i] for i in validation_indices])
@@ -593,6 +805,50 @@ def train_from_logs(
         output_reg_weight=output_reg_weight,
     )
 
+    # Multi-step rollout fine-tuning: train on self-fed rollouts against the
+    # (smooth) mocap poses, the same regime the model faces in closed loop.
+    multistep_history = None
+    if multistep_window > 0:
+        if file_split:
+            train_windows = stack_sequences(
+                [build_residual_sequences(datasets[i], multistep_window, multistep_stride) for i in train_indices]
+            )
+            validation_windows = stack_sequences(
+                [build_residual_sequences(datasets[i], multistep_window, multistep_stride) for i in validation_indices]
+            )
+        else:
+            train_parts, validation_parts = [], []
+            for dataset in datasets:
+                windows = build_residual_sequences(dataset, multistep_window, multistep_stride)
+                count = len(windows["dt"])
+                cut = count - int(np.floor(count * validation_split))
+                train_parts.append({key: value[:cut] for key, value in windows.items()})
+                validation_parts.append({key: value[cut:] for key, value in windows.items()})
+            train_windows = stack_sequences(train_parts)
+            validation_windows = stack_sequences(validation_parts)
+        print(
+            f"Rollout fine-tuning: {len(train_windows['dt'])} train / {len(validation_windows['dt'])} validation "
+            f"windows of {multistep_window} steps (stride {multistep_stride})"
+        )
+        normalization = (
+            np.asarray(model.input_mean),
+            np.asarray(model.input_std),
+            np.asarray(model.target_mean),
+            np.asarray(model.target_std),
+        )
+        model, multistep_history = train_residual_model_multistep(
+            train_windows,
+            validation_windows,
+            normalization,
+            initial_mlp=model.mlp,
+            seed=seed,
+            epochs=multistep_epochs,
+            batch_size=multistep_batch_size,
+            learning_rate=multistep_learning_rate,
+            heading_weight=multistep_heading_weight,
+            output_reg_weight=multistep_output_reg_weight,
+        )
+
     config = {
         "input_dim": int(train_features.shape[1]),
         "hidden_width": hidden_width,
@@ -607,20 +863,40 @@ def train_from_logs(
         "validation_files": validation_files,
         "mocap_filter_window_s": mocap_filter_window_s,
         "mocap_delay_s": mocap_delay_s,
+        "spline_order": spline_order,
+        "spline_noise_std_xy": spline_noise_std_xy,
+        "spline_noise_std_yaw": spline_noise_std_yaw,
+        "spline_smoothing_factor": spline_smoothing_factor,
         "resample_uniform": resample_uniform,
         "epochs": epochs,
         "batch_size": batch_size,
         "learning_rate": learning_rate,
         "output_reg_weight": output_reg_weight,
+        "multistep_window": multistep_window,
+        "multistep_epochs": multistep_epochs,
+        "multistep_stride": multistep_stride,
+        "multistep_batch_size": multistep_batch_size,
+        "multistep_learning_rate": multistep_learning_rate,
+        "multistep_heading_weight": multistep_heading_weight,
+        "multistep_output_reg_weight": multistep_output_reg_weight,
         "seed": seed,
         "final_train_loss": history["train_loss"][-1],
         "final_validation_loss": history["validation_loss"][-1],
+        "final_rollout_train_loss": multistep_history["train_loss"][-1] if multistep_history else None,
+        "final_rollout_validation_loss": multistep_history["validation_loss"][-1] if multistep_history else None,
         "trained_at": datetime.now().isoformat(timespec="seconds"),
     }
     save_residual_model(out, model, config, metadata)
     print(f"Saved residual model to {out}")
 
     plot_training_history(history, out_dir=out_dir)
+    if multistep_history is not None:
+        plot_training_history(
+            multistep_history,
+            out_dir=out_dir,
+            out_name="residual_rollout_loss.pdf",
+            ylabel="rollout pose loss",
+        )
     for split_name, features, targets in (
         ("train", train_features, train_targets),
         ("validation", validation_features, validation_targets),
@@ -660,7 +936,11 @@ def evaluate_on_log(
     *,
     problem: str = "problems/pololu_gains.yaml",
     clip_after_first_trajectory: bool = True,
-    mocap_filter_window_s: float = 0.05,
+    mocap_filter_window_s: float = 0.0,
+    spline_order: int = 3,
+    spline_noise_std_xy: float = 1e-3,
+    spline_noise_std_yaw: float = 5e-3,
+    spline_smoothing_factor: float = 1.0,
     resample_uniform: bool = True,
     out_dir: str = "visualize",
     out_prefix: str | None = None,
@@ -689,6 +969,10 @@ def evaluate_on_log(
         log_path,
         clip_after_first_trajectory=clip_after_first_trajectory,
         mocap_filter_window_s=mocap_filter_window_s,
+        spline_order=spline_order,
+        spline_noise_std_xy=spline_noise_std_xy,
+        spline_noise_std_yaw=spline_noise_std_yaw,
+        spline_smoothing_factor=spline_smoothing_factor,
     )
     dataset = build_residual_dataset(log, params, resample_uniform=resample_uniform)
 
@@ -744,13 +1028,13 @@ def train_main(argv=None):
 
     parser = argparse.ArgumentParser(description="Train the residual dynamics model from Pololu logs.")
     parser.add_argument("--problem", type=str, default="problems/pololu_gains.yaml")
-    parser.add_argument("--log-dir", type=str, default="Pololu Data/Experiments/2026_07_01")
+    parser.add_argument("--log-dir", type=str, default="Pololu Data/Experiments/2026_07_06/04_New_Mocap_timestamps/decoded/")
     parser.add_argument("--out", type=str, default="models/residual_pololu.pkl")
-    parser.add_argument("--epochs", type=int, default=7000)
-    parser.add_argument("--batch-size", type=int, default=2048)
-    parser.add_argument("--learning-rate", type=float, default=1e-5)
-    parser.add_argument("--hidden-width", type=int, default=200)
-    parser.add_argument("--hidden-depth", type=int, default=4)
+    parser.add_argument("--epochs", type=int, default=20000)
+    parser.add_argument("--batch-size", type=int, default=4000)
+    parser.add_argument("--learning-rate", type=float, default=5e-5)
+    parser.add_argument("--hidden-width", type=int, default=32)
+    parser.add_argument("--hidden-depth", type=int, default=2)
     parser.add_argument("--validation-split", type=float, default=0.25)
     parser.add_argument("--seed", type=int, default=0)
     # Weight of the squared-norm penalty on the (std-scaled) physical residual
@@ -758,18 +1042,35 @@ def train_main(argv=None):
     # dynamics to keep closed-loop rollouts stable. 0 disables. Empirically on
     # the 2026_07_01 logs, 1e-2 and 1e-1 still destabilize the closed-loop
     # rollout (residual feeds back on its own twist state); 1.0 is stable.
-    parser.add_argument("--output-reg-weight", type=float, default=0.5)
+    parser.add_argument("--output-reg-weight", type=float, default=0.1)
+    # Multi-step rollout fine-tuning (after one-step pretraining): windows of K
+    # uniform mocap intervals are rolled out with the model feeding back its own
+    # corrected twist, supervised by pose error against the smooth mocap poses.
+    # This trains the self-fed regime the model faces in closed loop. 0 disables.
+    parser.add_argument("--multistep-window", type=int, default=50)
+    parser.add_argument("--multistep-epochs", type=int, default=10000)
+    parser.add_argument("--multistep-stride", type=int, default=20)
+    parser.add_argument("--multistep-batch-size", type=int, default=12000)
+    parser.add_argument("--multistep-learning-rate", type=float, default=1e-5)
+    parser.add_argument("--multistep-heading-weight", type=float, default=0.2)
+    parser.add_argument("--multistep-output-reg-weight", type=float, default=1e-3)
     parser.add_argument("--clip-after-first-trajectory", action="store_true", default=True)
     # Resample filtered poses onto a uniform median-dt grid before differencing;
     # protects the twist targets against logging-timestamp jitter (see
     # build_residual_dataset). --no-resample-uniform differences at raw event times.
     parser.add_argument("--resample-uniform", action=argparse.BooleanOptionalAction, default=True)
-    # Zero-phase moving-average window (seconds) on mocap positions; mitigates
-    # differentiation noise in the twist targets. 0 disables.
-    parser.add_argument("--mocap-filter-window", type=float, default=0.1)
+    # Zero-phase moving-average window (seconds) on mocap positions before the
+    # spline fit; 0 disables. The spline smoothing below supersedes it.
+    parser.add_argument("--mocap-filter-window", type=float, default=0.0)
     # Mocap transport latency (seconds); timestamps shifted back before
     # differencing so twist targets align with the actions (identification/mocap_delay.py).
     parser.add_argument("--mocap-delay", type=float, default=0.0)
+    # Smoothing-spline parameters for the mocap poses/twists (see
+    # pololu.pose_smoothing.fit_pose_splines and the log loader).
+    parser.add_argument("--spline-order", type=int, default=3)
+    parser.add_argument("--spline-noise-std-xy", type=float, default=2e-3)
+    parser.add_argument("--spline-noise-std-yaw", type=float, default=5e-3)
+    parser.add_argument("--spline-smoothing-factor", type=float, default=1.0)
     parser.add_argument("--out-dir", type=str, default="visualize")
     args = parser.parse_args(argv)
 
@@ -785,9 +1086,20 @@ def train_main(argv=None):
         validation_split=args.validation_split,
         seed=args.seed,
         output_reg_weight=args.output_reg_weight,
+        multistep_window=args.multistep_window,
+        multistep_epochs=args.multistep_epochs,
+        multistep_stride=args.multistep_stride,
+        multistep_batch_size=args.multistep_batch_size,
+        multistep_learning_rate=args.multistep_learning_rate,
+        multistep_heading_weight=args.multistep_heading_weight,
+        multistep_output_reg_weight=args.multistep_output_reg_weight,
         clip_after_first_trajectory=args.clip_after_first_trajectory,
         mocap_filter_window_s=args.mocap_filter_window,
         mocap_delay_s=args.mocap_delay,
+        spline_order=args.spline_order,
+        spline_noise_std_xy=args.spline_noise_std_xy,
+        spline_noise_std_yaw=args.spline_noise_std_yaw,
+        spline_smoothing_factor=args.spline_smoothing_factor,
         resample_uniform=args.resample_uniform,
         out_dir=args.out_dir,
     )
@@ -799,13 +1111,19 @@ def evaluate_main(argv=None):
     parser = argparse.ArgumentParser(description="Evaluate a residual dynamics model on a Pololu log.")
     parser.add_argument("--problem", type=str, default="problems/pololu_gains.yaml")
     parser.add_argument("--model", type=str, default="models/residual_pololu.pkl")
-    parser.add_argument("--log", type=str, default="Pololu Data/Experiments/2026_07_01/TR06")
+    parser.add_argument("--log", type=str, default="Pololu Data/Experiments/2026_07_06/04_New_Mocap_timestamps/TR06")
     parser.add_argument("--clip-after-first-trajectory", action="store_true", default=True)
     # Resample filtered poses onto a uniform median-dt grid before differencing;
     # protects the twist targets against logging-timestamp jitter (see
     # build_residual_dataset). --no-resample-uniform differences at raw event times.
     parser.add_argument("--resample-uniform", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--mocap-filter-window", type=float, default=0.05)
+    parser.add_argument("--mocap-filter-window", type=float, default=0.0)
+    # Smoothing-spline parameters for the mocap poses/twists (see
+    # pololu.pose_smoothing.fit_pose_splines and the log loader).
+    parser.add_argument("--spline-order", type=int, default=3)
+    parser.add_argument("--spline-noise-std-xy", type=float, default=1e-3)
+    parser.add_argument("--spline-noise-std-yaw", type=float, default=1e-3)
+    parser.add_argument("--spline-smoothing-factor", type=float, default=1.0)
     parser.add_argument("--out-dir", type=str, default="visualize")
     parser.add_argument("--output", type=str, default=None, help="Output filename prefix")
     args = parser.parse_args(argv)
@@ -816,6 +1134,10 @@ def evaluate_main(argv=None):
         problem=args.problem,
         clip_after_first_trajectory=args.clip_after_first_trajectory,
         mocap_filter_window_s=args.mocap_filter_window,
+        spline_order=args.spline_order,
+        spline_noise_std_xy=args.spline_noise_std_xy,
+        spline_noise_std_yaw=args.spline_noise_std_yaw,
+        spline_smoothing_factor=args.spline_smoothing_factor,
         resample_uniform=args.resample_uniform,
         out_dir=args.out_dir,
         out_prefix=args.output,
@@ -828,8 +1150,9 @@ main = train_main
 def _resample_poses_uniform(
     pose_time_s: np.ndarray,
     pose_states: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Linearly interpolate poses onto a uniform grid at the median sample dt.
+    pose_twists: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+    """Linearly interpolate poses (and twists) onto a uniform median-dt grid.
 
     Yaw is unwrapped before interpolation (interpolating across the +-pi wrap
     would cut through zero) and re-wrapped after. Keeps the original start/end
@@ -837,14 +1160,14 @@ def _resample_poses_uniform(
     is unaffected.
     """
     if len(pose_time_s) < 3:
-        return pose_time_s, pose_states
+        return pose_time_s, pose_states, pose_twists
     dt = np.diff(pose_time_s)
     median_dt = float(np.median(dt[dt > 0.0])) if np.any(dt > 0.0) else 0.0
     if median_dt <= 0.0:
-        return pose_time_s, pose_states
+        return pose_time_s, pose_states, pose_twists
     num_intervals = int(np.round((pose_time_s[-1] - pose_time_s[0]) / median_dt))
     if num_intervals < 2:
-        return pose_time_s, pose_states
+        return pose_time_s, pose_states, pose_twists
     uniform_time = pose_time_s[0] + median_dt * np.arange(num_intervals + 1)
     yaw_unwrapped = np.unwrap(pose_states[:, 2])
     resampled = np.column_stack(
@@ -854,7 +1177,11 @@ def _resample_poses_uniform(
             _wrap_to_pi(np.interp(uniform_time, pose_time_s, yaw_unwrapped)),
         ]
     )
-    return uniform_time, resampled
+    if pose_twists is not None:
+        pose_twists = np.column_stack(
+            [np.interp(uniform_time, pose_time_s, pose_twists[:, i]) for i in range(3)]
+        )
+    return uniform_time, resampled, pose_twists
 
 
 def _zero_order_hold(query_time: np.ndarray, time: np.ndarray, values: np.ndarray) -> np.ndarray:

@@ -39,6 +39,10 @@ class PoseLog(NamedTuple):
     true_states: jax.Array    # [x, y, theta]
     command_time_s: jax.Array # geometry-controller command times
     wheel_cmd: jax.Array      # [omega_right_cmd, omega_left_cmd]
+    # [v_x, v_y, omega] body twist at the pose times. Pololu logs fill this with
+    # the analytic spline derivative (pololu.pose_smoothing); consumers should
+    # prefer it over finite-differencing `states`. None for simulated logs.
+    twists: jax.Array | None = None
 
 
 class SimulationLog(NamedTuple):
