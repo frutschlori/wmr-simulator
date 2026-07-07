@@ -163,13 +163,18 @@ class TrajectoryOptimizationPipeline:
         if self.objective_mode == OBJECTIVE_MODE_GAIN_TUNING:
             return jnp.asarray(self.controller_gains, dtype=jnp.float32)
         # Identification mode: deterministic replay-identifiable parameters
-        # [r, L_effective].
-        return jnp.array([self.robot.r, self.robot.L], dtype=jnp.float32)
+        # [r, L_effective] plus a_slip_max when enabled in the problem yaml
+        # (a disabled component has zero sensitivity and would add a dead FIM
+        # column).
+        values = [self.robot.r, self.robot.L]
+        if self.robot.a_slip_max > 0.0:
+            values.append(self.robot.a_slip_max)
+        return jnp.array(values, dtype=jnp.float32)
 
     def fim_parameter_scaling(self, params: jnp.ndarray) -> jnp.ndarray:
         if self.objective_mode == OBJECTIVE_MODE_GAIN_TUNING:
             return jnp.ones_like(params)
-        # Relative scaling for the positive params [r, L].
+        # Relative scaling for the enabled positive params.
         return params
 
     def nominal_physical_params(self) -> PhysicalParams:
@@ -178,6 +183,7 @@ class TrajectoryOptimizationPipeline:
             base_diameter=jnp.asarray(self.robot.L, dtype=jnp.float32),
             max_wheel_speed=jnp.asarray(self.robot.max_wheel_speed, dtype=jnp.float32),
             time_constant=jnp.asarray(self.robot.tau, dtype=jnp.float32),
+            a_slip_max=jnp.asarray(self.robot.a_slip_max, dtype=jnp.float32),
         )
 
     def default_measurement_variances(self) -> np.ndarray:
@@ -211,12 +217,15 @@ class TrajectoryOptimizationPipeline:
 
     def physical_params_from_vector(self, params: jnp.ndarray) -> PhysicalParams:
         params = jnp.asarray(params, dtype=jnp.float32)
-        # Layout mirrors nominal_parameters(): [r, L].
+        # Layout mirrors nominal_parameters(): [r, L] + optional a_slip_max
+        # (only present when enabled on the robot).
+        a_slip_max = params[2] if self.robot.a_slip_max > 0.0 else jnp.asarray(0.0, dtype=jnp.float32)
         return PhysicalParams(
             wheel_radius=params[0],
             base_diameter=params[1],
             max_wheel_speed=jnp.asarray(1.0, dtype=jnp.float32),
             time_constant=jnp.asarray(0.0, dtype=jnp.float32),
+            a_slip_max=a_slip_max,
         )
 
     def replay_segment_plan(self, target_log: SimulationLog, window_length: int | None = None):

@@ -35,7 +35,7 @@ def main():
     parser.add_argument("--no-save-trajectory", dest="save_trajectory", action="store_false")
     parser.add_argument("--window-length", type=int, default=50) # replay window length, only for identification mode
     parser.add_argument("--opt-steps", type=int, default=10000)
-    parser.add_argument("--learning-rate", type=float, default=1e-3)
+    parser.add_argument("--learning-rate", type=float, default=1e-4)
     parser.add_argument("--objective-mode", choices=["identification", "gain-tuning"],
                         default="identification")
     # Settings for multiple trajectory synthesis
@@ -44,10 +44,10 @@ def main():
     parser.add_argument("--vectorize-trajectories", action="store_true", default=True)
     # Path settings
     parser.add_argument("--time-scaling", choices=["s-curve", "linear"], default="s-curve")
-    parser.add_argument("--bezier-order", type=int, default=10)
+    parser.add_argument("--bezier-order", type=int, default=15)
     parser.add_argument("--trajectory-seed", type=int, default=0)
     # Constraints
-    parser.add_argument("--constraint-weight", type=float, default=1e-2)
+    parser.add_argument("--constraint-weight", type=float, default=1.0)
     parser.add_argument("--constraint-v-weight", type=float, default=1.0)
     parser.add_argument("--constraint-a-weight", type=float, default=1.0)
     parser.add_argument("--constraint-lateral-weight", type=float, default=1.0)

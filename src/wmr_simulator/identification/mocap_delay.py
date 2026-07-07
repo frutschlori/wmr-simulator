@@ -111,7 +111,6 @@ def estimate_mocap_delay_from_log_file(
     log_path: str | Path,
     *,
     max_delay_s: float = 0.2,
-    mocap_filter_window_s: float = 0.0,
 ) -> dict:
     """Estimate the mocap delay of one Pololu csv log against its IMU gyro z.
 
@@ -120,7 +119,6 @@ def estimate_mocap_delay_from_log_file(
     """
     from wmr_simulator.pololu.log_loader import (
         POLOLU_TRAJ_CONTROL_COLUMNS,
-        _filter_mocap_poses,
         _read_csv,
         _sparse_stream,
     )
@@ -142,7 +140,6 @@ def estimate_mocap_delay_from_log_file(
     if len(pose_time) < 3:
         raise ValueError(f"{log_path} contains too few mocap samples for delay estimation.")
 
-    pose_states = _filter_mocap_poses(pose_time, pose_states, mocap_filter_window_s)
     # Smooth yaw rate from the analytic spline derivative (pololu.pose_smoothing);
     # finite differences remain the fallback for very short pose streams.
     from wmr_simulator.pololu.pose_smoothing import fit_pose_splines
@@ -186,8 +183,6 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--log", type=str, required=True, help="Pololu csv log with IMU data.")
     parser.add_argument("--max-delay", type=float, default=0.05, help="Search range in seconds (both directions).")
-    # Zero-phase moving-average window (seconds) on mocap poses before differencing.
-    parser.add_argument("--mocap-filter-window", type=float, default=0.0)
     parser.add_argument("--plot", action="store_true", help="Save the correlation-vs-lag curve to visualize/.")
     parser.add_argument("--out-dir", type=str, default="visualize")
     args = parser.parse_args(argv)
@@ -196,7 +191,6 @@ def main(argv: list[str] | None = None) -> int:
         result = estimate_mocap_delay_from_log_file(
             args.log,
             max_delay_s=args.max_delay,
-            mocap_filter_window_s=args.mocap_filter_window,
         )
     except ValueError as error:
         print(f"error: {error}")

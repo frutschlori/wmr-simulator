@@ -28,6 +28,7 @@ def print_param_block(label: str, params: PhysicalParams, signed: bool = False, 
 
     print(f"  max_wheel_speed = {float(params.max_wheel_speed):{value_format}} rad/s")
     print(f"  time_constant  = {float(params.time_constant):{".3f"}} s")
+    print(f"  a_slip_max (traction limit) = {float(params.a_slip_max):{value_format}} m/s^2")
 
 
 def main():
@@ -44,6 +45,10 @@ def main():
     parser.add_argument("--init-base-diameter", type=float, default=0.1)
     parser.add_argument("--init-max-wheel-speed", type=float, default=300.0)
     parser.add_argument("--init-time-constant", type=float, default=0.3)
+    # Traction limit init (m/s^2, ~ mu*g; burnout model, residual_model.burnout).
+    # Must be positive to be identified; the default 0 keeps the limit disabled
+    # (0 * exp(theta) = 0 in the log-space optimizer).
+    parser.add_argument("--init-a-slip-max", type=float, default=0.0)
     parser.add_argument("--seed", type=int, default=2)
     # Optionally load target trajectory from disk
     parser.add_argument("--reference-trajectories-dir", type=str, default="trajectory_exports")
@@ -56,6 +61,7 @@ def main():
         base_diameter=jnp.asarray(args.init_base_diameter),
         max_wheel_speed=jnp.asarray(args.init_max_wheel_speed),
         time_constant=jnp.asarray(args.init_time_constant),
+        a_slip_max=jnp.asarray(args.init_a_slip_max),
     )
 
     result = run_single_experiment_identification(
@@ -80,13 +86,14 @@ def main():
         )
         covariance = np.asarray(bootstrap["parameter_covariance"], dtype=float)
         # mm-scale for lengths, native units otherwise (order matches physical_params_to_array)
-        covariance_scales = np.asarray([1000.0, 1000.0, 1.0, 1.0], dtype=float)
+        covariance_scales = np.asarray([1000.0, 1000.0, 1.0, 1.0, 1.0], dtype=float)
         covariance_scaled = covariance * np.outer(covariance_scales, covariance_scales)
         std_params = PhysicalParams(
             wheel_radius=jnp.asarray(np.sqrt(covariance_scaled[0, 0]) / 1000.0),
             base_diameter=jnp.asarray(np.sqrt(covariance_scaled[1, 1]) / 1000.0),
             max_wheel_speed=jnp.asarray(np.sqrt(covariance_scaled[2, 2])),
             time_constant=jnp.asarray(np.sqrt(covariance_scaled[3, 3])),
+            a_slip_max=jnp.asarray(np.sqrt(covariance_scaled[4, 4])),
         )
         print()
         print(f"Bootstrap samples: {args.bootstrap_samples}")

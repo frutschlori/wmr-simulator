@@ -21,6 +21,7 @@ robot:
   base_diameter: 0.09 # m, *effective* wheelbase (absorbs tire scrub in turns, Borenstein & Feng 1996; may differ from geometric)
   max_wheel_speed: 250 # rad/s
   time_constant:  0.15  # time constant for first-order wheel dynamics (set to 0 for ideal actuation)
+  a_slip_max: 6.0     # traction limit ~ mu*g in m/s^2, 0 disables (burnout model, Wong 2008)
   v_max: 2.0          # m/s
   a_max: 10.0        # m/s^2
   a_max_lateral: 8.0 # m/s^2

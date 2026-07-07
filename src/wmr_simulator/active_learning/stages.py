@@ -339,7 +339,6 @@ def stage_identify(
             delay_result = estimate_mocap_delay_from_log_file(
                 log_path,
                 max_delay_s=float(config["mocap_delay_search_range"]),
-                mocap_filter_window_s=float(log_config["mocap_filter_window"]),
             )
             print_delay_result(delay_result)
             mocap_delay = float(delay_result["delay_s"])
@@ -354,12 +353,14 @@ def stage_identify(
         base_diameter=jnp.asarray(robot_config["base_diameter"]),
         max_wheel_speed=jnp.asarray(robot_config["max_wheel_speed"]),
         time_constant=jnp.asarray(robot_config["time_constant"]),
+        # A zero value keeps the burnout model disabled in the log-space optimizer;
+        # fall back to the experiment config init to (re-)enable identification.
+        a_slip_max=jnp.asarray(robot_config.get("a_slip_max", 0.0) or config["init_a_slip_max"]),
     )
 
     pololu_log = load_pololu_traj_control_log(
         log_path,
         clip_after_first_trajectory=log_config["clip_after_first_trajectory"],
-        mocap_filter_window_s=log_config["mocap_filter_window"],
         mocap_delay_s=mocap_delay,
     )
     result = run_single_experiment_identification(
@@ -383,6 +384,7 @@ def stage_identify(
             "base_diameter": float(estimated_params.base_diameter),
             "max_wheel_speed": float(estimated_params.max_wheel_speed),
             "time_constant": float(estimated_params.time_constant),
+            "a_slip_max": float(estimated_params.a_slip_max),
         },
         "mocap_delay": mocap_delay,
         "mocap_delay_estimated": bool(estimate_mocap_delay),
@@ -468,7 +470,6 @@ def stage_train_residual(experiment: Experiment, iteration: int) -> Path:
         seed=int(experiment.config["seed"]),
         output_reg_weight=float(config["output_reg_weight"]),
         clip_after_first_trajectory=log_config["clip_after_first_trajectory"],
-        mocap_filter_window_s=float(config["mocap_filter_window"]),
         mocap_delay_s=mocap_delay,
         resample_uniform=bool(config["resample_uniform"]),
         out_dir=str(paths.visualize_dir),

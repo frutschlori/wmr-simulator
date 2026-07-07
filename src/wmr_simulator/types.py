@@ -13,6 +13,9 @@ class PhysicalParams(NamedTuple):
     base_diameter: jax.Array
     max_wheel_speed: jax.Array = jnp.asarray(150.0, dtype=jnp.float32)
     time_constant: jax.Array = jnp.asarray(0.0, dtype=jnp.float32)
+    # Traction limit ~ mu*g (m/s^2); 0 disables (burnout model, see
+    # residual_model.burnout).
+    a_slip_max: jax.Array = jnp.asarray(0.0, dtype=jnp.float32)
 
 
 class ReferenceLog(NamedTuple):
@@ -51,6 +54,7 @@ def print_physical_params(label: str, params: PhysicalParams):
     print(f"  base_diameter={1000.0 * float(params.base_diameter):.2f} mm")
     print(f"  max_wheel_speed={float(params.max_wheel_speed):.2f} rad/s")
     print(f"  time_constant={float(params.time_constant):.4f} s")
+    print(f"  a_slip_max={float(params.a_slip_max):.3f} m/s^2 (traction limit, 0 = ideal)")
 
 
 def physical_params_to_array(params: PhysicalParams) -> jax.Array:
@@ -60,6 +64,7 @@ def physical_params_to_array(params: PhysicalParams) -> jax.Array:
             params.base_diameter,
             params.max_wheel_speed,
             params.time_constant,
+            params.a_slip_max,
         ],
         axis=-1,
     )
@@ -71,6 +76,7 @@ def physical_params_from_array(values: jax.Array) -> PhysicalParams:
         base_diameter=values[..., 1],
         max_wheel_speed=values[..., 2],
         time_constant=values[..., 3],
+        a_slip_max=values[..., 4],
     )
 
 
@@ -90,6 +96,7 @@ def clip_physical_params(params: PhysicalParams) -> PhysicalParams:
         base_diameter=jnp.clip(params.base_diameter, min=1e-4),
         max_wheel_speed=jnp.clip(params.max_wheel_speed, min=1e-4),
         time_constant=jnp.clip(params.time_constant, min=1e-4),
+        a_slip_max=jnp.clip(params.a_slip_max, min=0.0),
     )
 
 
@@ -100,6 +107,7 @@ def physical_params_mse(params: PhysicalParams, target_params: PhysicalParams):
             (1000.0 * (params.base_diameter - target_params.base_diameter)) ** 2,
             (params.max_wheel_speed - target_params.max_wheel_speed) ** 2,
             (params.time_constant - target_params.time_constant) ** 2,
+            (params.a_slip_max - target_params.a_slip_max) ** 2,  # m/s^2 scale
         ],
         axis=-1,
     )

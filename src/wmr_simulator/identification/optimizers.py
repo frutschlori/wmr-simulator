@@ -12,13 +12,16 @@ from wmr_simulator.types import (
 )
 
 
-# Optimizer vector layout: 4 log-relative dims for the positive physical parameters
-# (r, L_effective, u_max, tau_motor).
-# Note: base_diameter is the *effective* wheelbase; tire-scrub in turns is absorbed
-# into it because a separate correction would be structurally non-identifiable
-# (Borenstein & Feng 1996, E_b).
-_NUM_POSITIVE_DIMS = 4
-_NUM_OPTIMIZER_DIMS = 4
+# Optimizer vector layout: 5 log-relative dims for the positive physical parameters
+# (r, L_effective, u_max, tau_motor, a_slip_max).
+# Notes:
+#   - base_diameter is the *effective* wheelbase; tire-scrub in turns is absorbed
+#     into it because a separate correction would be structurally non-identifiable
+#     (Borenstein & Feng 1996, E_b).
+#   - a_slip_max = init * exp(theta): a zero init keeps the burnout model disabled
+#     (0 * exp(theta) = 0 with zero gradient) -- pass a positive init to identify it.
+_NUM_POSITIVE_DIMS = 5
+_NUM_OPTIMIZER_DIMS = 5
 
 
 def _params_from_optimizer_values(values: jax.Array, init_params: PhysicalParams) -> PhysicalParams:
@@ -31,6 +34,7 @@ def _params_from_optimizer_values(values: jax.Array, init_params: PhysicalParams
         base_diameter=positive[..., 1],
         max_wheel_speed=positive[..., 2],
         time_constant=positive[..., 3],
+        a_slip_max=positive[..., 4],
     )
 
 
