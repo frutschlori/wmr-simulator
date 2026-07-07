@@ -113,6 +113,7 @@ class SimulationPipeline:
             base_diameter=jnp.asarray(self.robot_cfg["base_diameter"], dtype=jnp.float32),
             max_wheel_speed=jnp.asarray(self.robot_cfg["max_wheel_speed"], dtype=jnp.float32),
             time_constant=jnp.asarray(self.robot_cfg["time_constant"], dtype=jnp.float32),
+            a_slip_max=jnp.asarray(self.robot_cfg.get("a_slip_max", 0.0), dtype=jnp.float32),
         )
         self.gains = jnp.asarray(self.controller_cfg["gains"], dtype=jnp.float32)
 
@@ -271,6 +272,7 @@ class SimulationPipeline:
                         base_diameter=robot_params.base_diameter,
                         max_wheel_speed=robot_params.max_wheel_speed,
                         time_constant=robot_params.time_constant,
+                        a_slip_max=robot_params.a_slip_max,
                         dt=self.wheel_dt,
                         residual_model=residual_model,
                         wheel_speed_cmd=applied_wheel_ref,
@@ -469,6 +471,7 @@ def replay_pose_states(
         pose=initial_pose,
         wheel_speeds=initial_wheel_speeds,
         key=robot_key,
+        ground_wheel_speeds=initial_wheel_speeds,
         vel_omega=jnp.zeros(2, dtype=jnp.float32),
         duty_cycle=jnp.zeros(2, dtype=jnp.float32),
         wheel_speed_cmd=jnp.zeros(2, dtype=jnp.float32),
@@ -482,10 +485,11 @@ def replay_pose_states(
         dt, speed, duty, do_reset, reset_pose = inputs
 
         def reset_state(state):
-            # Window reset: re-anchor the pose on the measured one.
+            # Window reset: re-anchor the pose on the measured one and assume no slip.
             return state._replace(
                 pose=reset_pose,
                 wheel_speeds=speed,
+                ground_wheel_speeds=speed,
             )
 
         carry = jax.lax.cond(do_reset, reset_state, lambda state: state, carry)
@@ -495,6 +499,7 @@ def replay_pose_states(
             duty,
             wheel_radius=robot_params.wheel_radius,
             base_diameter=robot_params.base_diameter,
+            a_slip_max=robot_params.a_slip_max,
             dt=dt,
         )
         return next_state, next_state.pose

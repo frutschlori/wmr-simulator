@@ -442,12 +442,23 @@ def plot_system_id(
 
     ax_vel_omega = ax_vel.twinx()
     ref_speed = np.linalg.norm(reference[:, 3:5], axis=1)
-    true_vel_time, true_vel = _pose_vel_omega(plot_time, true_measurements)
+    # Velocities as used by the identification: the spline-smoothed body twists
+    # (pose.twists, pololu.pose_smoothing) when the log carries them; finite
+    # differences of the poses remain the fallback for simulated logs.
+    pose_twists = getattr(target_log.pose, "twists", None)
+    if pose_twists is not None:
+        twists = np.asarray(pose_twists, dtype=float)[:plot_len]
+        true_vel_time = plot_time
+        true_vel = np.column_stack([twists[:, 0], twists[:, 2]])
+        measured_vel_label = ("meas v (spline)", r"meas $\omega$ (spline)")
+    else:
+        true_vel_time, true_vel = _pose_vel_omega(plot_time, true_measurements)
+        measured_vel_label = ("true v", r"true $\omega$")
     line_ref_v = ax_vel.step(reference_time, ref_speed, where="post", color="tab:blue", linestyle="--", linewidth=0.8, label="ref v")[0]
-    line_true_v = ax_vel.plot(true_vel_time, true_vel[:, 0], color="tab:blue", linewidth=1.0, label="true v")[0]
+    line_true_v = ax_vel.plot(true_vel_time, true_vel[:, 0], color="tab:blue", linewidth=1.0, label=measured_vel_label[0])[0]
     line_model_v, line_model_w = _plot_windowed_velocity(ax_vel, ax_vel_omega, plot_time, measurements, replay, window_starts)
     line_ref_w = ax_vel_omega.step(reference_time, reference[:, 5], where="post", color="tab:purple", linestyle="--", linewidth=0.8, label=r"ref $\omega$")[0]
-    line_true_w = ax_vel_omega.plot(true_vel_time, true_vel[:, 1], color="tab:purple", linewidth=1.0, label=r"true $\omega$")[0]
+    line_true_w = ax_vel_omega.plot(true_vel_time, true_vel[:, 1], color="tab:purple", linewidth=1.0, label=measured_vel_label[1])[0]
     ax_vel.set_xlabel("time [s]")
     ax_vel.set_ylabel("linear velocity [m/s]")
     ax_vel_omega.set_ylabel("angular velocity [rad/s]")

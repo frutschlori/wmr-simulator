@@ -46,7 +46,6 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
     "robotcfg_template": None,
     "log_loading": {
         "clip_after_first_trajectory": True,
-        "mocap_filter_window": 0.05,  # seconds, zero-phase moving average on mocap poses
         # Mocap transport latency (seconds) used when delay estimation is off;
         # mocap timestamps are shifted back by this before identification and
         # residual training.
@@ -68,6 +67,11 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         "steps": 2000,
         "learning_rate": 1e-3,
         "window_length": None,
+        # Traction limit init (m/s^2; burnout model, residual_model.burnout).
+        # Used when the current robot config carries a zero value; must be
+        # positive to (re-)enable identification of a_slip_max (log-space
+        # optimizer: 0 * exp(theta) = 0). 0 keeps the model disabled.
+        "init_a_slip_max": 0.0,
         # Estimate the mocap delay from the identification log (mocap yaw rate
         # vs IMU gyro z, identification/mocap_delay.py) before identifying; the
         # estimate overrides log_loading.mocap_delay and is folded into
@@ -83,7 +87,6 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         "hidden_depth": 4,
         "validation_split": 0.25,
         "output_reg_weight": 0.5,
-        "mocap_filter_window": 0.1,
         "resample_uniform": True,
     },
     "tuning_trajectories": {
@@ -279,6 +282,7 @@ def robot_config_from_problem(problem_cfg: dict) -> dict:
             "gains": [float(gain) for gain in problem_cfg["controller"]["gains"]],
         },
     }
+    payload["robot"]["a_slip_max"] = float(robot_cfg.get("a_slip_max", 0.0))
     gain_schedule = problem_cfg["controller"].get("gain_schedule")
     if gain_schedule is not None:
         payload["controller"]["gain_schedule"] = copy.deepcopy(gain_schedule)

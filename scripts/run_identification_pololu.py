@@ -31,6 +31,7 @@ def print_param_block(label: str, params: PhysicalParams):
     print(f"  base_diameter   = {1000.0 * values[1]:.2f} mm (effective wheelbase)")
     print(f"  max_wheel_speed = {values[2]:.2f} rad/s")
     print(f"  time_constant   = {values[3]:.4f} s")
+    print(f"  a_slip_max (traction limit) = {values[4]:.3f} m/s^2")
 
 
 def main():
@@ -46,15 +47,16 @@ def main():
     parser.add_argument("--init-base-diameter", type=float, default=0.1)
     parser.add_argument("--init-max-wheel-speed", type=float, default=300.0)
     parser.add_argument("--init-time-constant", type=float, default=0.3)
+    # Traction limit init (m/s^2, ~ mu*g; burnout model, residual_model.burnout).
+    # Must be positive to be identified; the default 0 keeps the limit disabled
+    # (0 * exp(theta) = 0 in the log-space optimizer).
+    parser.add_argument("--init-a-slip-max", type=float, default=4.0)
 
     # Path to real experiment log
     parser.add_argument("--pololu-log", type=str,
-                        # default="Pololu Data/Experiments/2026_07_06/04_New_Mocap_timestamps/decoded/TR05.csv")
-                        default="Pololu Data/Experiments/2026_07_01/TR03.csv")
+                        default="Pololu Data/Experiments/2026_07_06/04_New_Mocap_timestamps/decoded/TR05.csv")
+                        # default="Pololu Data/Experiments/2026_07_01/TR03.csv")
     parser.add_argument("--clip-after-first-trajectory", action="store_true", default=True)
-    # Zero-phase moving-average window (seconds) applied to the mocap positions in the
-    # log loader before the spline fit; 0 disables.
-    parser.add_argument("--mocap-filter-window", type=float, default=0.0)
     # Smoothing-spline parameters for the mocap poses/twists (see
     # pololu.pose_smoothing.fit_pose_splines and the log loader).
     parser.add_argument("--spline-order", type=int, default=3)
@@ -75,6 +77,7 @@ def main():
         base_diameter=jnp.asarray(args.init_base_diameter),
         max_wheel_speed=jnp.asarray(args.init_max_wheel_speed),
         time_constant=jnp.asarray(args.init_time_constant),
+        a_slip_max=jnp.asarray(args.init_a_slip_max),
     )
 
     mocap_delay = args.mocap_delay
@@ -88,7 +91,6 @@ def main():
             delay_result = estimate_mocap_delay_from_log_file(
                 args.pololu_log,
                 max_delay_s=args.mocap_delay_search_range,
-                mocap_filter_window_s=args.mocap_filter_window,
             )
             print_delay_result(delay_result)
             mocap_delay = delay_result["delay_s"]
@@ -100,7 +102,6 @@ def main():
     pololu_log = load_pololu_traj_control_log(
         args.pololu_log,
         clip_after_first_trajectory=args.clip_after_first_trajectory,
-        mocap_filter_window_s=args.mocap_filter_window,
         mocap_delay_s=mocap_delay,
         spline_order=args.spline_order,
         spline_noise_std_xy=args.spline_noise_std_xy,

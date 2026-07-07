@@ -57,6 +57,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from wmr_simulator.residual_model.burnout import rate_limited_series
+
 RESIDUAL_FEATURE_NAMES = (
     "vx_body",
     "vy_body",
@@ -181,7 +183,8 @@ def build_residual_dataset(
     fall back to finite-differencing the poses over each mocap interval and
     rotating the world-frame displacement into the body frame at the interval
     start. Nominal twist: encoder wheel speeds interpolated to the interval
-    starts, passed through the ideal differential-drive kinematics.
+    starts, passed through the identified traction limit (a_slip_max, see
+    residual_model.burnout) and the ideal differential-drive kinematics.
     Sample t uses interval t-1's measured twist as the state input (see module
     docstring), so the first interval is consumed as state only.
 
@@ -229,14 +232,18 @@ def build_residual_dataset(
         omega_meas = np.diff(theta_unwrapped) / safe_dt
         measured_twist = np.column_stack([v_x_meas, v_y_meas, omega_meas])
 
-    # Nominal twist from encoder speeds through the ideal kinematics.
+    # Nominal twist from encoder speeds through the traction limit and the
+    # ideal kinematics, so the residual does not have to learn the burnout.
     interval_time = pose_time_s[:-1]
     u_r_enc = np.interp(interval_time, wheel_time_s, wheel_speeds[:, 0])
     u_l_enc = np.interp(interval_time, wheel_time_s, wheel_speeds[:, 1])
     r = float(params.wheel_radius)
     effective_wheelbase = float(params.base_diameter)
-    v_nom = 0.5 * r * (u_r_enc + u_l_enc)
-    omega_nom = r * (u_r_enc - u_l_enc) / effective_wheelbase
+    max_rate = float(params.a_slip_max) / r
+    u_r_nom = rate_limited_series(u_r_enc, dt, max_rate)
+    u_l_nom = rate_limited_series(u_l_enc, dt, max_rate)
+    v_nom = 0.5 * r * (u_r_nom + u_l_nom)
+    omega_nom = r * (u_r_nom - u_l_nom) / effective_wheelbase
     nominal_twist = np.column_stack([v_nom, np.zeros_like(v_nom), omega_nom])
 
     # Action context, zero-order hold at the interval starts.
@@ -654,7 +661,6 @@ def simulate_closed_loop_on_log_reference(
     *,
     seed: int = 0,
     clip_after_first_trajectory: bool = True,
-    mocap_filter_window_s: float = 0.0,
 ):
     """Closed-loop simulation (hidden robot + optional residual) tracking the
     reference trajectory recorded in a Pololu log.
@@ -668,7 +674,6 @@ def simulate_closed_loop_on_log_reference(
     log = load_pololu_traj_control_log(
         log_path,
         clip_after_first_trajectory=clip_after_first_trajectory,
-        mocap_filter_window_s=mocap_filter_window_s,
     )
     pipeline = SimulationPipeline(problem_path=problem, seed=seed, residual_model=model)
     reference_states = jnp.asarray(
@@ -695,6 +700,7 @@ def robot_params_from_problem(problem_path: str):
         base_diameter=jnp.asarray(robot_cfg["base_diameter"], dtype=jnp.float32),
         max_wheel_speed=jnp.asarray(robot_cfg["max_wheel_speed"], dtype=jnp.float32),
         time_constant=jnp.asarray(robot_cfg["time_constant"], dtype=jnp.float32),
+        a_slip_max=jnp.asarray(robot_cfg.get("a_slip_max", 0.0), dtype=jnp.float32),
     )
 
 
@@ -724,7 +730,6 @@ def train_from_logs(
     multistep_heading_weight: float = 0.1,
     multistep_output_reg_weight: float = 1e-3,
     clip_after_first_trajectory: bool = True,
-    mocap_filter_window_s: float = 0.0,
     mocap_delay_s: float = 0.0,
     spline_order: int = 3,
     spline_noise_std_xy: float = 1e-3,
@@ -753,7 +758,6 @@ def train_from_logs(
         log = load_pololu_traj_control_log(
             path,
             clip_after_first_trajectory=clip_after_first_trajectory,
-            mocap_filter_window_s=mocap_filter_window_s,
             mocap_delay_s=mocap_delay_s,
             spline_order=spline_order,
             spline_noise_std_xy=spline_noise_std_xy,
@@ -853,7 +857,6 @@ def train_from_logs(
         "log_dir": log_dir,
         "train_files": train_files,
         "validation_files": validation_files,
-        "mocap_filter_window_s": mocap_filter_window_s,
         "mocap_delay_s": mocap_delay_s,
         "spline_order": spline_order,
         "spline_noise_std_xy": spline_noise_std_xy,
@@ -928,7 +931,6 @@ def evaluate_on_log(
     *,
     problem: str = "problems/pololu_gains.yaml",
     clip_after_first_trajectory: bool = True,
-    mocap_filter_window_s: float = 0.0,
     spline_order: int = 3,
     spline_noise_std_xy: float = 1e-3,
     spline_noise_std_yaw: float = 5e-3,
@@ -960,7 +962,6 @@ def evaluate_on_log(
     log = load_pololu_traj_control_log(
         log_path,
         clip_after_first_trajectory=clip_after_first_trajectory,
-        mocap_filter_window_s=mocap_filter_window_s,
         spline_order=spline_order,
         spline_noise_std_xy=spline_noise_std_xy,
         spline_noise_std_yaw=spline_noise_std_yaw,
@@ -1051,9 +1052,6 @@ def train_main(argv=None):
     # protects the twist targets against logging-timestamp jitter (see
     # build_residual_dataset). --no-resample-uniform differences at raw event times.
     parser.add_argument("--resample-uniform", action=argparse.BooleanOptionalAction, default=True)
-    # Zero-phase moving-average window (seconds) on mocap positions before the
-    # spline fit; 0 disables. The spline smoothing below supersedes it.
-    parser.add_argument("--mocap-filter-window", type=float, default=0.0)
     # Mocap transport latency (seconds); timestamps shifted back before
     # differencing so twist targets align with the actions (identification/mocap_delay.py).
     parser.add_argument("--mocap-delay", type=float, default=0.0)
@@ -1086,7 +1084,6 @@ def train_main(argv=None):
         multistep_heading_weight=args.multistep_heading_weight,
         multistep_output_reg_weight=args.multistep_output_reg_weight,
         clip_after_first_trajectory=args.clip_after_first_trajectory,
-        mocap_filter_window_s=args.mocap_filter_window,
         mocap_delay_s=args.mocap_delay,
         spline_order=args.spline_order,
         spline_noise_std_xy=args.spline_noise_std_xy,
@@ -1109,7 +1106,6 @@ def evaluate_main(argv=None):
     # protects the twist targets against logging-timestamp jitter (see
     # build_residual_dataset). --no-resample-uniform differences at raw event times.
     parser.add_argument("--resample-uniform", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--mocap-filter-window", type=float, default=0.0)
     # Smoothing-spline parameters for the mocap poses/twists (see
     # pololu.pose_smoothing.fit_pose_splines and the log loader).
     parser.add_argument("--spline-order", type=int, default=3)
@@ -1125,7 +1121,6 @@ def evaluate_main(argv=None):
         log_path=args.log,
         problem=args.problem,
         clip_after_first_trajectory=args.clip_after_first_trajectory,
-        mocap_filter_window_s=args.mocap_filter_window,
         spline_order=args.spline_order,
         spline_noise_std_xy=args.spline_noise_std_xy,
         spline_noise_std_yaw=args.spline_noise_std_yaw,

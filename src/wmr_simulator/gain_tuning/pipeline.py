@@ -175,6 +175,7 @@ def resolve_gain_robot_params(problem_path: str, fixed_wheel_radius, fixed_base_
         base_diameter=jnp.asarray(base_diameter, dtype=jnp.float32),
         max_wheel_speed=jnp.asarray(problem_cfg["robot"]["max_wheel_speed"], dtype=jnp.float32),
         time_constant=jnp.asarray(problem_cfg["robot"]["time_constant"], dtype=jnp.float32),
+        a_slip_max=jnp.asarray(problem_cfg["robot"].get("a_slip_max", 0.0), dtype=jnp.float32),
     )
 
 

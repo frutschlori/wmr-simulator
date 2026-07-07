@@ -46,49 +46,10 @@ POLOLU_TRAJ_CONTROL_COLUMNS = (
 )
 
 
-def zero_phase_moving_average(values: np.ndarray, window_samples: int) -> np.ndarray:
-    """Centered moving average with no phase delay.
-
-    Uses a symmetric window around each sample ('same' convolution) and
-    normalizes by the actual number of contributing samples, so the edges are
-    unbiased and the filter introduces no time shift.
-    """
-    if window_samples <= 1:
-        return values
-    kernel = np.ones(int(window_samples), dtype=float)
-    counts = np.convolve(np.ones(len(values), dtype=float), kernel, mode="same")
-    if values.ndim == 1:
-        return (np.convolve(values.astype(float), kernel, mode="same") / counts).astype(values.dtype)
-    filtered = [
-        np.convolve(values[:, i].astype(float), kernel, mode="same") / counts
-        for i in range(values.shape[1])
-    ]
-    return np.column_stack(filtered).astype(values.dtype)
-
-
-def _filter_mocap_poses(pose_time_s: np.ndarray, pose_states: np.ndarray, window_s: float) -> np.ndarray:
-    """Zero-phase moving average on mocap poses; yaw is filtered unwrapped."""
-    if window_s <= 0.0 or len(pose_time_s) < 3:
-        return pose_states
-    median_dt = float(np.median(np.diff(pose_time_s)))
-    if median_dt <= 0.0:
-        return pose_states
-    window_samples = max(int(round(window_s / median_dt)), 1)
-    window_samples += 1 - window_samples % 2  # force odd for a symmetric window
-    if window_samples <= 1:
-        return pose_states
-    xy = zero_phase_moving_average(pose_states[:, :2], window_samples)
-    yaw_unwrapped = np.unwrap(pose_states[:, 2].astype(float))
-    yaw = zero_phase_moving_average(yaw_unwrapped, window_samples)
-    yaw = (yaw + np.pi) % (2.0 * np.pi) - np.pi
-    return np.column_stack([xy, yaw]).astype(pose_states.dtype)
-
-
 def load_pololu_traj_control_log(
     path: str | Path,
     *,
     clip_after_first_trajectory: bool = False,
-    mocap_filter_window_s: float = 0.0,
     mocap_delay_s: float = 0.0,
     spline_order: int = 3,
     spline_noise_std_xy: float = 1e-3,
@@ -119,12 +80,11 @@ def load_pololu_traj_control_log(
     pose_time, pose_states = _sparse_stream(columns, data, ("x_raw", "y_raw", "yaw_raw"))
     pose_time = pose_time - np.float32(mocap_delay_s)
     raw_pose_states = pose_states
-    filtered = _filter_mocap_poses(pose_time, pose_states, mocap_filter_window_s)
     # Duplicate frames are dropped inside the fit but the spline is evaluated at
     # all raw timestamps, so every stream keeps its original length/time base.
     splines = fit_pose_splines(
         pose_time,
-        filtered,
+        pose_states,
         order=spline_order,
         noise_std_xy=spline_noise_std_xy,
         noise_std_yaw=spline_noise_std_yaw,
@@ -358,9 +318,6 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=str, default=None, help="Output filename prefix")
     parser.add_argument("--out-dir", type=str, default="visualize")
     parser.add_argument("--clip-after-first-trajectory", default=True, action="store_true")
-    # Zero-phase moving-average window (seconds) on the mocap positions before the
-    # spline fit; 0 disables (the spline smoothing below is always applied).
-    parser.add_argument("--mocap-filter-window", type=float, default=0.0)
     # Smoothing-spline parameters (pololu.pose_smoothing.fit_pose_splines): degree,
     # assumed per-sample mocap noise stds (m / rad, set the residual budget via
     # weights 1/std), and a scale on that budget (>1 smooths harder, 0 interpolates).
@@ -383,7 +340,6 @@ if __name__ == "__main__":
             log = load_pololu_traj_control_log(
                 path,
                 clip_after_first_trajectory=args.clip_after_first_trajectory,
-                mocap_filter_window_s=args.mocap_filter_window,
                 **spline_kwargs,
             )
             print_log_summary(path, log)
@@ -403,7 +359,6 @@ if __name__ == "__main__":
     log = load_pololu_traj_control_log(
         log_path,
         clip_after_first_trajectory=args.clip_after_first_trajectory,
-        mocap_filter_window_s=args.mocap_filter_window,
         **spline_kwargs,
     )
     print_log_summary(log_path, log)
