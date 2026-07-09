@@ -4,34 +4,26 @@ Model
 -----
 The nominal differential-drive model (first-order motor lag -> traction limit ->
 ideal kinematics) predicts a body twist (v_x, omega) with zero lateral velocity
-from the nominal (lag-predicted) wheel speed. A small MLP learns the *residuals*
-left over, conditioned on the current **state and action**:
+from the nominal (lag-predicted) wheel speed. A small MLP learns the *residual*
+twist left over, conditioned on the current **state and action**:
 
     state  = current body twist [vx_body, vy_body, omega]
              (so the model knows whether the robot is already slipping)
     action = nominal-lag wheel speed [wheel_speed_r, wheel_speed_l] + duty [r, l]
 
-    [delta_vx_body, delta_vy_body, delta_omega, delta_u_r, delta_u_l]
-        = MLP(state, action)
+    [delta_vx_body, delta_vy_body, delta_omega] = MLP(state, action)
 
-    # twist residual -> corrected twist -> integrated to the pose (Design B: the
-    # twist is built from the NOMINAL wheel, so the wheel residual does not
-    # double-count here)
     vx_body_next = vx_nominal + delta_vx_body
     vy_body_next =              delta_vy_body
     omega_next   = omega_nominal + delta_omega
 
-    # wheel residual -> corrected wheel STATE only (feeds the next step's motor
-    # lag and the estimator/encoder path; reaches the pose solely through that
-    # one-step-delayed wheel recurrence)
-    wheel_next   = wheel_nominal_lag + [delta_u_r, delta_u_l]
-
 The corrected twist is integrated with the full planar kinematics (including
 the lateral term), which lets the model capture chassis side-slip during
 high-speed turns and braking that the ideal kinematics cannot represent. The
-wheel residual captures motor dynamics (asymmetric/nonlinear accel-braking) the
-single time-constant misses, keeping the simulated wheel speed -- and hence the
-estimator/controller feedback -- aligned with the real encoders.
+wheel speed enters only as a model *input* (the nominal lag prediction, matching
+the simulator, which has no encoder): it is not corrected, because the motor
+residual is a few rad/s against a 100s-of-rad/s operating point, so folding it
+into the twist buys nothing and only inflates the model.
 
 Target convention (documented choice)
 -------------------------------------
@@ -82,32 +74,9 @@ RESIDUAL_FEATURE_NAMES = (
 )
 
 RESIDUAL_INPUT_DIM = len(RESIDUAL_FEATURE_NAMES)
-# Output = twist residual [delta_vx_body, delta_vy_body, delta_omega] followed by
-# a motor-side wheel-speed residual [delta_u_r, delta_u_l] correcting the nominal
-# first-order lag (real motors are asymmetric/nonlinear under hard accel/braking,
-# which the single time-constant cannot represent). Design B: the twist residual
-# is the final correction on the nominal-wheel twist and drives the pose; the
-# wheel residual updates only the carried wheel state (feeding the next step's
-# motor lag and the estimator/encoder), never the current twist.
-RESIDUAL_TWIST_DIM = 3
-RESIDUAL_WHEEL_DIM = 2
-RESIDUAL_OUTPUT_DIM = RESIDUAL_TWIST_DIM + RESIDUAL_WHEEL_DIM
+RESIDUAL_OUTPUT_DIM = 3  # [delta_vx_body, delta_vy_body, delta_omega]
 
-TARGET_LABELS = (
-    r"$\Delta v_x$ [m/s]",
-    r"$\Delta v_y$ [m/s]",
-    r"$\Delta \omega$ [rad/s]",
-    r"$\Delta u_r$ [rad/s]",
-    r"$\Delta u_l$ [rad/s]",
-)
-
-
-def residual_output_reg_weights(twist_weight: float, wheel_weight: float) -> jax.Array:
-    """Per-output-channel regularization weight vector [twist x3, wheel x2]."""
-    return jnp.asarray(
-        [twist_weight] * RESIDUAL_TWIST_DIM + [wheel_weight] * RESIDUAL_WHEEL_DIM,
-        dtype=jnp.float32,
-    )
+TARGET_LABELS = (r"$\Delta v_x$ [m/s]", r"$\Delta v_y$ [m/s]", r"$\Delta \omega$ [rad/s]")
 
 
 # ---------------------------------------------------------------------------
@@ -168,7 +137,7 @@ def residual_features(
 
 
 def apply_residual_model(model: ResidualDynamicsModel, features: jax.Array) -> jax.Array:
-    """Residual output [delta_vx_body, delta_vy_body, delta_omega, delta_u_r, delta_u_l].
+    """Residual twist [delta_vx_body, delta_vy_body, delta_omega].
 
     Accepts a single feature vector or a batch (leading axis).
     """
@@ -281,9 +250,7 @@ def build_residual_dataset(
     # encoder speed) so the model sees the same wheel input in training and in
     # simulation, where no encoder exists. lag[t] = alpha * u_enc[t-1] +
     # (1 - alpha) * max_speed * duty[t], matching DiffDrive.step; alpha per
-    # interval from the identified time constant. The wheel-residual target is
-    # the gap the single time-constant leaves, u_enc - lag. (Unlike the velocity
-    # targets this is dt-dependent; consistent because mocap dt == sim wheel dt.)
+    # interval from the identified time constant.
     max_speed = float(params.max_wheel_speed)
     tau = float(params.time_constant)
     alpha = np.exp(-dt / tau) if tau >= 1e-3 else np.zeros_like(dt)
@@ -291,13 +258,11 @@ def build_residual_dataset(
     prev_u_l = np.concatenate([u_l_enc[:1], u_l_enc[:-1]])
     lag_r = alpha * prev_u_r + (1.0 - alpha) * max_speed * duty[:, 0]
     lag_l = alpha * prev_u_l + (1.0 - alpha) * max_speed * duty[:, 1]
-    wheel_target = np.column_stack([u_r_enc - lag_r, u_l_enc - lag_l])
 
     # Nominal twist from the PT1 wheel (lag) through the traction limit and ideal
-    # kinematics, so the residual does not have to learn the burnout. Design B:
-    # the twist is built from the *nominal* wheel (not the encoder), so the twist
-    # residual explains the gap from the modeled wheel -- the regime DiffDrive.step
-    # runs, where the wheel residual feeds the state, not the current twist.
+    # kinematics, so the residual does not have to learn the burnout. The twist is
+    # built from the *nominal* wheel (not the encoder), so the twist residual
+    # explains the gap from the modeled wheel -- the regime DiffDrive.step runs.
     max_rate = float(params.a_slip_max) / r
     u_r_nom = rate_limited_series(lag_r, dt, max_rate)
     u_l_nom = rate_limited_series(lag_l, dt, max_rate)
@@ -310,7 +275,7 @@ def build_residual_dataset(
     features = np.column_stack(
         [measured_twist[:-1], lag_r[1:], lag_l[1:], duty[1:, 0], duty[1:, 1]]
     )
-    targets = np.column_stack([measured_twist - nominal_twist, wheel_target])[1:]
+    targets = (measured_twist - nominal_twist)[1:]
     assert features.shape[1] == len(RESIDUAL_FEATURE_NAMES)
     assert targets.shape[1] == RESIDUAL_OUTPUT_DIM
 
@@ -403,20 +368,15 @@ def train_residual_model(
     batch_size: int = 256,
     learning_rate: float = 1e-3,
     output_reg_weight: float = 0.0,
-    wheel_output_reg_weight: float = 0.0,
 ):
     """Train the residual MLP with Adam on normalized inputs/targets.
 
-    ``output_reg_weight`` (twist channels) and ``wheel_output_reg_weight`` (the
-    two wheel-speed channels) add a penalty on the squared norm of the model's
+    ``output_reg_weight`` adds a penalty on the squared norm of the model's
     *physical* residual output (per channel scaled by the target std so the
-    channels are commensurate) to the next-step prediction MSE. This shrinks the
-    model toward the nominal dynamics wherever the data does not clearly demand a
-    correction, which keeps closed-loop rollouts (gain tuning) from being
-    destabilized by large extrapolated residuals. The wheel channels get their
-    own weight because a wheel-speed correction propagates through the kinematics
-    *and* the estimator, so it destabilizes more readily than a twist tweak.
-    0 disables a group.
+    three channels are commensurate) to the next-step prediction MSE. This
+    shrinks the model toward the nominal dynamics wherever the data does not
+    clearly demand a correction, which keeps closed-loop rollouts (gain tuning)
+    from being destabilized by large extrapolated residuals. 0 disables.
 
     Returns (model, history) where the model already carries the normalization
     stats and ``history`` has per-epoch losses in normalized space: train is
@@ -429,7 +389,6 @@ def train_residual_model(
     target_mean, target_std = normalization_stats(train_targets)
     # Physical output scaled by std: (z * std + mean) / std = z + mean / std.
     target_mean_over_std = jnp.asarray(target_mean / target_std, dtype=jnp.float32)
-    reg_weights = residual_output_reg_weights(output_reg_weight, wheel_output_reg_weight)
 
     x_train = jnp.asarray((train_features - input_mean) / input_std, dtype=jnp.float32)
     y_train = jnp.asarray((train_targets - target_mean) / target_std, dtype=jnp.float32)
@@ -456,10 +415,9 @@ def train_residual_model(
     def batch_loss(mlp, x, y):
         predictions = jax.vmap(mlp)(x)
         mse = jnp.mean((predictions - y) ** 2)
-        # Per-channel-weighted squared norm of the physical residual output
-        # (std-scaled); twist and wheel channels carry separate weights.
-        penalty = jnp.mean(jnp.sum(reg_weights * (predictions + target_mean_over_std) ** 2, axis=1))
-        return mse + penalty
+        # Squared norm of the physical residual output (std-scaled per channel).
+        output_norm = jnp.mean(jnp.sum((predictions + target_mean_over_std) ** 2, axis=1))
+        return mse + output_reg_weight * output_norm
 
     @eqx.filter_jit
     def train_step(mlp, opt_state, x, y):
@@ -637,21 +595,17 @@ def train_residual_model_multistep(
     learning_rate: float = 1e-4,
     heading_weight: float = 0.1,
     output_reg_weight: float = 1e-3,
-    wheel_output_reg_weight: float = 1e-3,
 ):
     """Fine-tune the residual MLP on multi-step open-loop rollouts.
 
     Each window is rolled out exactly as in closed-loop simulation
-    (DiffDrive.step, Design B): the carried wheel speed and duty give the nominal
-    first-order lag; that *nominal* wheel passes through the traction limit and
+    (DiffDrive.step): the carried wheel speed and duty give the nominal
+    first-order lag; that nominal wheel passes through the traction limit and
     ideal kinematics to the nominal twist, and the model's twist residual is the
-    final correction integrated into the pose. The model's wheel residual updates
-    only the carried wheel speed (feeding the next step's lag), so it reaches the
-    pose solely through the physically-delayed wheel recurrence, never doubling
-    the twist residual. The loss is the mean squared position error against the (smooth)
-    mocap poses plus a heading term ``2 - 2 cos(dtheta)`` weighted by
-    ``heading_weight`` and a per-channel std-scaled output penalty (twist vs
-    wheel weights). Supervising at the pose level integrates away the
+    final correction integrated into the pose. The loss is the mean squared
+    position error against the (smooth) mocap poses plus a heading term
+    ``2 - 2 cos(dtheta)`` weighted by ``heading_weight`` and a small std-scaled
+    output-magnitude penalty. Supervising at the pose level integrates away the
     twist-differentiation noise that dominates the one-step targets.
 
     ``normalization`` is (input_mean, input_std, target_mean, target_std) from
@@ -668,7 +622,6 @@ def train_residual_model_multistep(
     input_mean, input_std, target_mean, target_std = (
         jnp.asarray(v, dtype=jnp.float32) for v in normalization
     )
-    reg_weights = residual_output_reg_weights(output_reg_weight, wheel_output_reg_weight)
     r, base_diameter, max_speed, tau, a_slip_max = (float(v) for v in physical)
 
     if initial_mlp is None:
@@ -702,14 +655,13 @@ def train_residual_model_multistep(
             features = jnp.concatenate([twist, nominal_lag, duty_t])
             normalized = (features - input_mean) / input_std
             delta = net(normalized) * target_std + target_mean
-            # Design B: twist from the *nominal* wheel (burnout + kinematics) plus
-            # the twist residual; the wheel residual updates only the carried wheel
-            # state, so it reaches the pose only via next steps' nominal lag.
+            # Twist from the nominal wheel (burnout + kinematics) plus the twist
+            # residual; the wheel carries its pure nominal lag (no wheel residual).
             new_ground = traction_limited_ground_speeds(ground, nominal_lag, a_slip_max, r, step_dt)
             v_nom = 0.5 * r * (new_ground[0] + new_ground[1])
             w_nom = r * (new_ground[0] - new_ground[1]) / base_diameter
             new_twist = jnp.array([v_nom + delta[0], delta[1], w_nom + delta[2]])
-            new_wheel = nominal_lag + delta[3:5]
+            new_wheel = nominal_lag
             x, y, theta = pose
             cos_t, sin_t = jnp.cos(theta), jnp.sin(theta)
             new_pose = jnp.array(
@@ -721,7 +673,7 @@ def train_residual_model_multistep(
             )
             position_error = valid * jnp.sum((new_pose[:2] - pose_ref[:2]) ** 2)
             heading_error = valid * (2.0 - 2.0 * jnp.cos(new_pose[2] - pose_ref[2]))
-            output_norm = valid * jnp.sum(reg_weights * (delta / target_std) ** 2)
+            output_norm = valid * jnp.sum((delta / target_std) ** 2)
             return (new_twist, new_wheel, new_ground, new_pose), (
                 position_error,
                 heading_error,
@@ -752,7 +704,7 @@ def train_residual_model_multistep(
         )
         loss = jnp.mean(position_error) + heading_weight * jnp.mean(heading_error)
         if with_reg:
-            loss = loss + jnp.mean(output_norm)
+            loss = loss + output_reg_weight * jnp.mean(output_norm)
         return loss
 
     @eqx.filter_jit
@@ -906,7 +858,6 @@ def train_from_logs(
     validation_split: float = 0.25,
     seed: int = 0,
     output_reg_weight: float = 1.0,
-    wheel_output_reg_weight: float = 1.0,
     multistep_window: int | None = 20,
     multistep_epochs: int = 2000,
     multistep_stride: int = 5,
@@ -914,7 +865,6 @@ def train_from_logs(
     multistep_learning_rate: float = 1e-4,
     multistep_heading_weight: float = 0.1,
     multistep_output_reg_weight: float = 1e-3,
-    multistep_wheel_output_reg_weight: float = 1e-3,
     clip_after_first_trajectory: bool = True,
     mocap_delay_s: float = 0.0,
     resample_uniform: bool = True,
@@ -983,7 +933,6 @@ def train_from_logs(
         batch_size=batch_size,
         learning_rate=learning_rate,
         output_reg_weight=output_reg_weight,
-        wheel_output_reg_weight=wheel_output_reg_weight,
     )
 
     # Multi-step rollout fine-tuning: train on self-fed rollouts against the
@@ -1044,7 +993,6 @@ def train_from_logs(
             learning_rate=multistep_learning_rate,
             heading_weight=multistep_heading_weight,
             output_reg_weight=multistep_output_reg_weight,
-            wheel_output_reg_weight=multistep_wheel_output_reg_weight,
         )
 
     config = {
@@ -1065,9 +1013,7 @@ def train_from_logs(
         "batch_size": batch_size,
         "learning_rate": learning_rate,
         "output_reg_weight": output_reg_weight,
-        "wheel_output_reg_weight": wheel_output_reg_weight,
         "multistep_window": multistep_window,
-        "multistep_wheel_output_reg_weight": multistep_wheel_output_reg_weight,
         "multistep_epochs": multistep_epochs,
         "multistep_stride": multistep_stride,
         "multistep_batch_size": multistep_batch_size,
@@ -1099,8 +1045,8 @@ def train_from_logs(
         if len(features) == 0:
             continue
         evaluation = evaluate_predictions(model, features, targets)
-        print(f"{split_name} RMSE  [dvx, dvy, domega, du_r, du_l]: {evaluation['rmse']}")
-        print(f"{split_name} baseline (zero residual):          {evaluation['baseline_rmse']}")
+        print(f"{split_name} RMSE  [dvx, dvy, domega]: {evaluation['rmse']}")
+        print(f"{split_name} baseline (zero residual): {evaluation['baseline_rmse']}")
         plot_predictions(
             evaluation["predictions"], targets, split_name, out_dir=out_dir, segment_lengths=segments
         )
@@ -1164,9 +1110,7 @@ def evaluate_on_log(
     dataset = build_residual_dataset(log, params, resample_uniform=resample_uniform)
 
     predicted_residual = np.asarray(apply_residual_model(model, jnp.asarray(dataset["features"])))
-    # Open-loop twist diagnostic: only the twist channels correct the twist here
-    # (the wheel-residual channels act through the kinematics in closed loop).
-    corrected_twist = dataset["nominal_twist"] + predicted_residual[:, :RESIDUAL_TWIST_DIM]
+    corrected_twist = dataset["nominal_twist"] + predicted_residual
 
     initial_pose = dataset["initial_pose"]
     dt = dataset["dt"]
@@ -1179,8 +1123,8 @@ def evaluate_on_log(
     print(f"  nominal model:      {pose_rmse(nominal_poses, measured_poses):.4f} m")
     print(f"  residual-augmented: {pose_rmse(corrected_poses, measured_poses):.4f} m")
     evaluation = evaluate_predictions(model, dataset["features"], dataset["targets"])
-    print(f"Residual RMSE  [dvx, dvy, domega, du_r, du_l]: {evaluation['rmse']}")
-    print(f"Zero-residual baseline:                       {evaluation['baseline_rmse']}")
+    print(f"Residual RMSE  [dvx, dvy, domega]: {evaluation['rmse']}")
+    print(f"Zero-residual baseline:            {evaluation['baseline_rmse']}")
 
     prefix = out_prefix if out_prefix is not None else f"residual_eval_{Path(log_path).stem}"
     plot_rollout_comparison(
@@ -1224,23 +1168,17 @@ def train_main(argv=None):
     parser.add_argument("--problem", type=str, default="problems/pololu_gains.yaml")
     parser.add_argument("--log-dir", type=str, default="Pololu Data/Experiments/2026_07_07/12/binaries/decoded/")
     parser.add_argument("--out", type=str, default="models/residual_pololu.pkl")
-    parser.add_argument("--epochs", type=int, default=5000)
+    parser.add_argument("--epochs", type=int, default=3000)
     parser.add_argument("--learning-rate", type=float, default=1e-4)
     parser.add_argument("--batch-size", type=int, default=10000)
     parser.add_argument("--hidden-width", type=int, default=16)
     parser.add_argument("--hidden-depth", type=int, default=2)
-    parser.add_argument("--validation-split", type=float, default=0.1)
+    parser.add_argument("--validation-split", type=float, default=0.2)
     parser.add_argument("--seed", type=int, default=0)
     # Weight of the squared-norm penalty on the (std-scaled) physical residual
     # output, added to the prediction MSE; shrinks the model toward the nominal
-    # dynamics to keep closed-loop rollouts stable. 0 disables. Empirically on
-    # the 2026_07_01 logs, 1e-2 and 1e-1 still destabilize the closed-loop
-    # rollout (residual feeds back on its own twist state); 1.0 is stable.
-    parser.add_argument("--output-reg-weight", type=float, default=1)
-    # Same penalty for the two wheel-speed residual channels; separate because a
-    # wheel correction propagates through the kinematics *and* the estimator, so
-    # it destabilizes the closed loop more readily than a twist tweak.
-    parser.add_argument("--wheel-output-reg-weight", type=float, default=1)
+    # dynamics to keep closed-loop rollouts stable. 0 disables.
+    parser.add_argument("--output-reg-weight", type=float, default=0.5)
     # Multi-step rollout fine-tuning (after one-step pretraining): windows of K
     # uniform mocap intervals are rolled out with the model feeding back its own
     # corrected twist, supervised by pose error against the smooth mocap poses.
@@ -1252,7 +1190,6 @@ def train_main(argv=None):
     parser.add_argument("--multistep-batch-size", type=int, default=10000)
     parser.add_argument("--multistep-heading-weight", type=float, default=1)
     parser.add_argument("--multistep-output-reg-weight", type=float, default=1e-3)
-    parser.add_argument("--multistep-wheel-output-reg-weight", type=float, default=1e-3)
     parser.add_argument("--clip-after-first-trajectory", action="store_true", default=True)
     # Resample filtered poses onto a uniform median-dt grid before differencing;
     # protects the twist targets against logging-timestamp jitter (see
@@ -1277,7 +1214,6 @@ def train_main(argv=None):
         validation_split=args.validation_split,
         seed=args.seed,
         output_reg_weight=args.output_reg_weight,
-        wheel_output_reg_weight=args.wheel_output_reg_weight,
         multistep_window=args.multistep_window,
         multistep_epochs=args.multistep_epochs,
         multistep_stride=args.multistep_stride,
@@ -1285,7 +1221,6 @@ def train_main(argv=None):
         multistep_learning_rate=args.multistep_learning_rate,
         multistep_heading_weight=args.multistep_heading_weight,
         multistep_output_reg_weight=args.multistep_output_reg_weight,
-        multistep_wheel_output_reg_weight=args.multistep_wheel_output_reg_weight,
         clip_after_first_trajectory=args.clip_after_first_trajectory,
         mocap_delay_s=args.mocap_delay,
         resample_uniform=args.resample_uniform,
