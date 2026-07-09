@@ -70,8 +70,8 @@ DEFAULT_OUTLIER_SIGMA = 15.0
 # exactly compensates low-frequency content (the group delay falls off above f_c),
 # but that is where the wheel-speed signal lives.
 # DEFAULT_ENCODER_LP_TAU_S = 1.0 / (2.0 * np.pi * 3.0)
-DEFAULT_ENCODER_LP_TAU_S = 0
-DEFAULT_ENCODER_SAVGOL_WINDOW = 11
+DEFAULT_ENCODER_LP_TAU_S = 0.03
+DEFAULT_ENCODER_SAVGOL_WINDOW = 9
 DEFAULT_ENCODER_SAVGOL_POLYORDER = 3
 
 

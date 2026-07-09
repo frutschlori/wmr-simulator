@@ -31,7 +31,6 @@ controller:
       - [0.0, 0.0]
       - [0.0, 0.0]
       - [0.0, 0.0]
-noise_enabled: true # false zeroes the estimator measurement noise everywhere (sim, gain tuning, traj-opt FIM)
 robot:
   type: differential_drive
   wheel_radius: 0.01637   # m
@@ -44,16 +43,17 @@ robot:
   a_max_lateral: 6.0 # m/s^2
   omega_max: 10.0    # rad/s
   alpha_max: 20.0    # rad/s^2
-
+noise_enabled: true # false zeroes the estimator measurement noise everywhere (sim, gain tuning, traj-opt FIM)
 estimator:
-  mocap_delay: 0.001     # mocap transport latency [s] (network+radio/UART); controller sees poses this old. Identify via identification/mocap_delay.py
+  mocap_delay: 0.0000     # mocap transport latency [s] (network+radio/UART); controller sees poses this old. Identify via identification/mocap_delay.py
   type: "kf"              # estimator type: "kf" (Kalman Filter) or "dr" (Dead Reckoning)
   wheel_radius: 0.016     # estimator's wheel_radius [m]
   base_diameter: 0.078    # estimator's base_diameter [m]
   noise_pos: 0.002        # position measurement noise [m] (from mocap almost no noise)
   noise_angle: 0.035      # orientation noise [rad] ~  2 degrees
   enc_angle_noise: 0.01   # encoder noise [rad]
-  
+  wheel_lp_tau: 0.053     # [s] first-order low-pass on encoder wheel speeds fed to the controller (mirrors firmware; ~30 ms lag). 0 disables.
+
   proc_pos_std: 0.001     # [m]   process noise on x,y per step
   proc_theta_std: 0.01    # [rad] process noise on θ per step
 

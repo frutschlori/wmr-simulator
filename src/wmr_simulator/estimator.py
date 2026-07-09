@@ -14,6 +14,10 @@ class EstimatorState(NamedTuple):
     # measurement (shape (delay_steps, 3), empty when mocap_delay is 0). Models
     # the network + radio/UART transport latency of the real mocap stream.
     pose_delay_buffer: jax.Array
+    # Low-pass-filtered wheel speeds handed to the controller, mirroring the
+    # first-order encoder filter running on the real robot's firmware (introduces
+    # a ~30 ms phase lag). Equals the raw u_hat when wheel_lp_tau is 0.
+    u_lp: jax.Array
 
 class DiffDriveEstimator:
     def __init__(self, estimator_cfg, dt):
@@ -50,6 +54,12 @@ class DiffDriveEstimator:
         # Identified via identification.mocap_delay (IMU gyro cross-correlation).
         self.mocap_delay = float(estimator_cfg.get("mocap_delay", 0.0))
         self.delay_steps = int(round(self.mocap_delay / self.dt))
+
+        # First-order low-pass filter time constant [s] applied to the encoder
+        # wheel speeds before they reach the controller, matching the on-board
+        # firmware filter: alpha = dt / (tau + dt); omega_lp += alpha*(omega_raw -
+        # omega_lp). 0 disables it (alpha = 1 -> passes the raw speed through).
+        self.wheel_lp_tau = float(estimator_cfg.get("wheel_lp_tau", 0.0))
 
     # ------------------------------------------------------------------ #
     # Initialization utilities
@@ -89,7 +99,10 @@ class DiffDriveEstimator:
         # Delay buffer pre-filled with the start pose (robot at rest before t=0).
         pose_delay_buffer = np.tile(pose_hat[None, :], (self.delay_steps, 1))
 
-        return EstimatorState(pose_hat, pose_meas, u_hat, u_true, P, key, pose_delay_buffer)
+        # Low-pass state starts at the (zero) raw wheel speed.
+        u_lp = np.copy(u_hat)
+
+        return EstimatorState(pose_hat, pose_meas, u_hat, u_true, P, key, pose_delay_buffer, u_lp)
 
     # ------------------------------------------------------------------ #
     # Main update
@@ -141,6 +154,11 @@ class DiffDriveEstimator:
         ur_hat = dphi_r_meas / dt
         ul_hat = dphi_l_meas / dt
         u_hat = np.array([ur_hat, ul_hat])
+
+        # First-order low-pass on the wheel speeds, matching the firmware filter
+        # that feeds the controller (raw u_hat still drives the odometry below).
+        alpha_lp = dt / (self.wheel_lp_tau + dt)
+        u_lp = est_state.u_lp + alpha_lp * (u_hat - est_state.u_lp)
 
         # 3) Propagate pose (prediction step)
         v_hat = 0.5 * r_est * (ur_hat + ul_hat)
@@ -254,7 +272,7 @@ class DiffDriveEstimator:
         else:
             raise ValueError(f"Unknown filter_type: {self.filter_type}")
 
-        return EstimatorState(pose_hat, pose_meas, u_hat, u_true, P, key, pose_delay_buffer)
+        return EstimatorState(pose_hat, pose_meas, u_hat, u_true, P, key, pose_delay_buffer, u_lp)
 
     # ------------------------------------------------------------------ #
     # Outputs to controller
@@ -274,9 +292,11 @@ class DiffDriveEstimator:
     @staticmethod
     def get_est_wheel_speeds(est_state):
         """
-        Return estimated wheel speeds (from encoders): ur_hat, ul_hat.
+        Return the wheel speeds handed to the controller: the low-pass-filtered
+        encoder speeds (u_lp), matching the on-board firmware filter. With
+        wheel_lp_tau == 0 this equals the raw encoder estimate u_hat.
         """
-        return est_state.u_hat
+        return est_state.u_lp
 
     # ------------------------------------------------------------------ #
     # Utilities
