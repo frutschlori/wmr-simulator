@@ -309,8 +309,8 @@ class TrajectoryOptimizationPipeline:
         deployment rollout (the sensitivity rollout re-runs the closed loop anyway).
 
         NB: the rollout must stay noisy. The measurement/encoder noise supplies the
-        high-frequency excitation that makes the derivative gain observable; a
-        deterministic rollout drives the FIM near-singular in the ``kd`` direction.
+        high-frequency excitation that makes the motor feedback gains observable; a
+        deterministic rollout drives the FIM near-singular in the ``kimotor`` direction.
         """
         del window_length
         if reference_states is None:

@@ -177,8 +177,8 @@ def build_residual_dataset(
 ) -> dict:
     """Supervised state-action samples from one experiment log.
 
-    Measured twist: the log's spline-derived body twists (``log.pose.twists``,
-    see pololu.pose_smoothing) taken at the interval starts, consistent with
+    Measured twist: the log's filter-derived body twists (``log.pose.twists``,
+    see pololu.measurement_smoothing) taken at the interval starts, consistent with
     Euler integration. Logs without twists (older pickles, simulated logs)
     fall back to finite-differencing the poses over each mocap interval and
     rotating the world-frame displacement into the body frame at the interval
@@ -191,8 +191,8 @@ def build_residual_dataset(
     ``resample_uniform`` interpolates the poses (and twists) onto a uniform
     median-dt grid. For the finite-difference fallback this protects against
     logging-timestamp jitter (dividing a real ~10 ms displacement by a
-    jittered 3-5 ms dt fabricates 2-3 m/s velocity spikes); with spline twists
-    it merely regularizes the sample spacing.
+    jittered 3-5 ms dt fabricates 2-3 m/s velocity spikes); with the
+    Savitzky-Golay twists it merely regularizes the sample spacing.
 
     ``max_dt_factor`` drops mocap intervals longer than that multiple of the
     median interval (stream gaps make the finite-difference twist meaningless);
@@ -731,10 +731,6 @@ def train_from_logs(
     multistep_output_reg_weight: float = 1e-3,
     clip_after_first_trajectory: bool = True,
     mocap_delay_s: float = 0.0,
-    spline_order: int = 3,
-    spline_noise_std_xy: float = 1e-3,
-    spline_noise_std_yaw: float = 5e-3,
-    spline_smoothing_factor: float = 1.0,
     resample_uniform: bool = True,
     out_dir: str = "visualize",
 ) -> ResidualDynamicsModel:
@@ -759,10 +755,6 @@ def train_from_logs(
             path,
             clip_after_first_trajectory=clip_after_first_trajectory,
             mocap_delay_s=mocap_delay_s,
-            spline_order=spline_order,
-            spline_noise_std_xy=spline_noise_std_xy,
-            spline_noise_std_yaw=spline_noise_std_yaw,
-            spline_smoothing_factor=spline_smoothing_factor,
         )
         dataset = build_residual_dataset(log, params, resample_uniform=resample_uniform)
         datasets.append(dataset)
@@ -858,10 +850,6 @@ def train_from_logs(
         "train_files": train_files,
         "validation_files": validation_files,
         "mocap_delay_s": mocap_delay_s,
-        "spline_order": spline_order,
-        "spline_noise_std_xy": spline_noise_std_xy,
-        "spline_noise_std_yaw": spline_noise_std_yaw,
-        "spline_smoothing_factor": spline_smoothing_factor,
         "resample_uniform": resample_uniform,
         "epochs": epochs,
         "batch_size": batch_size,
@@ -931,10 +919,6 @@ def evaluate_on_log(
     *,
     problem: str = "problems/pololu_gains.yaml",
     clip_after_first_trajectory: bool = True,
-    spline_order: int = 3,
-    spline_noise_std_xy: float = 1e-3,
-    spline_noise_std_yaw: float = 5e-3,
-    spline_smoothing_factor: float = 1.0,
     resample_uniform: bool = True,
     out_dir: str = "visualize",
     out_prefix: str | None = None,
@@ -962,10 +946,6 @@ def evaluate_on_log(
     log = load_pololu_traj_control_log(
         log_path,
         clip_after_first_trajectory=clip_after_first_trajectory,
-        spline_order=spline_order,
-        spline_noise_std_xy=spline_noise_std_xy,
-        spline_noise_std_yaw=spline_noise_std_yaw,
-        spline_smoothing_factor=spline_smoothing_factor,
     )
     dataset = build_residual_dataset(log, params, resample_uniform=resample_uniform)
 
@@ -1021,30 +1001,30 @@ def train_main(argv=None):
 
     parser = argparse.ArgumentParser(description="Train the residual dynamics model from Pololu logs.")
     parser.add_argument("--problem", type=str, default="problems/pololu_gains.yaml")
-    parser.add_argument("--log-dir", type=str, default="Pololu Data/Experiments/2026_07_06/04_New_Mocap_timestamps/decoded/")
+    parser.add_argument("--log-dir", type=str, default="Pololu Data/Experiments/2026_07_07/12/binaries/decoded/")
     parser.add_argument("--out", type=str, default="models/residual_pololu.pkl")
-    parser.add_argument("--epochs", type=int, default=20000)
-    parser.add_argument("--batch-size", type=int, default=4000)
-    parser.add_argument("--learning-rate", type=float, default=5e-5)
-    parser.add_argument("--hidden-width", type=int, default=32)
+    parser.add_argument("--epochs", type=int, default=5000)
+    parser.add_argument("--learning-rate", type=float, default=1e-4)
+    parser.add_argument("--batch-size", type=int, default=10000)
+    parser.add_argument("--hidden-width", type=int, default=16)
     parser.add_argument("--hidden-depth", type=int, default=2)
-    parser.add_argument("--validation-split", type=float, default=0.25)
+    parser.add_argument("--validation-split", type=float, default=0.2)
     parser.add_argument("--seed", type=int, default=0)
     # Weight of the squared-norm penalty on the (std-scaled) physical residual
     # output, added to the prediction MSE; shrinks the model toward the nominal
     # dynamics to keep closed-loop rollouts stable. 0 disables. Empirically on
     # the 2026_07_01 logs, 1e-2 and 1e-1 still destabilize the closed-loop
     # rollout (residual feeds back on its own twist state); 1.0 is stable.
-    parser.add_argument("--output-reg-weight", type=float, default=0.1)
+    parser.add_argument("--output-reg-weight", type=float, default=1)
     # Multi-step rollout fine-tuning (after one-step pretraining): windows of K
     # uniform mocap intervals are rolled out with the model feeding back its own
     # corrected twist, supervised by pose error against the smooth mocap poses.
     # This trains the self-fed regime the model faces in closed loop. 0 disables.
-    parser.add_argument("--multistep-window", type=int, default=50)
-    parser.add_argument("--multistep-epochs", type=int, default=100)
-    parser.add_argument("--multistep-stride", type=int, default=20)
-    parser.add_argument("--multistep-batch-size", type=int, default=12000)
+    parser.add_argument("--multistep-epochs", type=int, default=6000)
     parser.add_argument("--multistep-learning-rate", type=float, default=1e-5)
+    parser.add_argument("--multistep-window", type=int, default=240)
+    parser.add_argument("--multistep-stride", type=int, default=20)
+    parser.add_argument("--multistep-batch-size", type=int, default=10000)
     parser.add_argument("--multistep-heading-weight", type=float, default=0.2)
     parser.add_argument("--multistep-output-reg-weight", type=float, default=1e-3)
     parser.add_argument("--clip-after-first-trajectory", action="store_true", default=True)
@@ -1055,12 +1035,7 @@ def train_main(argv=None):
     # Mocap transport latency (seconds); timestamps shifted back before
     # differencing so twist targets align with the actions (identification/mocap_delay.py).
     parser.add_argument("--mocap-delay", type=float, default=0.0)
-    # Smoothing-spline parameters for the mocap poses/twists (see
-    # pololu.pose_smoothing.fit_pose_splines and the log loader).
-    parser.add_argument("--spline-order", type=int, default=3)
-    parser.add_argument("--spline-noise-std-xy", type=float, default=2e-3)
-    parser.add_argument("--spline-noise-std-yaw", type=float, default=5e-3)
-    parser.add_argument("--spline-smoothing-factor", type=float, default=1.0)
+    # Mocap/encoder smoothing defaults are configured in the measurement_smoothing submodule.
     parser.add_argument("--out-dir", type=str, default="visualize")
     args = parser.parse_args(argv)
 
@@ -1085,10 +1060,6 @@ def train_main(argv=None):
         multistep_output_reg_weight=args.multistep_output_reg_weight,
         clip_after_first_trajectory=args.clip_after_first_trajectory,
         mocap_delay_s=args.mocap_delay,
-        spline_order=args.spline_order,
-        spline_noise_std_xy=args.spline_noise_std_xy,
-        spline_noise_std_yaw=args.spline_noise_std_yaw,
-        spline_smoothing_factor=args.spline_smoothing_factor,
         resample_uniform=args.resample_uniform,
         out_dir=args.out_dir,
     )
@@ -1106,12 +1077,7 @@ def evaluate_main(argv=None):
     # protects the twist targets against logging-timestamp jitter (see
     # build_residual_dataset). --no-resample-uniform differences at raw event times.
     parser.add_argument("--resample-uniform", action=argparse.BooleanOptionalAction, default=True)
-    # Smoothing-spline parameters for the mocap poses/twists (see
-    # pololu.pose_smoothing.fit_pose_splines and the log loader).
-    parser.add_argument("--spline-order", type=int, default=3)
-    parser.add_argument("--spline-noise-std-xy", type=float, default=1e-3)
-    parser.add_argument("--spline-noise-std-yaw", type=float, default=1e-3)
-    parser.add_argument("--spline-smoothing-factor", type=float, default=1.0)
+    # Mocap/encoder smoothing defaults are configured in the measurement_smoothing submodule.
     parser.add_argument("--out-dir", type=str, default="visualize")
     parser.add_argument("--output", type=str, default=None, help="Output filename prefix")
     args = parser.parse_args(argv)
@@ -1121,10 +1087,6 @@ def evaluate_main(argv=None):
         log_path=args.log,
         problem=args.problem,
         clip_after_first_trajectory=args.clip_after_first_trajectory,
-        spline_order=args.spline_order,
-        spline_noise_std_xy=args.spline_noise_std_xy,
-        spline_noise_std_yaw=args.spline_noise_std_yaw,
-        spline_smoothing_factor=args.spline_smoothing_factor,
         resample_uniform=args.resample_uniform,
         out_dir=args.out_dir,
         out_prefix=args.output,

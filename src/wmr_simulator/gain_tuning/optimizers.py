@@ -10,18 +10,18 @@ from wmr_simulator.gain_tuning.objectives import (
     scheduled_closed_loop_objective_terms,
 )
 
-_NUM_GAINS = 6
+_NUM_GAINS = 5
 _NUM_STABLE_GAINS = 4
-_GAIN_NAMES = ("kx", "ky", "kth", "kpmotor", "kimotor", "kdmotor")
+_GAIN_NAMES = ("kx", "ky", "kth", "kpmotor", "kimotor")
 _LOSS_COMPONENT_NAMES = ("tracking", "velocity_tracking", "input", "input_delta", "gain_delta")
 
 
 # ---------------------------------------------------------------------------
 # Optimizer-value <-> controller-gain reparametrization (base gains only)
 #
-# The trainable vector is [gain_values(6), W_flat(num_w)]. The first six entries
-# are the base 6-gain vector in a bounded reparam space (log-space for the four
-# "stable" gains, sqrt-space for the motor I/D gains); they are clipped to [0, 1].
+# The trainable vector is [gain_values(5), W_flat(num_w)]. The first five entries
+# are the base 5-gain vector in a bounded reparam space (log-space for the four
+# "stable" gains, sqrt-space for the motor I gain); they are clipped to [0, 1].
 # The trailing W entries are linear (can be negative) and are NOT clipped here --
 # the schedule's internal clip(W . z, -1, 1) bounds their effect.
 # ---------------------------------------------------------------------------
@@ -67,13 +67,11 @@ def _with_motor_zero_variants(values: jax.Array) -> jax.Array:
     if values.shape[0] == 0:
         return values
     zero_i = values.at[:, 4].set(0.0)
-    zero_d = values.at[:, 5].set(0.0)
-    zero_i_d = zero_i.at[:, 5].set(0.0)
-    return jnp.concatenate([values, zero_i, zero_d, zero_i_d], axis=0)
+    return jnp.concatenate([values, zero_i], axis=0)
 
 
 def _candidate_optimizer_values(pipeline, init_gain_values, num_w, num_lhs_points):
-    """Build candidate vectors of width (6 + num_w). LHS searches the gain part; W is 0."""
+    """Build candidate vectors of width (5 + num_w). LHS searches the gain part; W is 0."""
     if num_lhs_points <= 0:
         gain_candidates = init_gain_values[None, :]
     else:
@@ -268,7 +266,7 @@ def optimize_controller_gains(
 ):
     """Single-stage joint optimization of base gains and the gain schedule.
 
-    The trainable vector is ``[gain_values(6), W_flat(num_w)]``. LHS presearch and
+    The trainable vector is ``[gain_values(5), W_flat(num_w)]``. LHS presearch and
     multistart operate on the gain part with ``W = 0`` (so the presearch is exactly
     the old static-gain search). Adam then refines base gains and ``W`` jointly.
     When ``schedule_enabled`` is False, ``num_w = 0`` and ``W`` is fixed at zero,
@@ -329,7 +327,7 @@ def optimize_controller_gains(
     if num_lhs_points > 0:
         print(
             "Starting LHS candidate evaluation "
-            f"({num_lhs_points} LHS points * (1, ki=0, kd=0, ki=kd=0) = {candidate_values.shape[0]} candidates; "
+            f"({num_lhs_points} LHS points * (1, ki=0) = {candidate_values.shape[0]} candidates; "
             f"gain schedule {schedule_state})."
         )
     else:

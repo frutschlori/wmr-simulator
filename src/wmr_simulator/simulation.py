@@ -27,10 +27,10 @@ def apply_noise_configuration(problem_cfg: dict) -> dict:
     the config (simulation, gain tuning, trajectory-optimization FIM
     variances) sees a deterministic model.
 
-    NB: the gain-tuning FIM relies on measurement/encoder noise for kd
-    observability (see trajectory_optimization.pipeline
-    closed_loop_gain_measurement_sequence); expect a near-singular FIM in that
-    mode with noise disabled.
+    NB: the gain-tuning FIM relies on measurement/encoder noise for
+    observability of the motor feedback gains (see
+    trajectory_optimization.pipeline closed_loop_gain_measurement_sequence);
+    expect a near-singular FIM in that mode with noise disabled.
     """
     if problem_cfg.get("noise_enabled", True):
         return problem_cfg
@@ -194,7 +194,7 @@ class SimulationPipeline:
         pose0 = self.initial_reference_pose(reference_states)
         robot_state = self.robot.get_init_state(key=robot_key, init_pose=pose0)
         estimator_state = self.estimator.get_init_state(key=estimator_key, start_pose=pose0)
-        controller_state = jnp.zeros(4, dtype=jnp.float32)
+        controller_state = jnp.zeros(2, dtype=jnp.float32)
         delayed_wheel_ref = jnp.zeros(2, dtype=jnp.float32)
         return robot_state, estimator_state, controller_state, delayed_wheel_ref
 
@@ -232,7 +232,7 @@ class SimulationPipeline:
             robot_state, estimator_state, controller_state, delayed_wheel_ref = carry
             pose_est = self.estimator.get_est_pose(estimator_state)
             # Scheduling depends only on reference features and is computed once per
-            # geometry step; the scheduled 6-gain vector is reused by the inner loop.
+            # geometry step; the scheduled gain vector is reused by the inner loop.
             if schedule_params is None:
                 step_gains = controller_gains
             else:

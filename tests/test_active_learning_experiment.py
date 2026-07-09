@@ -56,7 +56,7 @@ def test_finalize_rolls_results_into_next_iteration(tmp_path):
         },
     }
     gains = {
-        "gains": [9.1, 8.2, 6.3, 7.0, 11.0, 0.5],
+        "gains": [9.1, 8.2, 6.3, 7.0, 11.0],
         "schedule_enabled": True,
         "schedule": {"scheduled_indices": [0, 1, 2], "rho": [0.5, 0.5, 0.5], "W": [[0.1, 0.0]] * 3},
     }

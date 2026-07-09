@@ -14,7 +14,7 @@ class Controller:
     def compute(self, ctrl_state, ref_state, pose_state, wheel_meas, gains=None,
                 wheel_radius=None, base_diameter=None, max_wheel_speed=None):
         """
-        ctrl_state: (ir, il, prev_er, prev_el)
+        ctrl_state: (ir, il)
         ref_state: [x, y, theta, vx, vy, omega, a, alpha]
         pose_state: (x, y, theta)
         wheel_meas: (ur_meas, ul_meas) from encoders
@@ -45,18 +45,18 @@ class Controller:
     def compute_duty(self, ctrl_state, wheel_ref, wheel_meas, gains=None, max_wheel_speed=None):
         motor_gain = self.robot_param_max_wheel_speed(robot_param_max=max_wheel_speed)
         gain_values = self.gains if gains is None else gains
-        ir, il, er, el, duty_r, duty_l = self._wheel_speed_control(ctrl_state, wheel_ref, wheel_meas, gain_values, motor_gain)
+        ir, il, duty_r, duty_l = self._wheel_speed_control(ctrl_state, wheel_ref, wheel_meas, gain_values, motor_gain)
         if self.duty_limits is not None:
             umin, umax = self.duty_limits
             duty_r = np.clip(duty_r, min=umin, max=umax)
             duty_l = np.clip(duty_l, min=umin, max=umax)
-        return np.asarray((ir, il, er, el)), np.asarray((duty_r, duty_l))
+        return np.asarray((ir, il)), np.asarray((duty_r, duty_l))
 
     def robot_param_max_wheel_speed(self, robot_param_max=None):
         return self.max_wheel_speed if robot_param_max is None else robot_param_max
 
     def _pose_control(self, refstate, state, r, L, gains):
-        kx, ky, kth, _, _, _ = gains
+        kx, ky, kth, _, _ = gains
         px, py, th = state[0:3]
         px_d, py_d, th_d = refstate[0:3]
         vx_d, vy_d, w_d = refstate[3:6]
@@ -78,26 +78,23 @@ class Controller:
         return ur_ref, ul_ref
 
     def _wheel_speed_control(self, ctrl_state, wheel_ref, wheel_meas, gains, motor_gain):
-        _, _, _, kp, ki, kd = gains
+        _, _, _, kp, ki = gains
         ur_ref, ul_ref = wheel_ref
         ur_meas, ul_meas = wheel_meas
         # Errors
         er = ur_ref - ur_meas
         el = ul_ref - ul_meas
         # integral errors
-        ir, il, prev_er, prev_el = ctrl_state
+        ir, il = ctrl_state
         ir += er * self.dt
         il += el * self.dt
-        # derivative errors
-        dr = (er - prev_er) / self.dt
-        dl = (el - prev_el) / self.dt
         # Keep motor PI gains in wheel-speed units for numerically stable gradients.
-        ur_cmd = ur_ref + kp * er + ki * ir + kd * dr
-        ul_cmd = ul_ref + kp * el + ki * il + kd * dl
+        ur_cmd = ur_ref + kp * er + ki * ir
+        ul_cmd = ul_ref + kp * el + ki * il
         # Map to duty cycles for the motor model.
         duty_r = ur_cmd / motor_gain
         duty_l = ul_cmd / motor_gain
-        return ir, il, er, el, duty_r, duty_l
+        return ir, il, duty_r, duty_l
 
     @staticmethod
     def SO2_dist(angle1, angle2):

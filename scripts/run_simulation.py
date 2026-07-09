@@ -7,12 +7,12 @@ from wmr_simulator.visualization.simulation import visualize
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--problem", type=str, default="problems/pololu.yaml")
+    parser.add_argument("--problem", type=str, default="problems/pololu_gains.yaml")
     parser.add_argument("--reference-trajectories-dir", type=str, default="trajectory_exports")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output", type=str, default="simulation")
     parser.add_argument("--skip-pdf", action="store_true")
-    parser.add_argument("--skip-ref-meshcat", action="store_true", default=False)
+    parser.add_argument("--skip-ref-meshcat", action="store_true", default=True)
     # Learned residual dynamics checkpoint (scripts/train_residual_model.py);
     # the closed loop then runs the residual-augmented dynamics.
     parser.add_argument("--residual-model", type=str, default=None)

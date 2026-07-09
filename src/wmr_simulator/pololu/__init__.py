@@ -1,14 +1,14 @@
 __all__ = [
     "POLOLU_TRAJ_CONTROL_COLUMNS",
     "PololuReference",
-    "PoseSplines",
+    "SmoothedPoseStream",
     "ReferenceTrajectory",
     "append_bridge_reference",
     "drop_repeated_poses",
     "export_latest_reference",
     "export_pololu_reference_pickle",
     "export_robot_config",
-    "fit_pose_splines",
+    "smooth_pose_stream",
     "format_pololu_reference",
     "format_robot_config",
     "load_imu_gyro_z",
@@ -51,13 +51,13 @@ def __getattr__(name):
 
         return getattr(reference_exporter, name)
     if name in {
-        "PoseSplines",
+        "SmoothedPoseStream",
         "drop_repeated_poses",
-        "fit_pose_splines",
+        "smooth_pose_stream",
     }:
-        from wmr_simulator.pololu import pose_smoothing
+        from wmr_simulator.pololu import measurement_smoothing
 
-        return getattr(pose_smoothing, name)
+        return getattr(measurement_smoothing, name)
     if name == "append_bridge_reference":
         from wmr_simulator.pololu.bridge_exporter import append_bridge_reference
 

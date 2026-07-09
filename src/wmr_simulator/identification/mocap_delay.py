@@ -140,14 +140,14 @@ def estimate_mocap_delay_from_log_file(
     if len(pose_time) < 3:
         raise ValueError(f"{log_path} contains too few mocap samples for delay estimation.")
 
-    # Smooth yaw rate from the analytic spline derivative (pololu.pose_smoothing);
+    # Smooth yaw rate from the Savitzky-Golay filter derivative (pololu.measurement_smoothing);
     # finite differences remain the fallback for very short pose streams.
-    from wmr_simulator.pololu.pose_smoothing import fit_pose_splines
+    from wmr_simulator.pololu.measurement_smoothing import smooth_pose_stream
 
     try:
-        splines = fit_pose_splines(pose_time, pose_states)
+        smoothed = smooth_pose_stream(pose_time, pose_states)
         omega_time = np.asarray(pose_time, dtype=float)
-        omega_mocap = splines.world_velocity(omega_time)[:, 2]
+        omega_mocap = smoothed.world_velocity(omega_time)[:, 2]
     except ValueError:
         omega_time, omega_mocap = mocap_yaw_rate(pose_time, pose_states[:, 2])
 

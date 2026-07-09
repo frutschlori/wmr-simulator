@@ -9,7 +9,10 @@ os.environ["JAX_PLATFORMS"] = "cpu"
 import jax.numpy as jnp
 import numpy as np
 
-from wmr_simulator.pololu.pose_smoothing import fit_pose_splines
+from wmr_simulator.pololu.measurement_smoothing import (
+    smooth_and_align_encoder_speeds,
+    smooth_pose_stream,
+)
 from wmr_simulator.types import PoseLog, ReferenceLog, SimulationLog, WheelLog
 
 
@@ -51,10 +54,6 @@ def load_pololu_traj_control_log(
     *,
     clip_after_first_trajectory: bool = False,
     mocap_delay_s: float = 0.0,
-    spline_order: int = 3,
-    spline_noise_std_xy: float = 1e-3,
-    spline_noise_std_yaw: float = 5e-3,
-    spline_smoothing_factor: float = 1.0,
 ) -> SimulationLog:
     """Load one Pololu traj-control csv into a SimulationLog.
 
@@ -63,12 +62,20 @@ def load_pololu_traj_control_log(
     assumed at t - mocap_delay_s, so all mocap timestamps are shifted back by
     that amount before use.
 
-    The mocap poses are always smoothed with penalized B-splines
-    (pololu.pose_smoothing, ``spline_*`` parameters): repeated frames are
-    dropped from the fit and ``pose.states`` holds the spline-evaluated poses
-    while ``pose.twists`` holds the analytic-derivative body twists at the
-    pose times, so downstream consumers never finite-difference raw mocap.
-    The raw poses are kept in ``pose.true_states`` for diagnostics/plots.
+    The mocap poses are always smoothed with a Savitzky-Golay filter
+    (measurement_smoothing.smooth_pose_stream): repeated frames, samples too
+    close together, and residual-outlier poses are dropped, ``pose.states``
+    holds the filtered poses and ``pose.twists`` holds the filter-derivative
+    body twists at the pose times, so downstream consumers never
+    finite-difference raw mocap. The raw poses are kept in ``pose.true_states``
+    for diagnostics/plots; the survivors of rejection in ``pose.clean_states``.
+
+    The encoder wheel speeds get a light Savitzky-Golay smoothing and are
+    advanced by the firmware low-pass group delay to realign them with the
+    mocap motion (measurement_smoothing.smooth_and_align_encoder_speeds).
+
+    Smoothing and outlier-rejection defaults for both mocap and encoders are
+    configured in the measurement_smoothing submodule (DEFAULT_* constants).
     """
     columns, data = _read_time_normalized(Path(path), clip_after_first_trajectory)
 
@@ -80,24 +87,22 @@ def load_pololu_traj_control_log(
     pose_time, pose_states = _sparse_stream(columns, data, ("x_raw", "y_raw", "yaw_raw"))
     pose_time = pose_time - np.float32(mocap_delay_s)
     raw_pose_states = pose_states
-    # Duplicate frames are dropped inside the fit but the spline is evaluated at
-    # all raw timestamps, so every stream keeps its original length/time base.
-    splines = fit_pose_splines(
-        pose_time,
-        pose_states,
-        order=spline_order,
-        noise_std_xy=spline_noise_std_xy,
-        noise_std_yaw=spline_noise_std_yaw,
-        smoothing_factor=spline_smoothing_factor,
-    )
-    pose_states = splines.pose(pose_time)
-    pose_twists = splines.body_twist(pose_time)
+    # Duplicate frames are dropped inside the filter but the smoothed grid is
+    # interpolated back to all raw timestamps, so every stream keeps its
+    # original length/time base.
+    smoothed = smooth_pose_stream(pose_time, pose_states)
+    pose_states = smoothed.pose(pose_time)
+    pose_twists = smoothed.body_twist(pose_time)
     wheel_time, wheel_speeds = _sparse_stream(
         columns,
         data,
         ("omega_r_meas", "omega_l_meas"),
         trigger_names=("omega_r_meas", "omega_l_meas"),
     )
+    # Light extra smoothing, then advance by the firmware LP group delay so the
+    # encoder speeds line up in time with the mocap-derived motion
+    # (measurement_smoothing.smooth_and_align_encoder_speeds, DEFAULT_ENCODER_* knobs).
+    wheel_speeds = smooth_and_align_encoder_speeds(wheel_time, wheel_speeds)
     wheel_vel_omega = _latest_values_at_times(columns, data, ("v_actual", "w_actual"), wheel_time)
     duty_cycle = _latest_values_at_times(columns, data, ("duty_r", "duty_l"), wheel_time)
     command_time, wheel_cmd = _sparse_stream(
@@ -142,6 +147,8 @@ def load_pololu_traj_control_log(
             command_time_s=jnp.asarray(command_time, dtype=jnp.float32),
             wheel_cmd=jnp.asarray(wheel_cmd, dtype=jnp.float32),
             twists=jnp.asarray(pose_twists, dtype=jnp.float32),
+            clean_time_s=jnp.asarray(smoothed.clean_time, dtype=jnp.float32),
+            clean_states=jnp.asarray(smoothed.clean_pose, dtype=jnp.float32),
         ),
     )
 
@@ -314,24 +321,12 @@ if __name__ == "__main__":
     from wmr_simulator.visualization.pololu import plot_logged_summary
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--log", type=str, default="Pololu Data/Experiments/2026_07_06/04_New_Mocap_timestamps/decoded/TR05.csv")
+    parser.add_argument("--log", type=str, default="Pololu Data/Experiments/2026_07_07/12/binaries/decoded/TR07.csv")
     parser.add_argument("--output", type=str, default=None, help="Output filename prefix")
     parser.add_argument("--out-dir", type=str, default="visualize")
     parser.add_argument("--clip-after-first-trajectory", default=True, action="store_true")
-    # Smoothing-spline parameters (pololu.pose_smoothing.fit_pose_splines): degree,
-    # assumed per-sample mocap noise stds (m / rad, set the residual budget via
-    # weights 1/std), and a scale on that budget (>1 smooths harder, 0 interpolates).
-    parser.add_argument("--spline-order", type=int, default=3)
-    parser.add_argument("--spline-noise-std-xy", type=float, default=2e-3)
-    parser.add_argument("--spline-noise-std-yaw", type=float, default=5e-3)
-    parser.add_argument("--spline-smoothing-factor", type=float, default=1.0)
+    # Mocap/encoder smoothing defaults are configured in the measurement_smoothing submodule.
     args = parser.parse_args()
-    spline_kwargs = dict(
-        spline_order=args.spline_order,
-        spline_noise_std_xy=args.spline_noise_std_xy,
-        spline_noise_std_yaw=args.spline_noise_std_yaw,
-        spline_smoothing_factor=args.spline_smoothing_factor,
-    )
 
     log_path = Path(args.log)
     if log_path.is_dir():
@@ -340,7 +335,6 @@ if __name__ == "__main__":
             log = load_pololu_traj_control_log(
                 path,
                 clip_after_first_trajectory=args.clip_after_first_trajectory,
-                **spline_kwargs,
             )
             print_log_summary(path, log)
             imu_time, imu_gyro_z = load_imu_gyro_z(
@@ -359,7 +353,6 @@ if __name__ == "__main__":
     log = load_pololu_traj_control_log(
         log_path,
         clip_after_first_trajectory=args.clip_after_first_trajectory,
-        **spline_kwargs,
     )
     print_log_summary(log_path, log)
     imu_time, imu_gyro_z = load_imu_gyro_z(

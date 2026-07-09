@@ -8,10 +8,11 @@ This module renders that format from simulator quantities:
   the effective wheelbase).
 - ``kx_traj`` / ``ky_traj`` / ``ktheta_traj`` are the outer tracking gains,
   identical in both conventions.
-- ``kp_inner`` / ``ki_inner`` / ``kd_inner`` are the inner wheel-speed gains.
-  The simulator keeps them in wheel-speed units (dimensionless feedback on
-  rad/s errors) while the firmware expects duty / (rad/s), so the simulator
-  gains are divided by the motor gain (max_wheel_speed) on export.
+- ``kp_inner`` / ``ki_inner`` are the inner wheel-speed gains. The simulator
+  keeps them in wheel-speed units (dimensionless feedback on rad/s errors)
+  while the firmware expects duty / (rad/s), so the simulator gains are divided
+  by the motor gain (max_wheel_speed) on export. ``kd_inner`` is a firmware-only
+  slot the simulator no longer models; it is forced to 0 on export.
 
 Keys that have no simulator counterpart (joystick timing, motor directions,
 encoder constants, ...) are taken from a template: either an existing CFG file
@@ -103,9 +104,10 @@ def robot_config_values(
 
     ``physical_params`` is a PhysicalParams (or anything with wheel_radius,
     base_diameter and max_wheel_speed attributes); ``controller_gains`` is the
-    simulator gain vector [kx, ky, kth, kpmotor, kimotor, kdmotor]. Inner motor
-    gains are converted to firmware duty/(rad/s) units by dividing by
-    max_wheel_speed, so exporting gains requires physical_params too.
+    simulator gain vector [kx, ky, kth, kpmotor, kimotor]. Inner motor gains are
+    converted to firmware duty/(rad/s) units by dividing by max_wheel_speed, so
+    exporting gains requires physical_params too. The firmware ``kd_inner`` slot
+    has no simulator counterpart and is forced to 0.
     """
     values = dict(DEFAULT_ROBOT_CONFIG if template is None else template)
     if physical_params is not None:
@@ -115,15 +117,15 @@ def robot_config_values(
         if physical_params is None:
             raise ValueError("Exporting controller gains requires physical_params for the motor-gain conversion.")
         gains = [float(gain) for gain in controller_gains]
-        if len(gains) != 6:
-            raise ValueError(f"Expected 6 controller gains [kx, ky, kth, kp, ki, kd], got {len(gains)}.")
+        if len(gains) != 5:
+            raise ValueError(f"Expected 5 controller gains [kx, ky, kth, kp, ki], got {len(gains)}.")
         motor_gain = float(physical_params.max_wheel_speed)
         if motor_gain <= 0.0:
             raise ValueError("max_wheel_speed must be positive for the inner-gain conversion.")
         values["kx_traj"], values["ky_traj"], values["ktheta_traj"] = gains[0:3]
         values["kp_inner"] = gains[3] / motor_gain
         values["ki_inner"] = gains[4] / motor_gain
-        values["kd_inner"] = gains[5] / motor_gain
+        values["kd_inner"] = 0.0
     if overrides:
         values.update({key: float(value) for key, value in overrides.items()})
     return values

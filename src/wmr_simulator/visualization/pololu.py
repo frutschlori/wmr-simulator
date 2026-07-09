@@ -30,16 +30,22 @@ def plot_logged_summary(
     wheel_time = np.asarray(log.wheel.time_s, dtype=float)
     wheel_speeds = np.asarray(log.wheel.speeds, dtype=float)
 
-    # Pololu logs carry spline-smoothed poses in states, the raw mocap in
-    # true_states and spline-derivative twists; show the raw stream as slim
-    # background lines. Simulated logs (twists None) keep the single-stream plot.
+    # Pololu logs carry Savitzky-Golay-smoothed poses in states and filter-
+    # derivative twists; the raw (unsmoothed) mocap surviving outlier rejection
+    # lives in clean_states/clean_time_s (a shorter stream than time_s). Show
+    # that as slim background lines. Simulated logs (twists None) keep the
+    # single-stream plot.
     pose_twists = getattr(log.pose, "twists", None)
-    raw_pose = np.asarray(log.pose.true_states, dtype=float) if pose_twists is not None else None
-    if pose_twists is not None:
+    clean_time = getattr(log.pose, "clean_time_s", None)
+    clean_states = getattr(log.pose, "clean_states", None)
+    if pose_twists is not None and clean_time is not None and clean_states is not None:
+        raw_time = np.asarray(clean_time, dtype=float)
+        raw_pose = np.asarray(clean_states, dtype=float)
         mocap_vel_time = pose_time
         mocap_vel = np.asarray(pose_twists, dtype=float)[:, [0, 2]]
-        raw_vel_time, raw_vel = _mocap_vel_omega(pose_time, raw_pose)
+        raw_vel_time, raw_vel = _mocap_vel_omega(raw_time, raw_pose)
     else:
+        raw_time = raw_pose = None
         mocap_vel_time, mocap_vel = _mocap_vel_omega(pose_time, measured_pose)
         raw_vel_time = raw_vel = None
     raw_style = dict(linewidth=0.4, alpha=0.7)
@@ -126,7 +132,7 @@ def plot_logged_summary(
     for index, ax in enumerate(axes[1, :]):
         ax.step(ref_time, reference[:, index], where="post", color="tab:red", linestyle="--", linewidth=0.9, label="Reference")
         if raw_pose is not None:
-            ax.plot(pose_time, raw_pose[:, index], color="tab:blue", **raw_style, label="Measured (raw)")
+            ax.plot(raw_time, raw_pose[:, index], color="tab:blue", **raw_style, label="Measured (raw)")
         ax.plot(pose_time, measured_pose[:, index], color="tab:blue", linewidth=0.95, label="Measured")
         ax.set_xlabel("time [s]")
         ax.set_ylabel(labels[index])
