@@ -153,8 +153,7 @@ def test_step_tracks_lateral_velocity_state():
     assert with_residual.vel_lateral.shape == ()
     # The residual's lateral correction must be carried in the state so the
     # next step's features can condition on it. The wheel-speed feature the model
-    # sees is the *nominal* first-order lag prediction (pre-correction), not the
-    # corrected wheel speed that ends up in the state.
+    # sees is the nominal first-order lag prediction (there is no wheel residual).
     alpha = np.exp(-0.01 / ROBOT_CFG["time_constant"])
     nominal_lag = alpha * state.wheel_speeds + (1.0 - alpha) * ROBOT_CFG["max_wheel_speed"] * duty
     features = jnp.concatenate(
@@ -168,8 +167,7 @@ def test_step_tracks_lateral_velocity_state():
 
     delta = apply(model, features)
     np.testing.assert_allclose(float(with_residual.vel_lateral), float(delta[1]), rtol=1e-5)
-    # The corrected wheel speed carried in the state is the nominal lag plus the
-    # model's wheel-speed residual channels.
+    # The wheel speed carried in the state is the pure nominal lag (no wheel residual).
     np.testing.assert_allclose(
-        np.asarray(with_residual.wheel_speeds), np.asarray(nominal_lag + delta[3:5]), rtol=1e-5
+        np.asarray(with_residual.wheel_speeds), np.asarray(nominal_lag), rtol=1e-5
     )

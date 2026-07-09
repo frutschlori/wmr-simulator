@@ -144,21 +144,18 @@ class DiffDrive:
             # 3-5) Learned state-action residual (see residual_model.residual),
             #      conditioned on the *current* body twist (so the model knows
             #      whether the robot is already slipping) and the nominal lag
-            #      wheel speed + duty. Design B: the twist/pose come from the
-            #      *nominal* wheel through the traction limit + kinematics with the
-            #      twist residual as the final correction (slip + lateral side-slip
-            #      the ideal kinematics exclude). The wheel-speed residual is the
-            #      last output and updates only the carried motor-side wheel state,
-            #      which feeds the next step's motor lag and the estimator/encoders;
-            #      it does not touch the current pose (that would double-count with
-            #      the twist residual). Its effect on motion is the physically
-            #      correct one-step-delayed path through the wheel recurrence.
+            #      wheel speed + duty. The twist/pose come from the nominal wheel
+            #      through the traction limit + kinematics with the twist residual
+            #      as the final correction (slip + lateral side-slip the ideal
+            #      kinematics exclude). The wheel speed itself is left at its
+            #      nominal lag value (no wheel residual).
             features = residual_features(
                 np.array([state.vel_omega[0], state.vel_lateral, state.vel_omega[1]]),
                 nominal_lag_wheel_speeds,
                 duty_cycle,
             )
             delta = apply_residual_model(residual_model, features)
+            next_wheel_speeds = nominal_lag_wheel_speeds
             next_ground_speeds = traction_limited_ground_speeds(
                 state.ground_wheel_speeds, nominal_lag_wheel_speeds, a_slip_max, r, dt
             )
@@ -168,8 +165,6 @@ class DiffDrive:
             w = w_nom + delta[2]
             next_pose = integrate_planar_pose_lateral(state.pose, v, v_y, w, dt)
             next_vel_lateral = np.asarray(v_y, dtype=np.float32)
-            # Wheel-speed residual: corrected motor-side wheel state for next step.
-            next_wheel_speeds = nominal_lag_wheel_speeds + delta[3:5]
         else:
             next_wheel_speeds = nominal_lag_wheel_speeds
             # 3) Traction limit ("burnout"): ground speeds follow the motor side rate-limited
