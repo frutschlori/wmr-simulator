@@ -43,16 +43,36 @@ def plot_predictions(
     split_name: str,
     *,
     out_dir: str | Path = "visualize",
+    segment_lengths: list[int] | None = None,
 ) -> Path:
-    """Predicted vs target residual channels: time series (top) and scatter (bottom)."""
+    """Predicted vs target residual channels: time series (top) and scatter (bottom).
+
+    The training set concatenates samples from several independent experiment
+    logs; the step from one log's end to the next log's start is never
+    predicted. ``segment_lengths`` (per-log sample counts, summing to
+    ``len(targets)``) draws each log as its own solid line so those boundaries
+    are visibly broken rather than joined by a spurious connecting segment.
+    """
     plt = _plot_module()
     out_dir = _ensure_dir(out_dir)
-    fig, axes = plt.subplots(2, RESIDUAL_OUTPUT_DIM, figsize=(13, 7))
-    sample_index = np.arange(len(targets))
+    fig, axes = plt.subplots(2, RESIDUAL_OUTPUT_DIM, figsize=(2.6 * RESIDUAL_OUTPUT_DIM, 7))
+    if segment_lengths is None or len(segment_lengths) == 0:
+        segment_lengths = [len(targets)]
+    boundaries = np.cumsum(segment_lengths)[:-1]
     for channel in range(RESIDUAL_OUTPUT_DIM):
         ax = axes[0, channel]
-        ax.plot(sample_index, targets[:, channel], label="target", lw=0.8)
-        ax.plot(sample_index, predictions[:, channel], label="predicted", lw=0.8, alpha=0.8)
+        start = 0
+        for seg_index, seg_len in enumerate(segment_lengths):
+            stop = start + seg_len
+            index = np.arange(start, stop)
+            first = seg_index == 0
+            ax.plot(index, targets[start:stop, channel], color="C0", lw=0.8,
+                    label="target" if first else None)
+            ax.plot(index, predictions[start:stop, channel], color="C1", lw=0.8, alpha=0.8,
+                    label="predicted" if first else None)
+            start = stop
+        for boundary in boundaries:
+            ax.axvline(boundary - 0.5, color="0.6", lw=0.6, ls=":")
         ax.set_title(TARGET_LABELS[channel])
         ax.set_xlabel("sample")
         ax.grid(True, alpha=0.3)

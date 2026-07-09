@@ -54,7 +54,15 @@ class SimulationPipeline:
         # None keeps the nominal dynamics untouched.
         self.residual_model = residual_model
         with open(problem_path, "r", encoding="utf-8") as file:
-            self.problem = apply_noise_configuration(yaml.safe_load(file))
+            problem_cfg = yaml.safe_load(file)
+        # The residual is fit to explain the gap between the nominal model and the
+        # real (noise-free deterministic) mocap data, so it also absorbs whatever
+        # the simulated measurement noise would inject. Whenever a residual is part
+        # of the dynamics, force the noise off so the residual isn't double-counting
+        # it -- both in training's closed-loop check and at deployment.
+        if residual_model is not None:
+            problem_cfg["noise_enabled"] = False
+        self.problem = apply_noise_configuration(problem_cfg)
 
         self.problem_path = problem_path
         self.reference_trajectories_dir = reference_trajectories_dir
@@ -330,7 +338,7 @@ class SimulationPipeline:
         true_pose_states = jnp.concatenate([initial_pose, true_pose_samples.reshape(-1, 3)], axis=0)
         duty_inputs = duty_cycles.reshape(-1, 2)
         selected_wheel_speeds = true_wheel_speeds if wheel_speed_log_source == "true" else estimated_wheel_speeds
-        initial_wheel_speeds = carry0[0].wheel_speeds if wheel_speed_log_source == "true" else carry0[1].u_hat
+        initial_wheel_speeds = carry0[0].wheel_speeds if wheel_speed_log_source == "true" else carry0[1].u_lp
         wheel_speed_log = jnp.vstack([initial_wheel_speeds, selected_wheel_speeds.reshape(-1, 2)])
         vel_omega_log = jnp.vstack([carry0[0].vel_omega, wheel_vel_omega.reshape(-1, 2)])
         duty_log = jnp.vstack([duty_inputs, duty_inputs[-1]])
