@@ -8,6 +8,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+import yaml
 
 from wmr_simulator.gain_schedule import (
     apply_gain_schedule,
@@ -24,7 +25,7 @@ from wmr_simulator.gain_tuning.objectives import (
 from wmr_simulator.gain_tuning.pipeline import ControllerTuningPipeline
 
 PROBLEM = "problems/pololu_gains.yaml"
-FEATURE_SCALE = [2.0, 10.0]  # matches pololu_gains robot v_max / omega_max
+FEATURE_SCALE = [2.0, 10.0]  # arbitrary fixed scale for the unit tests below
 
 
 def _cfg(W=None, rho=None):
@@ -55,24 +56,27 @@ def test_identity_factors_for_all_refs():
 
 
 def test_feature_scale_autoderived_from_robot_limits():
+    with open(PROBLEM) as f:
+        robot_cfg = yaml.safe_load(f)["robot"]
+    expected = [robot_cfg["v_max"], robot_cfg["omega_max"]]
     pipeline = _pipeline()
-    np.testing.assert_allclose(pipeline.gain_schedule_feature_scale, FEATURE_SCALE)
-    np.testing.assert_allclose(np.asarray(pipeline.gain_schedule_params.feature_scale), FEATURE_SCALE)
+    np.testing.assert_allclose(pipeline.gain_schedule_feature_scale, expected)
+    np.testing.assert_allclose(np.asarray(pipeline.gain_schedule_params.feature_scale), expected)
 
 
 def test_apply_gain_schedule_shape_and_motor_passthrough():
     params = _params(W=[[1.0, -1.0], [0.5, 0.2], [-0.3, 0.4]])
-    base = jnp.asarray([5.0, 5.0, 3.0, 0.4, 0.2, 0.05], dtype=jnp.float32)
+    base = jnp.asarray([5.0, 5.0, 3.0, 0.4, 0.2], dtype=jnp.float32)
     ref = jnp.asarray([0.0, 0.0, 0.0, 1.0, 0.0, 2.0, 0.0, 0.0], dtype=jnp.float32)
     scheduled = apply_gain_schedule(base, params, ref)
-    assert scheduled.shape == (6,)
-    # Motor gains (indices 3..5) are always passed through unchanged.
+    assert scheduled.shape == (5,)
+    # Motor gains (indices 3..4) are always passed through unchanged.
     np.testing.assert_allclose(np.asarray(scheduled[3:]), np.asarray(base[3:]), atol=1e-7)
 
 
 def test_scheduled_outer_gains_shape():
     params = _params()
-    base = jnp.asarray([5.0, 5.0, 3.0, 0.4, 0.2, 0.0], dtype=jnp.float32)
+    base = jnp.asarray([5.0, 5.0, 3.0, 0.4, 0.2], dtype=jnp.float32)
     ref_states = jnp.asarray(np.random.default_rng(1).normal(size=(11, 8)), dtype=jnp.float32)
     outer = scheduled_outer_gains_over_refs(base, params, ref_states)
     assert outer.shape == (10, 3)
@@ -80,7 +84,7 @@ def test_scheduled_outer_gains_shape():
 
 def test_positivity_under_bounded_rho():
     rng = np.random.default_rng(2)
-    base = jnp.asarray([5.0, 5.0, 3.0, 0.4, 0.2, 0.0], dtype=jnp.float32)
+    base = jnp.asarray([5.0, 5.0, 3.0, 0.4, 0.2], dtype=jnp.float32)
     for _ in range(50):
         params = _params(W=rng.normal(size=(3, 2)).tolist(), rho=[0.9, 0.9, 0.9])
         ref = jnp.asarray(rng.normal(size=8), dtype=jnp.float32)

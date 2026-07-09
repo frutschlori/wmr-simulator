@@ -33,7 +33,7 @@ def main():
     parser.add_argument("--reference-trajectories-dir", type=str, default="trajectory_exports/tuning_optimized_5000it")
     parser.add_argument("--validation-split", type=float, default=0.2)
     # Optimization hyper-parameters
-    parser.add_argument("--num-lhs-points", type=int, default=100) # points on initial search grid, 0 to disable
+    parser.add_argument("--num-lhs-points", type=int, default=250) # points on initial search grid, 0 to disable
     parser.add_argument("--num-adam-optimizations", type=int, default=10) # number of best candidates to refine
     parser.add_argument("--steps", type=int, default=500)                 # adam steps
     parser.add_argument("--learning-rate", type=float, default=1e-3)      # adam learning rate
@@ -45,7 +45,7 @@ def main():
     parser.add_argument("--input-delta-weight", type=float, default=1)
     # Gain bounds
     parser.add_argument("--k-min-stab", type=float, default=1e-3)
-    parser.add_argument("--k-max-stab", type=float, default=30.0)
+    parser.add_argument("--k-max-stab", type=float, default=100.0)
     parser.add_argument("--k-max-rest", type=float, default=100.0)
     # Optional overwrite of robot model parameters
     parser.add_argument("--fixed-wheel-radius", type=float, default=None)

@@ -1,5 +1,7 @@
 import argparse
 import os
+from pathlib import Path
+
 os.environ["JAX_PLATFORMS"] = "cpu"
 
 import jax.numpy as jnp
@@ -50,26 +52,16 @@ def main():
     # Traction limit init (m/s^2, ~ mu*g; burnout model, residual_model.burnout).
     # Must be positive to be identified; the default 0 keeps the limit disabled
     # (0 * exp(theta) = 0 in the log-space optimizer).
-    parser.add_argument("--init-a-slip-max", type=float, default=4.0)
+    parser.add_argument("--init-a-slip-max", type=float, default=5.0)
 
     # Path to real experiment log
     parser.add_argument("--pololu-log", type=str,
-                        default="Pololu Data/Experiments/2026_07_06/04_New_Mocap_timestamps/decoded/TR05.csv")
+                        default="Pololu Data/Experiments/2026_07_07/12/binaries/decoded/TR14.csv")
                         # default="Pololu Data/Experiments/2026_07_01/TR03.csv")
     parser.add_argument("--clip-after-first-trajectory", action="store_true", default=True)
-    # Smoothing-spline parameters for the mocap poses/twists (see
-    # pololu.pose_smoothing.fit_pose_splines and the log loader).
-    parser.add_argument("--spline-order", type=int, default=3)
-    parser.add_argument("--spline-noise-std-xy", type=float, default=1e-3)
-    parser.add_argument("--spline-noise-std-yaw", type=float, default=5e-3)
-    parser.add_argument("--spline-smoothing-factor", type=float, default=1.0)
-    # Mocap transport latency (seconds); mocap timestamps are shifted back by this
-    # before identification. Default: estimator.mocap_delay from the problem yaml.
-    parser.add_argument("--mocap-delay", type=float, default=None)
-    # Estimate the delay from the log first (mocap yaw rate vs IMU gyro z
-    # cross-correlation, see identification/mocap_delay.py) and use the estimate.
+    # Mocap/encoder smoothing defaults are configured in the measurement_smoothing submodule.
     parser.add_argument("--estimate-mocap-delay", action="store_true", default=False)
-    parser.add_argument("--mocap-delay-search-range", type=float, default=0.2)
+    parser.add_argument("--mocap-delay-search-range", type=float, default=0.02)
     args = parser.parse_args()
 
     init_params = PhysicalParams(
@@ -80,12 +72,9 @@ def main():
         a_slip_max=jnp.asarray(args.init_a_slip_max),
     )
 
-    mocap_delay = args.mocap_delay
-    mocap_delay_source = "--mocap-delay"
-    if mocap_delay is None:
-        with open(args.problem, "r", encoding="utf-8") as file:
-            mocap_delay = float(yaml.safe_load(file).get("estimator", {}).get("mocap_delay", 0.0))
-        mocap_delay_source = "problem yaml"
+    with open(args.problem, "r", encoding="utf-8") as file:
+        mocap_delay = float(yaml.safe_load(file).get("estimator", {}).get("mocap_delay", 0.0))
+    mocap_delay_source = "problem yaml"
     if args.estimate_mocap_delay:
         try:
             delay_result = estimate_mocap_delay_from_log_file(
@@ -103,10 +92,6 @@ def main():
         args.pololu_log,
         clip_after_first_trajectory=args.clip_after_first_trajectory,
         mocap_delay_s=mocap_delay,
-        spline_order=args.spline_order,
-        spline_noise_std_xy=args.spline_noise_std_xy,
-        spline_noise_std_yaw=args.spline_noise_std_yaw,
-        spline_smoothing_factor=args.spline_smoothing_factor,
     )
 
     result = run_single_experiment_identification(
@@ -127,7 +112,7 @@ def main():
     print(f"Final normalized geometry loss: {result['loss_history'][-1]:.8f}")
     print(f"Final normalized motor loss:    {result['motor_loss_history'][-1]:.8f}")
 
-    out_prefix = "identification_log_{name}".format(name=args.pololu_log[-4:])
+    out_prefix = f"identification_log_{Path(args.pololu_log).stem}"
     plot_system_id(
         pipeline=pipeline,
         init_target_log=result["init_target_log"],

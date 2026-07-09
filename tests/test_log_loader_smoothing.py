@@ -49,7 +49,7 @@ def synthetic_log(tmp_path):
     return log_path
 
 
-def test_loader_fills_spline_twists(synthetic_log):
+def test_loader_fills_savgol_twists(synthetic_log):
     log = load_pololu_traj_control_log(synthetic_log)
     twists = np.asarray(log.pose.twists, dtype=float)
     assert twists.shape == (len(log.pose.time_s), 3)
@@ -81,7 +81,7 @@ def test_load_imu_gyro_z_converts_to_rad_s(synthetic_log):
     np.testing.assert_allclose(gyro_z, 1.0, atol=1e-4)  # written as deg/s of omega = 1 rad/s
 
 
-def test_residual_dataset_uses_spline_twists(synthetic_log):
+def test_residual_dataset_uses_savgol_twists(synthetic_log):
     import jax.numpy as jnp
 
     from wmr_simulator.residual_model.residual import build_residual_dataset
@@ -94,6 +94,6 @@ def test_residual_dataset_uses_spline_twists(synthetic_log):
     log = load_pololu_traj_control_log(synthetic_log)
     dataset = build_residual_dataset(log, params)
     measured = dataset["measured_twist"]
-    # Twist targets come from the spline: constant twist, no differencing spikes.
+    # Twist targets come from the filter: constant twist, no differencing spikes.
     np.testing.assert_allclose(measured[10:-10, 0], 0.5, atol=0.03)
     np.testing.assert_allclose(measured[10:-10, 2], 1.0, atol=0.06)

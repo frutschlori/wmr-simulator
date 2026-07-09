@@ -1,4 +1,4 @@
-sim_time: 10.0 # seconds
+sim_time: 5.0 # seconds
 geometry_controller_dt: 0.05 # seconds
 wheel_controller_dt: 0.01 # seconds
 environment:
@@ -14,9 +14,9 @@ planner:
   time: 5.0 # seconds
 controller:
   # Motor gains are dimensionless here, but in duty / (rad/s) in pololu firmware -> divide gains by motor gain for conversion
-  # gains: [5.0, 5.0, 3.5, 5.0, 0.0, 0.0] # [kx, ky, kth, kpmotor, kimotor, kdmotor]
-  gains: [4.5, 6.0, 12.0, 2.5, 5.0, 0.0] # stock pololu firmware gains
-  # gains: [5.0, 5.0, 3.0, 0.4, 0.2, 0.0] # stock wmr simulator gains
+  # gains: [5.0, 5.0, 3.5, 5.0, 0.0] # [kx, ky, kth, kpmotor, kimotor]
+  gains: [4.5, 6.0, 12.0, 2.5, 5.0] # stock pololu firmware gains
+  # gains: [5.0, 5.0, 3.0, 0.4, 0.2] # stock wmr simulator gains
 
   # Bounded multiplicative gain schedule for the outer tracking gains:
   #   gain_i = base_i * (1 + rho_i * clip(W_i . z, -1, 1)),  z = [v_d/v_max, |omega_d|/omega_max]
@@ -24,7 +24,7 @@ controller:
   # reproduces the static controller exactly. feature_scale is auto-derived from the
   # robot velocity limits (v_max, omega_max). --no-gain-schedule forces W = 0.
   gain_schedule:
-    enabled: true
+    enabled: false
     scheduled_indices: [0, 1, 2]      # kx, ky, kth
     rho: [0.5, 0.5, 0.5]
     W:                                # optional init (defaults to zeros = static baseline)
@@ -38,7 +38,7 @@ robot:
   base_diameter: 0.08525 # m, *effective* wheelbase (absorbs tire scrub in turns, Borenstein & Feng 1996; may differ from geometric)
   max_wheel_speed: 248.17  # rad/s
   time_constant:  0.2237  # time constant for first-order wheel dynamics (set to 0 for ideal actuation)
-  a_slip_max:  3.5    # traction limit ~ mu*g in m/s^2, 0 to disable (burnout model, Wong 2008)
+  a_slip_max:  2.8    # traction limit ~ mu*g in m/s^2, 0 to disable (burnout model, Wong 2008)
   v_max: 2.5          # m/s
   a_max: 5.0         # m/s^2
   a_max_lateral: 6.0 # m/s^2
@@ -46,7 +46,7 @@ robot:
   alpha_max: 20.0    # rad/s^2
 
 estimator:
-  mocap_delay: 0.0        # mocap transport latency [s] (network+radio/UART); controller sees poses this old. Identify via identification/mocap_delay.py
+  mocap_delay: 0.001     # mocap transport latency [s] (network+radio/UART); controller sees poses this old. Identify via identification/mocap_delay.py
   type: "kf"              # estimator type: "kf" (Kalman Filter) or "dr" (Dead Reckoning)
   wheel_radius: 0.016     # estimator's wheel_radius [m]
   base_diameter: 0.078    # estimator's base_diameter [m]

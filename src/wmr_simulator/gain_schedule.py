@@ -7,7 +7,7 @@ bounded, reference-dependent factor:
     factor_i = 1.0 + rho_i * clip(W_i . z, -1.0, 1.0)  # bounded multiplicative factor
     gain_i   = base_i * factor_i                       # for i in scheduled_indices
 
-``base_i`` are the ordinary static outer gains (entries of the full 6-gain vector).
+``base_i`` are the ordinary static outer gains (entries of the full gain vector).
 ``W`` is the only schedule-specific parameter; with ``W = 0`` the factors are exactly
 ``1.0`` for every reference state, so the controller reduces to the static baseline
 with gains ``base``. Base gains and ``W`` are optimized jointly (single stage).
@@ -44,7 +44,7 @@ class GainScheduleParams(NamedTuple):
     W: jax.Array                    # (num_scheduled, num_features)
     rho: jax.Array                  # (num_scheduled,)
     feature_scale: jax.Array        # (num_features,)
-    scheduled_indices: jax.Array    # (num_scheduled,) int indices into the 6-gain vector
+    scheduled_indices: jax.Array    # (num_scheduled,) int indices into the gain vector
 
 
 def gain_schedule_features(ref_state: jax.Array, feature_scale: jax.Array) -> jax.Array:
@@ -75,7 +75,7 @@ def apply_gain_schedule(
     params: GainScheduleParams,
     ref_state: jax.Array,
 ) -> jax.Array:
-    """Full scheduled 6-gain vector for a single reference state.
+    """Full scheduled gain vector for a single reference state.
 
     Scheduled indices are multiplied by their factors; all other gains
     (the inner motor gains) are passed through unchanged.

@@ -37,9 +37,15 @@ class PoseLog(NamedTuple):
     command_time_s: jax.Array # geometry-controller command times
     wheel_cmd: jax.Array      # [omega_right_cmd, omega_left_cmd]
     # [v_x, v_y, omega] body twist at the pose times. Pololu logs fill this with
-    # the analytic spline derivative (pololu.pose_smoothing); consumers should
-    # prefer it over finite-differencing `states`. None for simulated logs.
+    # the Savitzky-Golay filter derivative (pololu.measurement_smoothing); consumers
+    # should prefer it over finite-differencing `states`. None for simulated logs.
     twists: jax.Array | None = None
+    # Raw (unsmoothed) mocap poses surviving outlier rejection and their times
+    # (pololu.measurement_smoothing); a shorter stream than time_s, for diagnostics/
+    # plots that want the raw measurement without the rejected spikes. None for
+    # simulated logs.
+    clean_time_s: jax.Array | None = None
+    clean_states: jax.Array | None = None
 
 
 class SimulationLog(NamedTuple):
@@ -87,7 +93,6 @@ def print_controller_gains(label: str, gains: jax.Array):
     print(f"  kth={float(gains[2]):.7f}")
     print(f"  kpmotor={float(gains[3]):.7f}")
     print(f"  kimotor={float(gains[4]):.7f}")
-    print(f"  kdmotor={float(gains[5]):.7f}")
 
 
 def clip_physical_params(params: PhysicalParams) -> PhysicalParams:

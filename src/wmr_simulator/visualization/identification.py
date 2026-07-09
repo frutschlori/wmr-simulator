@@ -442,15 +442,15 @@ def plot_system_id(
 
     ax_vel_omega = ax_vel.twinx()
     ref_speed = np.linalg.norm(reference[:, 3:5], axis=1)
-    # Velocities as used by the identification: the spline-smoothed body twists
-    # (pose.twists, pololu.pose_smoothing) when the log carries them; finite
+    # Velocities as used by the identification: the Savitzky-Golay-smoothed body
+    # twists (pose.twists, pololu.measurement_smoothing) when the log carries them; finite
     # differences of the poses remain the fallback for simulated logs.
     pose_twists = getattr(target_log.pose, "twists", None)
     if pose_twists is not None:
         twists = np.asarray(pose_twists, dtype=float)[:plot_len]
         true_vel_time = plot_time
         true_vel = np.column_stack([twists[:, 0], twists[:, 2]])
-        measured_vel_label = ("meas v (spline)", r"meas $\omega$ (spline)")
+        measured_vel_label = ("meas v (savgol)", r"meas $\omega$ (savgol)")
     else:
         true_vel_time, true_vel = _pose_vel_omega(plot_time, true_measurements)
         measured_vel_label = ("true v", r"true $\omega$")
