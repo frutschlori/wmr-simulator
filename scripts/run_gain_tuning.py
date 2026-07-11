@@ -34,30 +34,30 @@ def main():
     parser.add_argument("--validation-split", type=float, default=0.2)
     # Optimization hyper-parameters
     parser.add_argument("--num-lhs-points", type=int, default=250) # points on initial search grid, 0 to disable
-    parser.add_argument("--num-adam-optimizations", type=int, default=10) # number of best candidates to refine
-    parser.add_argument("--steps", type=int, default=500)                 # adam steps
-    parser.add_argument("--learning-rate", type=float, default=1e-3)      # adam learning rate
-    parser.add_argument("--num-realizations", type=int, default=16) # noise realizations over 1 trajectory
+    parser.add_argument("--num-adam-optimizations", type=int, default=20) # number of best candidates to refine
+    parser.add_argument("--steps", type=int, default=1000)                 # adam steps
+    parser.add_argument("--learning-rate", type=float, default=1e-4)      # adam learning rate
+    parser.add_argument("--num-realizations", type=int, default=1) # noise realizations over 1 trajectory
     parser.add_argument("--seed", type=int, default=2)
     # Loss weights
-    parser.add_argument("--velocity-tracking-weight", type=float, default=1)
+    parser.add_argument("--velocity-tracking-weight", type=float, default=3)
     parser.add_argument("--input-weight", type=float, default=0.0)
     parser.add_argument("--input-delta-weight", type=float, default=1)
     # Gain bounds
     parser.add_argument("--k-min-stab", type=float, default=1e-3)
-    parser.add_argument("--k-max-stab", type=float, default=100.0)
-    parser.add_argument("--k-max-rest", type=float, default=100.0)
+    parser.add_argument("--k-max-stab", type=float, default=50.0)
+    parser.add_argument("--k-max-rest", type=float, default=20.0)
     # Optional overwrite of robot model parameters
     parser.add_argument("--fixed-wheel-radius", type=float, default=None)
     parser.add_argument("--fixed-base-diameter", type=float, default=None)
     parser.add_argument("--num-summary-training-trajectories", type=int, default=None)
     # Gain schedule: jointly tune base gains + outer-gain schedule (W), default follows problem yaml, --no-gain-schedule forces W=0 (static)
-    parser.add_argument("--gain-schedule", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--gain-schedule", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--gain-delta-weight", type=float, default=0.0)
     # Learned residual dynamics checkpoint (scripts/train_residual_model.py); tuning
     # then rolls out the residual-augmented dynamics (model params stay fixed).
     # parser.add_argument("--residual-model", type=str, default="models/residual_pololu.pkl")
-    parser.add_argument("--residual-model", type=str, default=None)
+    parser.add_argument("--residual-model", type=str, default="models/residual_pololu.pkl")
     args = parser.parse_args()
 
     residual_model = None

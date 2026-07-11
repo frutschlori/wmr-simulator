@@ -24,7 +24,7 @@ controller:
   # reproduces the static controller exactly. feature_scale is auto-derived from the
   # robot velocity limits (v_max, omega_max). --no-gain-schedule forces W = 0.
   gain_schedule:
-    enabled: false
+    enabled: true
     scheduled_indices: [0, 1, 2]      # kx, ky, kth
     rho: [0.5, 0.5, 0.5]
     W:                                # optional init (defaults to zeros = static baseline)
@@ -33,11 +33,11 @@ controller:
       - [0.0, 0.0]
 robot:
   type: differential_drive
-  wheel_radius: 0.01637   # m
-  base_diameter: 0.08525 # m, *effective* wheelbase (absorbs tire scrub in turns, Borenstein & Feng 1996; may differ from geometric)
-  max_wheel_speed: 248.17  # rad/s
-  time_constant:  0.2237  # time constant for first-order wheel dynamics (set to 0 for ideal actuation)
-  a_slip_max:  2.8    # traction limit ~ mu*g in m/s^2, 0 to disable (burnout model, Wong 2008)
+  wheel_radius: 0.01595   # m
+  base_diameter: 0.0875 # m, *effective* wheelbase (absorbs tire scrub in turns, Borenstein & Feng 1996; may differ from geometric)
+  max_wheel_speed: 251  # rad/s
+  time_constant:  0.11  # time constant for first-order wheel dynamics (set to 0 for ideal actuation)
+  a_slip_max:  2.768    # traction limit ~ mu*g in m/s^2, 0 to disable (burnout model, Wong 2008)
   v_max: 2.5          # m/s
   a_max: 5.0         # m/s^2
   a_max_lateral: 6.0 # m/s^2

@@ -49,7 +49,7 @@ __all__ = [
 # At ~10 ms mocap sampling a window of 21 smooths over ~210 ms; a cubic keeps
 # the fit flexible enough for the arcs while rejecting per-sample noise (a wider
 # window is needed for the derivative, whose noise shrinks with window length).
-DEFAULT_SAVGOL_WINDOW = 21
+DEFAULT_SAVGOL_WINDOW = 35
 DEFAULT_SAVGOL_POLYORDER = 3
 
 # Outlier-rejection defaults (0 disables each). ``min_dt`` drops samples logged
