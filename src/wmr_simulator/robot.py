@@ -143,16 +143,19 @@ class DiffDrive:
         if residual_model is not None:
             # 3-5) Learned state-action residual (see residual_model.residual),
             #      conditioned on the *current* body twist (so the model knows
-            #      whether the robot is already slipping) and the nominal lag
-            #      wheel speed + duty. The twist/pose come from the nominal wheel
-            #      through the traction limit + kinematics with the twist residual
-            #      as the final correction (slip + lateral side-slip the ideal
+            #      whether the robot is already slipping), the nominal lag wheel
+            #      speed, the wheel-speed command, and the traction-slip proxy
+            #      against the previous ground speeds.
+            #      The twist/pose come from the nominal wheel through the
+            #      traction limit + kinematics with the twist residual as the
+            #      final correction (slip + lateral side-slip the ideal
             #      kinematics exclude). The wheel speed itself is left at its
             #      nominal lag value (no wheel residual).
             features = residual_features(
                 np.array([state.vel_omega[0], state.vel_lateral, state.vel_omega[1]]),
                 nominal_lag_wheel_speeds,
-                duty_cycle,
+                logged_wheel_speed_cmd,
+                state.ground_wheel_speeds,
             )
             delta = apply_residual_model(residual_model, features)
             next_wheel_speeds = nominal_lag_wheel_speeds

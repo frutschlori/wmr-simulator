@@ -271,6 +271,7 @@ def _clip_after_first_reference_stop(
     *,
     min_zero_rows: int = 3,
     zero_tolerance: float = 1e-6,
+    settle_speed: float = 0.1,
 ) -> np.ndarray:
     reference_rows = _rows_with(columns, data, ("x_des", "y_des", "yaw_des", "v_ff", "w_ff"))
     if len(reference_rows) < min_zero_rows:
@@ -286,8 +287,38 @@ def _clip_after_first_reference_stop(
             motion_seen = True
             continue
         if motion_seen and np.all(zero_reference[index : index + min_zero_rows]):
-            return data[data[:, ts_index] < reference_rows[index, ts_index]]
+            stop_ts = reference_rows[index, ts_index]
+            return data[data[:, ts_index] < _settled_after(columns, data, stop_ts, settle_speed)]
     return data
+
+
+def _settled_after(
+    columns: list[str],
+    data: np.ndarray,
+    stop_ts: float,
+    settle_speed: float,
+    settle_window_s: float = 0.2,
+) -> float:
+    """First timestamp at/after ``stop_ts`` where the robot's measured speed is
+    below ``settle_speed``. Extends the clip past a reference stop so the braking
+    maneuver (robot still coasting/drifting after v_ff/w_ff drop to zero) stays
+    in the log. Speed is the raw-mocap displacement over a ``settle_window_s``
+    window, which averages out the duplicate frames and timestamp jitter that
+    make sample-to-sample finite differences unusable. Falls back to keeping
+    everything if the robot never settles within the log."""
+    ts_index = columns.index("ts")
+    mocap_rows = _rows_with(columns, data, ("x_raw", "y_raw"))
+    t = _col(columns, mocap_rows, "ts")
+    x = _col(columns, mocap_rows, "x_raw")
+    y = _col(columns, mocap_rows, "y_raw")
+    for start in np.flatnonzero(t >= stop_ts):
+        end = np.searchsorted(t, t[start] + settle_window_s)
+        if end >= len(t):
+            break
+        speed = np.hypot(x[end] - x[start], y[end] - y[start]) / (t[end] - t[start])
+        if speed <= settle_speed:
+            return t[start]
+    return np.inf
 
 
 def list_pololu_log_paths(log_dir: str | Path) -> list[Path]:
@@ -321,7 +352,7 @@ if __name__ == "__main__":
     from wmr_simulator.visualization.pololu import plot_logged_summary
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--log", type=str, default="Pololu Data/Experiments/2026_07_07/12/binaries/decoded/TR07.csv")
+    parser.add_argument("--log", type=str, default="Pololu Data/Experiments/2026_07_07/12/binaries/decoded/TR10.csv")
     parser.add_argument("--output", type=str, default=None, help="Output filename prefix")
     parser.add_argument("--out-dir", type=str, default="visualize")
     parser.add_argument("--clip-after-first-trajectory", default=True, action="store_true")

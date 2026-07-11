@@ -9,7 +9,17 @@ twist left over, conditioned on the current **state and action**:
 
     state  = current body twist [vx_body, vy_body, omega]
              (so the model knows whether the robot is already slipping)
-    action = nominal-lag wheel speed [wheel_speed_r, wheel_speed_l] + duty [r, l]
+    action = nominal-lag wheel speed [wheel_speed_r, wheel_speed_l]
+             + controller wheel-speed command [wheel_cmd_r, wheel_cmd_l]
+             + traction-slip proxy [slip_proxy_r, slip_proxy_l]
+               (nominal lag wheel speed minus the previous traction-limited
+               ground wheel speed: how hard the tire is being asked to slip)
+             + centripetal coupling v_omega = vx_body * omega
+
+    The slip proxy lets the model tell already-slipping states from ordinary
+    commanded motion. Duty is deliberately excluded: the wheel command is the
+    controller-level action, and duty is its low-level consequence already
+    reflected in the nominal lag.
 
     [delta_vx_body, delta_vy_body, delta_omega] = MLP(state, action)
 
@@ -69,14 +79,49 @@ RESIDUAL_FEATURE_NAMES = (
     "omega",
     "wheel_speed_r",
     "wheel_speed_l",
-    "duty_r",
-    "duty_l",
+    "wheel_cmd_r",
+    "wheel_cmd_l",
+    "slip_proxy_r",
+    "slip_proxy_l",
+    "v_omega",
 )
 
 RESIDUAL_INPUT_DIM = len(RESIDUAL_FEATURE_NAMES)
 RESIDUAL_OUTPUT_DIM = 3  # [delta_vx_body, delta_vy_body, delta_omega]
 
 TARGET_LABELS = (r"$\Delta v_x$ [m/s]", r"$\Delta v_y$ [m/s]", r"$\Delta \omega$ [rad/s]")
+
+# Normalized inputs are clamped to this many standard deviations before the MLP
+# (training and inference alike): outside the data manifold the model behaves
+# like its nearest in-distribution neighbor instead of linearly extrapolating.
+# Closed-loop simulation visits states the logs never cover (e.g. the slip
+# proxy during a full-throttle start from rest reaches ~3x its training p99),
+# and unclamped extrapolation there produced unphysical corrections.
+RESIDUAL_INPUT_CLIP_SIGMA = 3.0
+
+# Low-speed slip penalty gates (train_residual_model_multistep): side-slip and
+# yaw-slip need momentum the wheels are not sustaining, so a *slow, driven*
+# robot (wheels at or above chassis speed -- an acceleration start) cannot
+# side-slip or be yawed by slip. Speed alone cannot separate that from the end
+# of a braking drift (slow but coasting, measured |domega| up to ~10 rad/s);
+# the driving/coasting distinction does, and unlike a gate on the incoming
+# rotation it cannot be escaped by the model yawing the state past a
+# threshold (the wheel-driven speed is set by duty, not by the model).
+LOWSPEED_SLIP_V0 = 0.5  # chassis forward speed [m/s] where the gate closes
+LOWSPEED_COAST_SCALE = 0.05  # smoothness [m/s] of the driving/coasting gate
+
+# Duty profiles [right, left] for the synthetic from-rest windows/anchors:
+# straight starts across the throttle range plus mild arcs in both directions.
+SYNTHETIC_START_DUTY_PROFILES = (
+    (0.2, 0.2),
+    (0.35, 0.35),
+    (0.5, 0.5),
+    (0.65, 0.65),
+    (0.8, 0.8),
+    (1.0, 1.0),
+    (0.7, 0.35),
+    (0.35, 0.7),
+)
 
 
 # ---------------------------------------------------------------------------
@@ -120,18 +165,30 @@ def init_residual_model(
 def residual_features(
     body_twist: jax.Array,
     wheel_speeds: jax.Array,
-    duty_cycle: jax.Array,
+    wheel_cmd: jax.Array,
+    ground_wheel_speeds_prev: jax.Array,
 ) -> jax.Array:
     """Assemble the state-action input in the order of RESIDUAL_FEATURE_NAMES.
 
-    ``body_twist`` is the *current* twist [vx_body, vy_body, omega]; wheel
-    speeds and duty cycles are [right, left], matching WheelLog.speeds.
+    ``body_twist`` is the *current* twist [vx_body, vy_body, omega];
+    ``wheel_speeds`` the current nominal-lag wheel speeds, ``wheel_cmd`` the
+    current controller wheel-speed command, and ``ground_wheel_speeds_prev``
+    the previous step's traction-limited ground wheel speeds. All wheel
+    quantities are [right, left], matching WheelLog.speeds. The traction-slip
+    proxy (lag minus previous ground speed) and v_omega = vx_body * omega are
+    derived here.
     """
+    body_twist = jnp.asarray(body_twist, dtype=jnp.float32).reshape(-1)
+    wheel_speeds = jnp.asarray(wheel_speeds, dtype=jnp.float32).reshape(-1)
+    wheel_cmd = jnp.asarray(wheel_cmd, dtype=jnp.float32).reshape(-1)
+    ground_prev = jnp.asarray(ground_wheel_speeds_prev, dtype=jnp.float32).reshape(-1)
     return jnp.concatenate(
         [
-            jnp.asarray(body_twist, dtype=jnp.float32).reshape(-1),
-            jnp.asarray(wheel_speeds, dtype=jnp.float32).reshape(-1),
-            jnp.asarray(duty_cycle, dtype=jnp.float32).reshape(-1),
+            body_twist,
+            wheel_speeds,
+            wheel_cmd,
+            wheel_speeds - ground_prev,
+            (body_twist[0] * body_twist[2])[None],
         ]
     )
 
@@ -139,12 +196,15 @@ def residual_features(
 def apply_residual_model(model: ResidualDynamicsModel, features: jax.Array) -> jax.Array:
     """Residual twist [delta_vx_body, delta_vy_body, delta_omega].
 
-    Accepts a single feature vector or a batch (leading axis).
+    Accepts a single feature vector or a batch (leading axis). Normalized
+    inputs are clamped to +-RESIDUAL_INPUT_CLIP_SIGMA so out-of-distribution
+    states saturate instead of extrapolating.
     """
     features = jnp.asarray(features, dtype=jnp.float32)
 
     def single(feature_vector):
         normalized = (feature_vector - model.input_mean) / model.input_std
+        normalized = jnp.clip(normalized, -RESIDUAL_INPUT_CLIP_SIGMA, RESIDUAL_INPUT_CLIP_SIGMA)
         return model.mlp(normalized) * model.target_std + model.target_mean
 
     if features.ndim == 1:
@@ -201,7 +261,7 @@ def build_residual_dataset(
     ``max_dt_factor`` drops mocap intervals longer than that multiple of the
     median interval (stream gaps make the finite-difference twist meaningless);
     a sample also needs a valid *previous* interval for its state input.
-    Returns float32 ``features`` (N, 7), ``targets`` (N, 3), ``time_s``, ``dt``,
+    Returns float32 ``features`` (N, 10), ``targets`` (N, 3), ``time_s``, ``dt``,
     and the measured/nominal twists plus pose arrays for diagnostics.
     """
     pose_time_s = np.asarray(log.pose.time_s, dtype=float)
@@ -212,6 +272,8 @@ def build_residual_dataset(
     wheel_time_s = np.asarray(log.wheel.time_s, dtype=float)
     wheel_speeds = np.asarray(log.wheel.speeds, dtype=float)
     duty_cycle = np.asarray(log.wheel.duty_cycle, dtype=float)
+    command_time_s = np.asarray(log.pose.command_time_s, dtype=float)
+    wheel_cmd_log = np.asarray(log.pose.wheel_cmd, dtype=float)  # [r, l]
 
     if resample_uniform:
         pose_time_s, pose_states, pose_twists = _resample_poses_uniform(
@@ -244,6 +306,7 @@ def build_residual_dataset(
 
     # Action context, zero-order hold at the interval starts.
     duty = _zero_order_hold(interval_time, wheel_time_s, duty_cycle)
+    wheel_cmd = _zero_order_hold(interval_time, command_time_s, wheel_cmd_log)
 
     # Nominal wheel-speed prediction from the first-order motor lag. Both the
     # wheel feature and the nominal twist are built from this lag (never the raw
@@ -271,9 +334,19 @@ def build_residual_dataset(
     nominal_twist = np.column_stack([v_nom, np.zeros_like(v_nom), omega_nom])
 
     # State (previous interval's measured twist) + action at interval t. The
-    # wheel feature is the nominal lag prediction (not the encoder reading).
+    # wheel feature is the nominal lag prediction (not the encoder reading);
+    # the slip proxy differences interval t's lag against interval t-1's ground
+    # speed, matching what DiffDrive.step derives from its carried state.
+    lag = np.column_stack([lag_r, lag_l])
+    ground_nominal = np.column_stack([u_r_nom, u_l_nom])
     features = np.column_stack(
-        [measured_twist[:-1], lag_r[1:], lag_l[1:], duty[1:, 0], duty[1:, 1]]
+        [
+            measured_twist[:-1],
+            lag[1:],
+            wheel_cmd[1:],
+            lag[1:] - ground_nominal[:-1],
+            measured_twist[:-1, 0] * measured_twist[:-1, 2],
+        ]
     )
     targets = (measured_twist - nominal_twist)[1:]
     assert features.shape[1] == len(RESIDUAL_FEATURE_NAMES)
@@ -301,6 +374,7 @@ def build_residual_dataset(
             "measured_twist": measured_twist.astype(np.float32),
             "nominal_twist": nominal_twist.astype(np.float32),
             "actions": np.column_stack([u_r_enc, u_l_enc, duty]).astype(np.float32),
+            "wheel_cmd": wheel_cmd.astype(np.float32),
             "poses": pose_states.astype(np.float32),
             "interval_ok": interval_ok,
         },
@@ -355,6 +429,53 @@ def normalization_stats(values: np.ndarray, min_std: float = 1e-6) -> tuple[np.n
 # ---------------------------------------------------------------------------
 
 
+def build_synthetic_start_features(
+    dt_s: float,
+    wheel_radius: float,
+    base_diameter: float,
+    max_wheel_speed: float,
+    time_constant: float,
+    a_slip_max: float,
+    *,
+    num_steps: int = 50,
+    duty_profiles: tuple = SYNTHETIC_START_DUTY_PROFILES,
+) -> tuple[np.ndarray, np.ndarray]:
+    """One-step physics-penalty anchors: nominal from-rest spin-up features.
+
+    Rolls the *nominal* model (lag -> traction limit -> kinematics, zero
+    residual) from rest for each SYNTHETIC_START_DUTY_PROFILES entry and emits
+    the residual feature vector plus the nominal forward speed at every step.
+    Evaluating the reverse / low-speed penalties at these points bakes the
+    start-transient physics into the one-step stage, so the (slow) multi-step
+    stage no longer has to discover it. Returns ``features`` (M, input_dim)
+    and ``nominal_v`` (M,).
+    """
+    alpha = float(np.exp(-dt_s / time_constant)) if time_constant >= 1e-3 else 0.0
+    max_step = (a_slip_max / wheel_radius) * dt_s
+    features, nominal_v = [], []
+    for profile in np.asarray(duty_profiles, dtype=np.float64):
+        cmd = max_wheel_speed * profile
+        wheel = np.zeros(2)
+        ground = np.zeros(2)
+        twist = np.zeros(3)  # nominal chassis twist entering the step
+        for _ in range(num_steps):
+            lag = alpha * wheel + (1.0 - alpha) * cmd
+            features.append(np.concatenate([twist, lag, cmd, lag - ground, [twist[0] * twist[2]]]))
+            if max_step > 0.0:
+                ground = ground + np.clip(lag - ground, -max_step, max_step)
+            else:
+                ground = lag
+            v_nom = 0.5 * wheel_radius * (ground[0] + ground[1])
+            w_nom = wheel_radius * (ground[0] - ground[1]) / base_diameter
+            nominal_v.append(v_nom)
+            twist = np.array([v_nom, 0.0, w_nom])
+            wheel = lag
+    return (
+        np.asarray(features, dtype=np.float32),
+        np.asarray(nominal_v, dtype=np.float32),
+    )
+
+
 def train_residual_model(
     train_features: np.ndarray,
     train_targets: np.ndarray,
@@ -368,6 +489,11 @@ def train_residual_model(
     batch_size: int = 256,
     learning_rate: float = 1e-3,
     output_reg_weight: float = 0.0,
+    jacobian_reg_weight: float = 0.0,
+    reverse_reg_weight: float = 0.0,
+    lowspeed_reg_weight: float = 0.0,
+    physics_features: np.ndarray | None = None,
+    physics_nominal_v: np.ndarray | None = None,
 ):
     """Train the residual MLP with Adam on normalized inputs/targets.
 
@@ -378,10 +504,27 @@ def train_residual_model(
     clearly demand a correction, which keeps closed-loop rollouts (gain tuning)
     from being destabilized by large extrapolated residuals. 0 disables.
 
+    ``jacobian_reg_weight`` penalizes the squared Frobenius norm of the
+    normalized input-output Jacobian at the training inputs. Where the output
+    penalty bounds *what* the model outputs, this bounds *how steeply* the
+    output changes with the inputs -- the residual's loop gain. It suppresses
+    high-frequency prediction jitter and keeps the residual from acting as a
+    high-gain feedback element when its own corrected twist is fed back in
+    closed loop. 0 disables.
+
+    ``reverse_reg_weight`` / ``lowspeed_reg_weight`` are the physics penalties
+    from train_residual_model_multistep (no backward chassis motion from
+    forward-spinning wheels; no lateral/yaw slip while slow and driven),
+    evaluated at ``physics_features`` (raw feature rows, normalized/clamped
+    here) with ``physics_nominal_v`` (nominal forward speed per row).
+    Typically the training features plus the from-rest anchors from
+    build_synthetic_start_features -- baking the constraints into this cheap
+    stage so the expensive rollout stage needs fewer epochs.
+
     Returns (model, history) where the model already carries the normalization
     stats and ``history`` has per-epoch losses in normalized space: train is
-    the full training objective (prediction MSE + output penalty), validation
-    is the prediction MSE only.
+    the full training objective (prediction MSE + penalties), validation is
+    the prediction MSE only.
     """
     import optax
 
@@ -389,13 +532,32 @@ def train_residual_model(
     target_mean, target_std = normalization_stats(train_targets)
     # Physical output scaled by std: (z * std + mean) / std = z + mean / std.
     target_mean_over_std = jnp.asarray(target_mean / target_std, dtype=jnp.float32)
+    target_mean_j = jnp.asarray(target_mean, dtype=jnp.float32)
+    target_std_j = jnp.asarray(target_std, dtype=jnp.float32)
 
-    x_train = jnp.asarray((train_features - input_mean) / input_std, dtype=jnp.float32)
+    # Inputs clamped as at inference (apply_residual_model), so the model is
+    # trained on exactly the input range it will ever see.
+    clip = RESIDUAL_INPUT_CLIP_SIGMA
+    x_train = jnp.clip(
+        jnp.asarray((train_features - input_mean) / input_std, dtype=jnp.float32), -clip, clip
+    )
     y_train = jnp.asarray((train_targets - target_mean) / target_std, dtype=jnp.float32)
     has_validation = len(validation_features) > 0
     if has_validation:
-        x_val = jnp.asarray((validation_features - input_mean) / input_std, dtype=jnp.float32)
+        x_val = jnp.clip(
+            jnp.asarray((validation_features - input_mean) / input_std, dtype=jnp.float32), -clip, clip
+        )
         y_val = jnp.asarray((validation_targets - target_mean) / target_std, dtype=jnp.float32)
+    has_physics = (
+        physics_features is not None
+        and len(physics_features) > 0
+        and (reverse_reg_weight > 0.0 or lowspeed_reg_weight > 0.0)
+    )
+    if has_physics:
+        x_physics = jnp.clip(
+            jnp.asarray((physics_features - input_mean) / input_std, dtype=jnp.float32), -clip, clip
+        )
+        v_physics = jnp.asarray(physics_nominal_v, dtype=jnp.float32)
 
     model = init_residual_model(
         jax.random.PRNGKey(seed),
@@ -417,7 +579,26 @@ def train_residual_model(
         mse = jnp.mean((predictions - y) ** 2)
         # Squared norm of the physical residual output (std-scaled per channel).
         output_norm = jnp.mean(jnp.sum((predictions + target_mean_over_std) ** 2, axis=1))
-        return mse + output_reg_weight * output_norm
+        loss = mse + output_reg_weight * output_norm
+        if jacobian_reg_weight > 0.0:
+            # Sensitivity penalty: normalized input-output Jacobian at the data
+            # (jacrev: 3 outputs < 12 inputs, so reverse mode is cheaper).
+            jacobian = jax.vmap(jax.jacrev(mlp))(x)
+            loss = loss + jacobian_reg_weight * jnp.mean(jnp.sum(jacobian**2, axis=(1, 2)))
+        if has_physics:
+            # Physics penalties at the anchor points, matching the multistep
+            # rollout terms (see train_residual_model_multistep).
+            delta = jax.vmap(mlp)(x_physics) * target_std_j + target_mean_j
+            v = v_physics + delta[:, 0]
+            reverse = jax.nn.relu(-v * jnp.sign(v_physics)) ** 2
+            speed_gate = jax.nn.relu(1.0 - jnp.abs(v) / LOWSPEED_SLIP_V0)
+            driving_gate = jax.nn.sigmoid((v_physics - v) / LOWSPEED_COAST_SCALE)
+            lowspeed = speed_gate * driving_gate * (
+                (delta[:, 1] / target_std_j[1]) ** 2 + (delta[:, 2] / target_std_j[2]) ** 2
+            )
+            loss = loss + reverse_reg_weight * jnp.mean(reverse)
+            loss = loss + lowspeed_reg_weight * jnp.mean(lowspeed)
+        return loss
 
     @eqx.filter_jit
     def train_step(mlp, opt_state, x, y):
@@ -464,17 +645,20 @@ def build_residual_sequences(dataset: dict, window_length: int | None, stride: i
     A window starting at interval s needs intervals s-1 (initial state twist)
     through s+K-1 all valid. Returns stacked float32 arrays:
     ``init_twist`` (W, 3), ``init_wheel`` (W, 2), ``duty`` (W, K, 2),
-    ``poses`` (W, K+1, 3) and ``dt`` (W, K); poses[i, 0] is the window's start
-    pose on the (uniform) mocap grid. The coupled rollout re-derives the nominal
-    wheel lag and twist from ``init_wheel`` + ``duty`` (see
-    train_residual_model_multistep), so encoder speeds enter only as the window's
-    initial wheel state.
+    ``wheel_cmd`` (W, K, 2), ``poses`` (W, K+1, 3) and
+    ``dt`` (W, K); poses[i, 0] is the window's start pose on the (uniform)
+    mocap grid. The coupled rollout re-derives the nominal wheel lag and twist
+    from ``init_wheel`` + ``duty`` (see train_residual_model_multistep), so
+    encoder speeds enter only as the window's initial wheel state.
 
     ``window_length=None`` disables windowing: a single window covering the
     log's longest contiguous valid run is emitted, so the model is rolled out
     over the complete experiment instead of overlapping fixed-length windows.
     Windows of differing length across logs are reconciled by ``stack_sequences``
     (zero-padding + a validity mask).
+
+    ``pose_weight`` (W,) is 1 for these data windows: their pose error counts.
+    Synthetic penalty-only windows (build_synthetic_start_sequences) carry 0.
     """
     seq = dataset["seq"]
     interval_ok = np.asarray(seq["interval_ok"], dtype=bool)
@@ -497,15 +681,54 @@ def build_residual_sequences(dataset: dict, window_length: int | None, stride: i
             "init_twist": empty(0, 3),
             "init_wheel": empty(0, 2),
             "duty": empty(0, 0, 2),
+            "wheel_cmd": empty(0, 0, 2),
             "poses": empty(0, 1, 3),
             "dt": empty(0, 0),
+            "pose_weight": empty(0),
         }
+    cmd_seq = seq["wheel_cmd"]
     return {
         "init_twist": np.stack([seq["measured_twist"][s - 1] for s, _ in starts_lengths]),
         "init_wheel": np.stack([encoder_wheel[s - 1] for s, _ in starts_lengths]),
         "duty": np.stack([duty_seq[s : s + k] for s, k in starts_lengths]),
+        "wheel_cmd": np.stack([cmd_seq[s : s + k] for s, k in starts_lengths]),
         "poses": np.stack([seq["poses"][s : s + k + 1] for s, k in starts_lengths]),
         "dt": np.stack([seq["dt"][s : s + k] for s, k in starts_lengths]),
+        "pose_weight": np.ones(len(starts_lengths), dtype=np.float32),
+    }
+
+
+def build_synthetic_start_sequences(
+    dt_s: float,
+    max_wheel_speed: float,
+    *,
+    num_steps: int = 50,
+    duty_profiles: tuple = SYNTHETIC_START_DUTY_PROFILES,
+) -> dict:
+    """Penalty-only rollout windows starting exactly at rest.
+
+    Every closed-loop simulation (gain tuning included) starts from rest under
+    a stepped duty command, but the logged experiment windows never visit that
+    regime -- the recorded controller ramps gently, so the rollout penalties
+    (reverse, output, Jacobian) cannot act on the start transient they are
+    meant to fix. These windows fill the gap: zero initial twist/wheel state,
+    constant duty per SYNTHETIC_START_DUTY_PROFILES held for ``num_steps``
+    steps of ``dt_s``, wheel command = max_wheel_speed * duty (a step, as the
+    firmware would command). There is no mocap reference for them, so
+    ``pose_weight`` is 0: they contribute only the regularization penalties,
+    never a pose error.
+    """
+    profiles = np.asarray(duty_profiles, dtype=np.float32)
+    num_windows = len(profiles)
+    duty = np.repeat(profiles[:, None, :], num_steps, axis=1)
+    return {
+        "init_twist": np.zeros((num_windows, 3), dtype=np.float32),
+        "init_wheel": np.zeros((num_windows, 2), dtype=np.float32),
+        "duty": duty,
+        "wheel_cmd": duty * np.float32(max_wheel_speed),
+        "poses": np.zeros((num_windows, num_steps + 1, 3), dtype=np.float32),
+        "dt": np.full((num_windows, num_steps), dt_s, dtype=np.float32),
+        "pose_weight": np.zeros(num_windows, dtype=np.float32),
     }
 
 
@@ -538,7 +761,7 @@ def stack_sequences(sequence_sets: list[dict]) -> dict:
     ``mask`` (W, K) marks the real steps. With equal-length windows the padding
     is a no-op and the mask is all ones.
     """
-    keys = ("init_twist", "init_wheel", "duty", "poses", "dt")
+    keys = ("init_twist", "init_wheel", "duty", "wheel_cmd", "poses", "dt", "pose_weight")
     sets = [s for s in sequence_sets if s["dt"].shape[0] > 0]
     if not sets:
         empty = lambda *shape: np.empty(shape, dtype=np.float32)  # noqa: E731
@@ -546,8 +769,10 @@ def stack_sequences(sequence_sets: list[dict]) -> dict:
             "init_twist": empty(0, 3),
             "init_wheel": empty(0, 2),
             "duty": empty(0, 0, 2),
+            "wheel_cmd": empty(0, 0, 2),
             "poses": empty(0, 1, 3),
             "dt": empty(0, 0),
+            "pose_weight": empty(0),
             "mask": empty(0, 0),
         }
     max_k = max(s["dt"].shape[1] for s in sets)
@@ -561,7 +786,9 @@ def stack_sequences(sequence_sets: list[dict]) -> dict:
         masks.append(mask)
         padded["init_twist"].append(s["init_twist"])
         padded["init_wheel"].append(s["init_wheel"])
+        padded["pose_weight"].append(s["pose_weight"])
         padded["duty"].append(_pad_steps(s["duty"], pad))
+        padded["wheel_cmd"].append(_pad_steps(s["wheel_cmd"], pad))
         padded["dt"].append(_pad_steps(s["dt"], pad))
         # Poses carry one extra entry (K+1); repeat the last pose so padded,
         # zero-dt steps stay put and their reference matches (error 0).
@@ -595,6 +822,10 @@ def train_residual_model_multistep(
     learning_rate: float = 1e-4,
     heading_weight: float = 0.1,
     output_reg_weight: float = 1e-3,
+    jacobian_reg_weight: float = 0.0,
+    reverse_reg_weight: float = 0.0,
+    lowspeed_reg_weight: float = 0.0,
+    patience: int = 0,
 ):
     """Fine-tune the residual MLP on multi-step open-loop rollouts.
 
@@ -604,16 +835,37 @@ def train_residual_model_multistep(
     ideal kinematics to the nominal twist, and the model's twist residual is the
     final correction integrated into the pose. The loss is the mean squared
     position error against the (smooth) mocap poses plus a heading term
-    ``2 - 2 cos(dtheta)`` weighted by ``heading_weight`` and a small std-scaled
-    output-magnitude penalty. Supervising at the pose level integrates away the
-    twist-differentiation noise that dominates the one-step targets.
+    ``2 - 2 cos(dtheta)`` weighted by ``heading_weight``, a small std-scaled
+    output-magnitude penalty, and (``jacobian_reg_weight`` > 0) a sensitivity
+    penalty on the normalized input-output Jacobian at every visited rollout
+    state -- bounding the residual's loop gain exactly in the self-fed regime
+    where an overly steep model turns into an oscillating feedback element.
+    Supervising at the pose level integrates away the twist-differentiation
+    noise that dominates the one-step targets.
+
+    ``reverse_reg_weight`` penalizes (squared) any corrected forward velocity
+    that opposes the nominal wheel-driven direction: the chassis may slip and
+    coast, but wheels spinning forward cannot push it backward. This pins down
+    the start-from-rest transient, where the residual otherwise extrapolates a
+    braking-regime correction into a small negative velocity. 0 disables.
+
+    ``lowspeed_reg_weight`` penalizes the (std-scaled) lateral and yaw residual
+    outputs when the corrected chassis forward speed is below LOWSPEED_SLIP_V0
+    *and* the wheels are driving (wheel-driven speed at/above the chassis
+    speed, LOWSPEED_COAST_SCALE-smoothed): slip needs momentum the wheels do
+    not sustain, so a slow, driven robot (an acceleration start) cannot
+    side-slip or be yawed by slip, while the coasting end of a braking drift
+    stays unpenalized. 0 disables.
 
     ``normalization`` is (input_mean, input_std, target_mean, target_std) from
     the one-step dataset; ``physical`` is (wheel_radius, base_diameter,
     max_wheel_speed, time_constant, a_slip_max); ``initial_mlp`` warm-starts
-    from a one-step pretrained MLP. History losses are the full rollout
-    objective (train) and the same objective without the output penalty
-    (validation).
+    from a one-step pretrained MLP. History losses are the training objective
+    including the penalties (train, averaged over the epoch's batches) and the
+    penalty-free rollout objective (validation). With validation windows the
+    returned model is the epoch with the best validation loss, not the last;
+    ``patience`` > 0 additionally stops training after that many epochs
+    without a validation improvement (0 runs all epochs).
     """
     import optax
 
@@ -644,16 +896,30 @@ def train_residual_model_multistep(
     if has_validation:
         validation_data = to_jnp(validation_sequences)
 
-    def rollout_terms(net, init_twist, init_wheel, duty, poses, dt, mask):
+    def rollout_terms(net, init_twist, init_wheel, duty, wheel_cmd, poses, dt, mask, pose_weight):
         def step(carry, inputs):
             twist, wheel, ground, pose = carry
-            duty_t, pose_ref, step_dt, valid = inputs
+            duty_t, cmd_t, pose_ref, step_dt, valid = inputs
             # Nominal first-order motor lag from the carried (corrected) wheel
             # speed, matching DiffDrive.step and build_residual_dataset.
             alpha = jnp.where(tau >= 1e-3, jnp.exp(-step_dt / jnp.maximum(tau, 1e-3)), 0.0)
             nominal_lag = alpha * wheel + (1.0 - alpha) * max_speed * duty_t
-            features = jnp.concatenate([twist, nominal_lag, duty_t])
-            normalized = (features - input_mean) / input_std
+            # Feature layout of residual_features: the slip proxy differences the
+            # lag against the *previous* step's traction-limited ground speed.
+            features = jnp.concatenate(
+                [
+                    twist,
+                    nominal_lag,
+                    cmd_t,
+                    nominal_lag - ground,
+                    (twist[0] * twist[2])[None],
+                ]
+            )
+            normalized = jnp.clip(
+                (features - input_mean) / input_std,
+                -RESIDUAL_INPUT_CLIP_SIGMA,
+                RESIDUAL_INPUT_CLIP_SIGMA,
+            )
             delta = net(normalized) * target_std + target_mean
             # Twist from the nominal wheel (burnout + kinematics) plus the twist
             # residual; the wheel carries its pure nominal lag (no wheel residual).
@@ -674,37 +940,77 @@ def train_residual_model_multistep(
             position_error = valid * jnp.sum((new_pose[:2] - pose_ref[:2]) ** 2)
             heading_error = valid * (2.0 - 2.0 * jnp.cos(new_pose[2] - pose_ref[2]))
             output_norm = valid * jnp.sum((delta / target_std) ** 2)
+            if jacobian_reg_weight > 0.0:
+                # Loop-gain penalty at the visited (self-fed) rollout state.
+                jacobian_norm = valid * jnp.sum(jax.jacrev(net)(normalized) ** 2)
+            else:
+                jacobian_norm = jnp.zeros(())
+            # Corrected forward speed opposing the wheel-driven direction
+            # (wheels spinning forward cannot push the chassis backward).
+            reverse_norm = valid * jax.nn.relu(-new_twist[0] * jnp.sign(v_nom)) ** 2
+            # Side-slip and yaw-slip need momentum the wheels do not sustain:
+            # slow AND driven (wheels at/above chassis speed -- an acceleration
+            # start) means the lateral/yaw residuals must vanish. The coasting
+            # end of a braking drift (chassis outrunning the stopped wheels)
+            # keeps the driving gate closed and stays unpenalized.
+            speed_gate = jax.nn.relu(1.0 - jnp.abs(new_twist[0]) / LOWSPEED_SLIP_V0)
+            driving_gate = jax.nn.sigmoid((v_nom - new_twist[0]) / LOWSPEED_COAST_SCALE)
+            lowspeed_norm = valid * speed_gate * driving_gate * (
+                (delta[1] / target_std[1]) ** 2 + (delta[2] / target_std[2]) ** 2
+            )
             return (new_twist, new_wheel, new_ground, new_pose), (
                 position_error,
                 heading_error,
                 output_norm,
+                jacobian_norm,
+                reverse_norm,
+                lowspeed_norm,
             )
 
-        _, (position_error, heading_error, output_norm) = jax.lax.scan(
-            step, (init_twist, init_wheel, init_wheel, poses[0]), (duty, poses[1:], dt, mask)
+        _, (position_error, heading_error, output_norm, jacobian_norm, reverse_norm, lowspeed_norm) = jax.lax.scan(
+            step,
+            (init_twist, init_wheel, init_wheel, poses[0]),
+            (duty, wheel_cmd, poses[1:], dt, mask),
         )
         # Padded (mask=0) steps contribute nothing; average over the real ones.
+        # pose_weight zeroes the pose supervision for synthetic penalty-only
+        # windows (build_synthetic_start_sequences), which have no reference.
         denom = jnp.maximum(jnp.sum(mask), 1.0)
         return (
-            jnp.sum(position_error) / denom,
-            jnp.sum(heading_error) / denom,
+            pose_weight * jnp.sum(position_error) / denom,
+            pose_weight * jnp.sum(heading_error) / denom,
             jnp.sum(output_norm) / denom,
+            jnp.sum(jacobian_norm) / denom,
+            jnp.sum(reverse_norm) / denom,
+            jnp.sum(lowspeed_norm) / denom,
         )
 
     def batch_loss(net, data, with_reg: bool):
-        position_error, heading_error, output_norm = jax.vmap(
-            lambda i, w, u, p, d, m: rollout_terms(net, i, w, u, p, d, m)
+        (
+            position_error,
+            heading_error,
+            output_norm,
+            jacobian_norm,
+            reverse_norm,
+            lowspeed_norm,
+        ) = jax.vmap(
+            lambda i, w, u, wc, p, d, m, pw: rollout_terms(net, i, w, u, wc, p, d, m, pw)
         )(
             data["init_twist"],
             data["init_wheel"],
             data["duty"],
+            data["wheel_cmd"],
             data["poses"],
             data["dt"],
             data["mask"],
+            data["pose_weight"],
         )
         loss = jnp.mean(position_error) + heading_weight * jnp.mean(heading_error)
         if with_reg:
             loss = loss + output_reg_weight * jnp.mean(output_norm)
+            loss = loss + jacobian_reg_weight * jnp.mean(jacobian_norm)
+            loss = loss + reverse_reg_weight * jnp.mean(reverse_norm)
+            loss = loss + lowspeed_reg_weight * jnp.mean(lowspeed_norm)
         return loss
 
     @eqx.filter_jit
@@ -720,23 +1026,47 @@ def train_residual_model_multistep(
     num_windows = len(train_sequences["dt"])
     batch_size = min(batch_size, num_windows)
     history = {"train_loss": [], "validation_loss": []}
+    best_validation_loss, best_mlp, best_epoch = float("inf"), mlp, -1
 
     for epoch in range(epochs):
         permutation = rng.permutation(num_windows)
+        epoch_losses = []
         for start in range(0, num_windows, batch_size):
             batch = permutation[start : start + batch_size]
             batch_data = {key: value[batch] for key, value in train_data.items()}
-            mlp, opt_state, _ = train_step(mlp, opt_state, batch_data)
-        history["train_loss"].append(float(eval_loss(mlp, train_data)))
+            mlp, opt_state, loss = train_step(mlp, opt_state, batch_data)
+            epoch_losses.append(float(loss))
+        # Train history from the training-step losses (the full objective incl.
+        # penalties), matching train_residual_model: skips re-rolling the whole
+        # training set once per epoch just for logging.
+        history["train_loss"].append(float(np.mean(epoch_losses)))
         history["validation_loss"].append(
             float(eval_loss(mlp, validation_data)) if has_validation else float("nan")
         )
+        # Keep the best-validation model: late in training the long-rollout
+        # loss can turn bimodal (epochs flicker between a good and a diverged
+        # regime on held-out logs), so the final epoch is not a safe pick.
+        if has_validation and history["validation_loss"][-1] < best_validation_loss:
+            best_validation_loss = history["validation_loss"][-1]
+            best_mlp, best_epoch = mlp, epoch
         if epoch % max(epochs // 20, 1) == 0 or epoch == epochs - 1:
             print(
                 f"rollout epoch {epoch + 1:4d}/{epochs}: train {history['train_loss'][-1]:.6f}"
                 f"  validation {history['validation_loss'][-1]:.6f}"
             )
+        if patience > 0 and has_validation and epoch - best_epoch >= patience:
+            print(
+                f"Early stop at rollout epoch {epoch + 1}: no validation improvement "
+                f"for {patience} epochs"
+            )
+            break
 
+    if has_validation:
+        print(
+            f"Keeping best-validation rollout model: epoch {best_epoch + 1} "
+            f"(validation {best_validation_loss:.6f})"
+        )
+        mlp = best_mlp
     model = ResidualDynamicsModel(
         mlp=mlp,
         input_mean=input_mean,
@@ -858,6 +1188,9 @@ def train_from_logs(
     validation_split: float = 0.25,
     seed: int = 0,
     output_reg_weight: float = 1.0,
+    jacobian_reg_weight: float = 0.0,
+    reverse_reg_weight: float = 0.0,
+    lowspeed_reg_weight: float = 0.0,
     multistep_window: int | None = 20,
     multistep_epochs: int = 2000,
     multistep_stride: int = 5,
@@ -865,6 +1198,11 @@ def train_from_logs(
     multistep_learning_rate: float = 1e-4,
     multistep_heading_weight: float = 0.1,
     multistep_output_reg_weight: float = 1e-3,
+    multistep_jacobian_reg_weight: float = 0.0,
+    multistep_reverse_reg_weight: float = 0.0,
+    multistep_lowspeed_reg_weight: float = 0.0,
+    multistep_patience: int = 0,
+    synthetic_start_rollouts: bool = True,
     clip_after_first_trajectory: bool = True,
     mocap_delay_s: float = 0.0,
     resample_uniform: bool = True,
@@ -921,6 +1259,24 @@ def train_from_logs(
 
     print(f"Training samples: {len(train_features)}, validation samples: {len(validation_features)}")
 
+    # Physics-penalty anchors for the one-step stage: the training samples
+    # (with their nominal forward speed) plus the nominal from-rest spin-up.
+    if file_split:
+        train_nominal_v = np.concatenate([datasets[i]["nominal_twist"][:, 0] for i in train_indices])
+    else:
+        train_nominal_v = np.concatenate([train["nominal_twist"][:, 0] for train, _ in splits])
+    median_dt = float(np.median(np.concatenate([d["dt"] for d in datasets])))
+    anchor_features, anchor_nominal_v = build_synthetic_start_features(
+        median_dt,
+        float(params.wheel_radius),
+        float(params.base_diameter),
+        float(params.max_wheel_speed),
+        float(params.time_constant),
+        float(params.a_slip_max),
+    )
+    physics_features = np.concatenate([train_features, anchor_features])
+    physics_nominal_v = np.concatenate([train_nominal_v, anchor_nominal_v])
+
     model, history = train_residual_model(
         train_features,
         train_targets,
@@ -933,6 +1289,11 @@ def train_from_logs(
         batch_size=batch_size,
         learning_rate=learning_rate,
         output_reg_weight=output_reg_weight,
+        jacobian_reg_weight=jacobian_reg_weight,
+        reverse_reg_weight=reverse_reg_weight,
+        lowspeed_reg_weight=lowspeed_reg_weight,
+        physics_features=physics_features,
+        physics_nominal_v=physics_nominal_v,
     )
 
     # Multi-step rollout fine-tuning: train on self-fed rollouts against the
@@ -943,9 +1304,9 @@ def train_from_logs(
     # 0 disables the rollout fine-tuning entirely.
     if multistep_window is None or multistep_window > 0:
         if file_split:
-            train_windows = stack_sequences(
-                [build_residual_sequences(datasets[i], multistep_window, multistep_stride) for i in train_indices]
-            )
+            train_parts = [
+                build_residual_sequences(datasets[i], multistep_window, multistep_stride) for i in train_indices
+            ]
             validation_windows = stack_sequences(
                 [build_residual_sequences(datasets[i], multistep_window, multistep_stride) for i in validation_indices]
             )
@@ -957,8 +1318,14 @@ def train_from_logs(
                 cut = count - int(np.floor(count * validation_split))
                 train_parts.append({key: value[:cut] for key, value in windows.items()})
                 validation_parts.append({key: value[cut:] for key, value in windows.items()})
-            train_windows = stack_sequences(train_parts)
             validation_windows = stack_sequences(validation_parts)
+        if synthetic_start_rollouts:
+            # Penalty-only from-rest windows (no mocap reference, pose_weight 0):
+            # cover the start transient every closed-loop simulation begins with.
+            synthetic = build_synthetic_start_sequences(median_dt, float(params.max_wheel_speed))
+            train_parts = train_parts + [synthetic]
+            print(f"Added {len(synthetic['dt'])} synthetic from-rest windows (penalty-only)")
+        train_windows = stack_sequences(train_parts)
         window_desc = (
             "full-sequence rollouts"
             if multistep_window is None
@@ -993,6 +1360,10 @@ def train_from_logs(
             learning_rate=multistep_learning_rate,
             heading_weight=multistep_heading_weight,
             output_reg_weight=multistep_output_reg_weight,
+            jacobian_reg_weight=multistep_jacobian_reg_weight,
+            reverse_reg_weight=multistep_reverse_reg_weight,
+            lowspeed_reg_weight=multistep_lowspeed_reg_weight,
+            patience=multistep_patience,
         )
 
     config = {
@@ -1013,6 +1384,9 @@ def train_from_logs(
         "batch_size": batch_size,
         "learning_rate": learning_rate,
         "output_reg_weight": output_reg_weight,
+        "jacobian_reg_weight": jacobian_reg_weight,
+        "reverse_reg_weight": reverse_reg_weight,
+        "lowspeed_reg_weight": lowspeed_reg_weight,
         "multistep_window": multistep_window,
         "multistep_epochs": multistep_epochs,
         "multistep_stride": multistep_stride,
@@ -1020,6 +1394,11 @@ def train_from_logs(
         "multistep_learning_rate": multistep_learning_rate,
         "multistep_heading_weight": multistep_heading_weight,
         "multistep_output_reg_weight": multistep_output_reg_weight,
+        "multistep_jacobian_reg_weight": multistep_jacobian_reg_weight,
+        "multistep_reverse_reg_weight": multistep_reverse_reg_weight,
+        "multistep_lowspeed_reg_weight": multistep_lowspeed_reg_weight,
+        "multistep_patience": multistep_patience,
+        "synthetic_start_rollouts": synthetic_start_rollouts,
         "seed": seed,
         "final_train_loss": history["train_loss"][-1],
         "final_validation_loss": history["validation_loss"][-1],
@@ -1168,7 +1547,7 @@ def train_main(argv=None):
     parser.add_argument("--problem", type=str, default="problems/pololu_gains.yaml")
     parser.add_argument("--log-dir", type=str, default="Pololu Data/Experiments/2026_07_07/12/binaries/decoded/")
     parser.add_argument("--out", type=str, default="models/residual_pololu.pkl")
-    parser.add_argument("--epochs", type=int, default=3000)
+    parser.add_argument("--epochs", type=int, default=6000)
     parser.add_argument("--learning-rate", type=float, default=1e-4)
     parser.add_argument("--batch-size", type=int, default=10000)
     parser.add_argument("--hidden-width", type=int, default=16)
@@ -1178,18 +1557,50 @@ def train_main(argv=None):
     # Weight of the squared-norm penalty on the (std-scaled) physical residual
     # output, added to the prediction MSE; shrinks the model toward the nominal
     # dynamics to keep closed-loop rollouts stable. 0 disables.
-    parser.add_argument("--output-reg-weight", type=float, default=0.5)
+    parser.add_argument("--output-reg-weight", type=float, default=1e-2)
+    # Weight of the sensitivity penalty on the normalized input-output Jacobian
+    # at the training inputs; bounds the residual's loop gain (suppresses
+    # high-frequency prediction jitter / closed-loop oscillation). 0 disables.
+    parser.add_argument("--jacobian-reg-weight", type=float, default=1e-2)
+    # Stage-1 physics penalties (same terms as the multistep stage, evaluated
+    # at the training samples + nominal from-rest anchor features): bake the
+    # no-reverse and low-speed-slip constraints in early so the expensive
+    # rollout stage needs fewer epochs. 0 disables.
+    parser.add_argument("--reverse-reg-weight", type=float, default=10.0)
+    parser.add_argument("--lowspeed-reg-weight", type=float, default=1.0)
     # Multi-step rollout fine-tuning (after one-step pretraining): windows of K
     # uniform mocap intervals are rolled out with the model feeding back its own
     # corrected twist, supervised by pose error against the smooth mocap poses.
     # This trains the self-fed regime the model faces in closed loop. 0 disables.
-    parser.add_argument("--multistep-epochs", type=int, default=10000)
-    parser.add_argument("--multistep-learning-rate", type=float, default=1e-5)
+    parser.add_argument("--multistep-epochs", type=int, default=5000)
+    parser.add_argument("--multistep-learning-rate", type=float, default=3e-5)
     parser.add_argument("--multistep-window", type=_int_or_none, default=400) # None for full rollout
     parser.add_argument("--multistep-stride", type=int, default=20)
     parser.add_argument("--multistep-batch-size", type=int, default=10000)
-    parser.add_argument("--multistep-heading-weight", type=float, default=1)
+    parser.add_argument("--multistep-heading-weight", type=float, default=0.2)
     parser.add_argument("--multistep-output-reg-weight", type=float, default=1e-3)
+    # Same Jacobian sensitivity penalty, evaluated at every visited rollout
+    # state (the self-fed regime); also smooths the rollout loss landscape,
+    # which allows a higher multistep learning rate. 0 disables.
+    parser.add_argument("--multistep-jacobian-reg-weight", type=float, default=1e-2)
+    # Squared penalty on corrected forward velocity opposing the wheel-driven
+    # direction during rollouts (wheels spinning forward cannot push the
+    # chassis backward); pins the start-from-rest transient. 0 disables.
+    parser.add_argument("--multistep-reverse-reg-weight", type=float, default=10.0)
+    # Squared penalty on the (std-scaled) lateral/yaw residual outputs when the
+    # chassis forward speed is below LOWSPEED_SLIP_V0: slip is speed-driven, a
+    # robot near standstill cannot side-slip. Gated on chassis (not wheel)
+    # speed so the braking drift stays unpenalized. 0 disables.
+    parser.add_argument("--multistep-lowspeed-reg-weight", type=float, default=1.0)
+    # Stop the rollout stage after this many epochs without a validation
+    # improvement (the best-validation model is kept either way). 0 disables.
+    parser.add_argument("--multistep-patience", type=int, default=500)
+    # Penalty-only synthetic rollouts starting from rest (no mocap reference;
+    # see build_synthetic_start_sequences): expose the rollout penalties to the
+    # start transient that every closed-loop simulation begins with.
+    parser.add_argument(
+        "--synthetic-start-rollouts", action=argparse.BooleanOptionalAction, default=True
+    )
     parser.add_argument("--clip-after-first-trajectory", action="store_true", default=True)
     # Resample filtered poses onto a uniform median-dt grid before differencing;
     # protects the twist targets against logging-timestamp jitter (see
@@ -1214,6 +1625,9 @@ def train_main(argv=None):
         validation_split=args.validation_split,
         seed=args.seed,
         output_reg_weight=args.output_reg_weight,
+        jacobian_reg_weight=args.jacobian_reg_weight,
+        reverse_reg_weight=args.reverse_reg_weight,
+        lowspeed_reg_weight=args.lowspeed_reg_weight,
         multistep_window=args.multistep_window,
         multistep_epochs=args.multistep_epochs,
         multistep_stride=args.multistep_stride,
@@ -1221,6 +1635,11 @@ def train_main(argv=None):
         multistep_learning_rate=args.multistep_learning_rate,
         multistep_heading_weight=args.multistep_heading_weight,
         multistep_output_reg_weight=args.multistep_output_reg_weight,
+        multistep_jacobian_reg_weight=args.multistep_jacobian_reg_weight,
+        multistep_reverse_reg_weight=args.multistep_reverse_reg_weight,
+        multistep_lowspeed_reg_weight=args.multistep_lowspeed_reg_weight,
+        multistep_patience=args.multistep_patience,
+        synthetic_start_rollouts=args.synthetic_start_rollouts,
         clip_after_first_trajectory=args.clip_after_first_trajectory,
         mocap_delay_s=args.mocap_delay,
         resample_uniform=args.resample_uniform,

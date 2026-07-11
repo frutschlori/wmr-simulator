@@ -780,29 +780,80 @@ def plot_loss_history(
 
     steps = np.arange(1, len(loss_history) + 1)
 
-    fig, ax = plt.subplots(1, 1, figsize=(8, 4.5))
+    fig, ax = plt.subplots(1, 1, figsize=(8.5, 4.8))
     legend_handles = []
 
     if loss_component_history is not None:
-        component_styles = {
-            "tracking": ("-", "Tracking"),
-            "velocity_tracking": ("-.", "Velocity tracking"),
-            "input": ("--", "Input"),
-            "input_delta": (":", "Input delta"),
-        }
-        for name, (linestyle, label) in component_styles.items():
-            values = np.asarray(loss_component_history[name], dtype=float)
-            plot_values = np.maximum(values, 1e-12)
-            component_steps = np.arange(1, len(values) + 1)
-            ax.plot(component_steps, plot_values, color="C0", linestyle=linestyle, linewidth=1.8, label=f"Train {label}")
-            legend_handles.extend(ax.get_lines()[-1:])
+        velocity_ax = ax.twinx()
+
+        tracking_values = np.asarray(loss_component_history["tracking"], dtype=float)
+        tracking_steps = np.arange(1, len(tracking_values) + 1)
+        line = ax.plot(
+            tracking_steps,
+            tracking_values,
+            color="C0",
+            linestyle="-",
+            linewidth=1.9,
+            label="Train tracking",
+        )[0]
+        legend_handles.append(line)
+
+        velocity_values = np.asarray(loss_component_history["velocity_tracking"], dtype=float)
+        velocity_steps = np.arange(1, len(velocity_values) + 1)
+        line = velocity_ax.plot(
+            velocity_steps,
+            velocity_values,
+            color="C1",
+            linestyle="-",
+            linewidth=1.9,
+            label="Train velocity tracking",
+        )[0]
+        legend_handles.append(line)
+
         if validation_loss_component_history is not None:
-            for name, (linestyle, label) in component_styles.items():
-                values = np.asarray(validation_loss_component_history[name], dtype=float)
-                plot_values = np.maximum(values, 1e-12)
-                component_steps = np.arange(1, len(values) + 1)
-                ax.plot(component_steps, plot_values, color="C3", linestyle=linestyle, linewidth=1.8, label=f"Validation {label}")
-                legend_handles.extend(ax.get_lines()[-1:])
+            if "tracking" in validation_loss_component_history:
+                values = np.asarray(validation_loss_component_history["tracking"], dtype=float)
+                validation_steps = np.arange(1, len(values) + 1)
+                line = ax.plot(
+                    validation_steps,
+                    values,
+                    color="C0",
+                    linestyle="--",
+                    linewidth=1.7,
+                    label="Validation tracking",
+                )[0]
+                legend_handles.append(line)
+            if "velocity_tracking" in validation_loss_component_history:
+                values = np.asarray(validation_loss_component_history["velocity_tracking"], dtype=float)
+                validation_steps = np.arange(1, len(values) + 1)
+                line = velocity_ax.plot(
+                    validation_steps,
+                    values,
+                    color="C1",
+                    linestyle="--",
+                    linewidth=1.7,
+                    label="Validation velocity tracking",
+                )[0]
+                legend_handles.append(line)
+
+        ax.set_xlabel("Optimization Step")
+        ax.set_ylabel("Tracking loss", color="C0")
+        velocity_ax.set_ylabel("Velocity tracking loss", color="C1")
+        ax.tick_params(axis="y", colors="C0")
+        velocity_ax.tick_params(axis="y", colors="C1")
+        ax.spines["left"].set_color("C0")
+        velocity_ax.spines["right"].set_color("C1")
+        ax.spines["bottom"].set_color("black")
+        ax.spines["top"].set_color("black")
+        velocity_ax.spines["top"].set_color("black")
+        ax.set_title("Controller Tuning Loss")
+        ax.grid(True, alpha=0.3)
+        ax.legend(handles=legend_handles, loc="best")
+        fig.tight_layout()
+        fig.savefig(pdf_filename, bbox_inches="tight", transparent=True)
+        plt.close(fig)
+        print(f"Loss history PDF saved at: {pdf_filename}")
+        return
     else:
         ax.plot(steps, np.asarray(loss_history), 'b-', linewidth=2, label='Normalized Geometry Error')
         legend_handles.extend(ax.get_lines()[-1:])
