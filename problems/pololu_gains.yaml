@@ -1,4 +1,4 @@
-sim_time: 5.1 # seconds
+sim_time: 5.0 # seconds
 geometry_controller_dt: 0.05 # seconds
 wheel_controller_dt: 0.01 # seconds
 environment:
@@ -34,10 +34,10 @@ controller:
 robot:
   type: differential_drive
   wheel_radius: 0.01595   # m
-  base_diameter: 0.0875 # m, *effective* wheelbase (absorbs tire scrub in turns, Borenstein & Feng 1996; may differ from geometric)
-  max_wheel_speed: 251  # rad/s
-  time_constant:  0.11  # time constant for first-order wheel dynamics (set to 0 for ideal actuation)
-  a_slip_max:  2.768    # traction limit ~ mu*g in m/s^2, 0 to disable (burnout model, Wong 2008)
+  base_diameter: 0.08625 # m, *effective* wheelbase (absorbs tire scrub in turns, Borenstein & Feng 1996; may differ from geometric)
+  max_wheel_speed: 240  # rad/s
+  time_constant:  0.12  # time constant for first-order wheel dynamics (set to 0 for ideal actuation)
+  a_slip_max:  2.77    # traction limit ~ mu*g in m/s^2, 0 to disable (burnout model, Wong 2008)
   v_max: 2.5          # m/s
   a_max: 5.0         # m/s^2
   a_max_lateral: 6.0 # m/s^2
