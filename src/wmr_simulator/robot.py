@@ -4,7 +4,11 @@ import jax
 import jax.numpy as np
 
 from wmr_simulator.residual_model.burnout import traction_limited_ground_speeds
-from wmr_simulator.residual_model.residual import apply_residual_model, residual_features
+from wmr_simulator.residual_model.residual import (
+    apply_residual_model,
+    residual_features,
+    residual_filter_update,
+)
 
 
 class DiffDriveState(NamedTuple):
@@ -28,6 +32,11 @@ class DiffDriveState(NamedTuple):
     # Stays zero without a residual model. Defaulted so state constructions
     # that predate the field keep working unchanged.
     twist_filtered: jax.Array = np.zeros(2, dtype=np.float32)
+    # Applied residual state [rho_vx, rho_vy, rho_omega]: the shaped residual
+    # delta drives this through a first-order lag (residual_tau, lives in the
+    # residual model) and the *state* corrects the twist, so the applied
+    # residual is smooth by construction. Zero without a residual model.
+    residual_state: jax.Array = np.zeros(3, dtype=np.float32)
 
 
 def body_velocities(wheel_speeds, wheel_radius, base_diameter):
@@ -165,14 +174,20 @@ class DiffDrive:
                 state.twist_filtered,
             )
             delta = apply_residual_model(residual_model, features)
+            # The shaped delta drives the applied-residual state through the
+            # first-order residual lag; the *state* corrects the twist (see
+            # residual_model.residual, module docstring).
+            next_residual_state = residual_filter_update(
+                state.residual_state, delta, dt, residual_model.residual_tau
+            )
             next_wheel_speeds = nominal_lag_wheel_speeds
             next_ground_speeds = traction_limited_ground_speeds(
                 state.ground_wheel_speeds, nominal_lag_wheel_speeds, a_slip_max, r, dt
             )
             v_nom, w_nom = body_velocities(next_ground_speeds, r, L)
-            v = v_nom + delta[0]
-            v_y = delta[1]
-            w = w_nom + delta[2]
+            v = v_nom + next_residual_state[0]
+            v_y = next_residual_state[1]
+            w = w_nom + next_residual_state[2]
             next_pose = integrate_planar_pose_lateral(state.pose, v, v_y, w, dt)
             next_vel_lateral = np.asarray(v_y, dtype=np.float32)
             # Filter update matches build_residual_dataset / the rollout stage.
@@ -191,6 +206,7 @@ class DiffDrive:
             next_pose = integrate_planar_pose(state.pose, v, w, dt)
             next_vel_lateral = np.zeros((), dtype=np.float32)
             next_twist_filtered = state.twist_filtered
+            next_residual_state = state.residual_state
 
         # Logged vel_omega stays [v_x_body, omega].
         next_vel_omega = np.array([v, w])
@@ -205,6 +221,7 @@ class DiffDrive:
             logged_wheel_speed_cmd,
             next_vel_lateral,
             next_twist_filtered,
+            next_residual_state,
         )
 
     def step_kinematic(
@@ -263,6 +280,7 @@ class DiffDrive:
             wheel_speed_cmd=np.array((0.0, 0.0), dtype=np.float32),
             vel_lateral=np.zeros((), dtype=np.float32),
             twist_filtered=np.zeros(2, dtype=np.float32),
+            residual_state=np.zeros(3, dtype=np.float32),
         )
 
     @staticmethod

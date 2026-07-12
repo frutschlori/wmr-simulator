@@ -10,6 +10,7 @@ from wmr_simulator.residual_model.residual import (
     init_residual_model,
     residual_features,
     residual_corrected_twist,
+    residual_filter_update,
 )
 
 __all__ = [
@@ -21,6 +22,7 @@ __all__ = [
     "rate_limited_series",
     "residual_corrected_twist",
     "residual_features",
+    "residual_filter_update",
     "save_residual_model",
     "traction_limited_ground_speeds",
 ]
