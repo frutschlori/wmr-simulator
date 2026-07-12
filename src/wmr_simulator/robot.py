@@ -23,6 +23,11 @@ class DiffDriveState(NamedTuple):
     # next step's residual features condition on it. Kept separate from vel_omega
     # so the logged [v, omega] shape stays backward compatible.
     vel_lateral: jax.Array
+    # Low-pass-filtered [vx, omega] (residual feature memory; the time constant
+    # lives in the residual model, see ResidualDynamicsModel.feature_filter_tau).
+    # Stays zero without a residual model. Defaulted so state constructions
+    # that predate the field keep working unchanged.
+    twist_filtered: jax.Array = np.zeros(2, dtype=np.float32)
 
 
 def body_velocities(wheel_speeds, wheel_radius, base_diameter):
@@ -144,8 +149,9 @@ class DiffDrive:
             # 3-5) Learned state-action residual (see residual_model.residual),
             #      conditioned on the *current* body twist (so the model knows
             #      whether the robot is already slipping), the nominal lag wheel
-            #      speed, the wheel-speed command, and the traction-slip proxy
-            #      against the previous ground speeds.
+            #      speed, the wheel-speed command, the traction-slip proxy
+            #      against the previous ground speeds, and the low-pass-filtered
+            #      twist memory carried in the state.
             #      The twist/pose come from the nominal wheel through the
             #      traction limit + kinematics with the twist residual as the
             #      final correction (slip + lateral side-slip the ideal
@@ -156,6 +162,7 @@ class DiffDrive:
                 nominal_lag_wheel_speeds,
                 logged_wheel_speed_cmd,
                 state.ground_wheel_speeds,
+                state.twist_filtered,
             )
             delta = apply_residual_model(residual_model, features)
             next_wheel_speeds = nominal_lag_wheel_speeds
@@ -168,6 +175,10 @@ class DiffDrive:
             w = w_nom + delta[2]
             next_pose = integrate_planar_pose_lateral(state.pose, v, v_y, w, dt)
             next_vel_lateral = np.asarray(v_y, dtype=np.float32)
+            # Filter update matches build_residual_dataset / the rollout stage.
+            filter_tau = residual_model.feature_filter_tau
+            beta = np.where(filter_tau >= 1e-3, np.exp(-dt / np.maximum(filter_tau, 1e-3)), 0.0)
+            next_twist_filtered = beta * state.twist_filtered + (1.0 - beta) * np.array([v, w])
         else:
             next_wheel_speeds = nominal_lag_wheel_speeds
             # 3) Traction limit ("burnout"): ground speeds follow the motor side rate-limited
@@ -179,6 +190,7 @@ class DiffDrive:
             # 5) Pose integration
             next_pose = integrate_planar_pose(state.pose, v, w, dt)
             next_vel_lateral = np.zeros((), dtype=np.float32)
+            next_twist_filtered = state.twist_filtered
 
         # Logged vel_omega stays [v_x_body, omega].
         next_vel_omega = np.array([v, w])
@@ -192,6 +204,7 @@ class DiffDrive:
             duty_cycle,
             logged_wheel_speed_cmd,
             next_vel_lateral,
+            next_twist_filtered,
         )
 
     def step_kinematic(
@@ -249,6 +262,7 @@ class DiffDrive:
             duty_cycle=np.array((0.0, 0.0), dtype=np.float32),
             wheel_speed_cmd=np.array((0.0, 0.0), dtype=np.float32),
             vel_lateral=np.zeros((), dtype=np.float32),
+            twist_filtered=np.zeros(2, dtype=np.float32),
         )
 
     @staticmethod

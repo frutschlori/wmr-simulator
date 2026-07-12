@@ -118,18 +118,19 @@ def test_residual_rollout_differentiable_wrt_gains():
 
 
 def test_residual_features_order():
-    """Layout: [vx, vy, omega, wheel_r/l, cmd_r/l, slip_r/l, v_omega]."""
+    """Layout: [vx, vy, omega, wheel_r/l, cmd_r/l, slip_r/l, v_omega, filt_vx, filt_w]."""
     features = residual_features(
         jnp.asarray([1.0, 2.0, 3.0]),  # body twist
         jnp.asarray([4.0, 5.0]),       # nominal lag wheel speeds
         jnp.asarray([6.0, 7.0]),       # wheel-speed command
         jnp.asarray([3.0, 3.0]),       # previous traction-limited ground speeds
+        jnp.asarray([8.0, 9.0]),       # low-pass-filtered [vx, omega]
     )
     assert features.shape == (RESIDUAL_INPUT_DIM,)
     # slip_proxy = wheel - prev_ground, v_omega = vx * omega
     np.testing.assert_allclose(
         np.asarray(features),
-        [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 1.0, 2.0, 3.0],
+        [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 1.0, 2.0, 3.0, 8.0, 9.0],
     )
 
 
@@ -147,8 +148,10 @@ def test_residual_feature_names():
         "slip_proxy_r",
         "slip_proxy_l",
         "v_omega",
+        "vx_body_filt",
+        "omega_filt",
     )
-    assert RESIDUAL_INPUT_DIM == 10
+    assert RESIDUAL_INPUT_DIM == 12
 
 
 def test_step_tracks_lateral_velocity_state():
@@ -175,6 +178,7 @@ def test_step_tracks_lateral_velocity_state():
             wheel_cmd,
             nominal_lag - state.ground_wheel_speeds,
             jnp.asarray([state.vel_omega[0] * state.vel_omega[1]]),
+            state.twist_filtered,
         ]
     )
     from wmr_simulator.residual_model import apply_residual_model as apply
@@ -187,6 +191,16 @@ def test_step_tracks_lateral_velocity_state():
     )
     # The applied command is still carried for diagnostics/logging.
     np.testing.assert_allclose(np.asarray(with_residual.wheel_speed_cmd), np.asarray(wheel_cmd))
+    # The filtered-twist memory follows the corrected twist with the model's tau.
+    beta = np.exp(-0.01 / float(model.feature_filter_tau))
+    expected_filt = beta * np.asarray(state.twist_filtered) + (1.0 - beta) * np.asarray(
+        [with_residual.vel_omega[0], with_residual.vel_omega[1]]
+    )
+    np.testing.assert_allclose(
+        np.asarray(with_residual.twist_filtered), expected_filt, rtol=1e-5
+    )
+    # Without a residual model the filter state is carried unchanged.
+    np.testing.assert_allclose(np.asarray(without.twist_filtered), 0.0)
 
 
 def test_jacobian_regularization_reduces_sensitivity():
@@ -245,6 +259,7 @@ def test_synthetic_start_sequences_shapes_and_stacking():
     data_like = {
         "init_twist": np.zeros((2, 3), np.float32),
         "init_wheel": np.zeros((2, 2), np.float32),
+        "init_filt": np.zeros((2, 2), np.float32),
         "duty": np.zeros((2, 25, 2), np.float32),
         "wheel_cmd": np.zeros((2, 25, 2), np.float32),
         "poses": np.zeros((2, 26, 3), np.float32),
