@@ -1,4 +1,4 @@
-sim_time: 5.0 # seconds
+sim_time: 5.1 # seconds
 geometry_controller_dt: 0.05 # seconds
 wheel_controller_dt: 0.01 # seconds
 environment:
