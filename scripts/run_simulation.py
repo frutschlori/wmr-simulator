@@ -15,6 +15,7 @@ def main():
     parser.add_argument("--skip-ref-meshcat", action="store_true", default=True)
     # Learned residual dynamics checkpoint (scripts/train_residual_model.py);
     # the closed loop then runs the residual-augmented dynamics.
+    # parser.add_argument("--residual-model", type=str, default="models/residual_pololu.pkl")
     parser.add_argument("--residual-model", type=str, default=None)
     args = parser.parse_args()
 
