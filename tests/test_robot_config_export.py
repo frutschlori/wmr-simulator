@@ -25,11 +25,23 @@ def test_format_parse_roundtrip(tmp_path):
     assert load_robot_config_file(output) == pytest.approx(DEFAULT_ROBOT_CONFIG)
 
 
+def test_robot_id_is_fixed_int_directly_above_joystick_control():
+    text = format_robot_config({**DEFAULT_ROBOT_CONFIG, "robot_id": 12.5})
+    lines = text.splitlines()
+
+    robot_id_line = lines.index("robot_id=10")
+    joystick_line = lines.index("joystick_control_dt_ms=20.0")
+    assert robot_id_line + 1 == joystick_line
+    assert "robot_id=10.0" not in lines
+
+
 @pytest.mark.skipif(not EXAMPLE_CFG.is_file(), reason="example ROBOTCFG.CFG not available")
 def test_matches_firmware_example_format():
     values = load_robot_config_file(EXAMPLE_CFG)
-    # Rendering the parsed values must reproduce the firmware file exactly.
-    assert format_robot_config(values) == EXAMPLE_CFG.read_text(encoding="utf-8")
+    expected = EXAMPLE_CFG.read_text(encoding="utf-8").replace(
+        "\njoystick_control_dt_ms=", "\nrobot_id=10\njoystick_control_dt_ms=", 1
+    )
+    assert format_robot_config(values) == expected
 
 
 def test_gain_conversion_divides_inner_gains_by_motor_gain():
@@ -62,7 +74,10 @@ def test_export_with_template_and_overrides(tmp_path):
         template_path=template,
         overrides={"max_speed": 2.0},
     )
+    lines = output.read_text(encoding="utf-8").splitlines()
     values = load_robot_config_file(output)
+    assert lines[3:5] == ["robot_id=10", "joystick_control_dt_ms=20.0"]
+    assert values["robot_id"] == pytest.approx(10.0)
     assert values["wheel_max"] == pytest.approx(300.0)
     assert values["max_speed"] == pytest.approx(2.0)
     assert values["kp_inner"] == pytest.approx(4.0 / 250.0)
