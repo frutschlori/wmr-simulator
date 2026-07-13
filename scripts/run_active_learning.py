@@ -32,7 +32,7 @@ def build_parser() -> argparse.ArgumentParser:
     init_parser.add_argument(
         "--residual-model",
         action=argparse.BooleanOptionalAction,
-        default=None,
+        default=False,
         help="Enable/disable the residual-model stage (--no-residual-model to disable).",
     )
     init_parser.add_argument(
@@ -58,7 +58,7 @@ def build_parser() -> argparse.ArgumentParser:
         "decode-logs": "Decode binary SD-card logs in data/ to csv.",
         "identify": "Run parameter identification on the recorded log.",
         "train-residual": "Train the residual dynamics model from the decoded logs.",
-        "plan-tuning-trajectories": "Optimize (or copy) the gain-tuning trajectory set.",
+        "plan-tuning-trajectoriesF": "Optimize (or copy) the gain-tuning trajectory set.",
         "tune-gains": "Tune controller gains on the identified model.",
         "finalize": "Fold the iteration results into the next iteration folder.",
         "run": "Run all stages that can proceed; stops when robot data is needed.",

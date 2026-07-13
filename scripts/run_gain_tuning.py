@@ -35,8 +35,8 @@ def main():
     # Optimization hyper-parameters
     parser.add_argument("--num-lhs-points", type=int, default=250) # points on initial search grid, 0 to disable
     parser.add_argument("--num-adam-optimizations", type=int, default=20) # number of best candidates to refine
-    parser.add_argument("--steps", type=int, default=1000)                 # adam steps
-    parser.add_argument("--learning-rate", type=float, default=1e-4)      # adam learning rate
+    parser.add_argument("--steps", type=int, default=300)                 # adam steps
+    parser.add_argument("--learning-rate", type=float, default=1e-3)      # adam learning rate
     parser.add_argument("--num-realizations", type=int, default=1) # noise realizations over 1 trajectory
     parser.add_argument("--seed", type=int, default=2)
     # Loss weights
@@ -57,7 +57,7 @@ def main():
     # Learned residual dynamics checkpoint (scripts/train_residual_model.py); tuning
     # then rolls out the residual-augmented dynamics (model params stay fixed).
     # parser.add_argument("--residual-model", type=str, default="models/residual_pololu.pkl")
-    parser.add_argument("--residual-model", type=str, default="models/residual_pololu.pkl")
+    parser.add_argument("--residual-model", type=str, default=None)
     args = parser.parse_args()
 
     residual_model = None

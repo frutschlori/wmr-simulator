@@ -114,7 +114,7 @@ RESIDUAL_INPUT_DIM = len(RESIDUAL_FEATURE_NAMES)
 # onset vs established drift), which the instantaneous features alias. The
 # trained value is stored inside the model (feature_filter_tau) so dataset
 # construction, rollout training, and DiffDrive.step always agree.
-DEFAULT_FEATURE_FILTER_TAU = 0.8
+DEFAULT_FEATURE_FILTER_TAU = 1.0
 RESIDUAL_OUTPUT_DIM = 3  # [delta_vx_body, delta_vy_body, delta_omega]
 
 TARGET_LABELS = (r"$\Delta v_x$ [m/s]", r"$\Delta v_y$ [m/s]", r"$\Delta \omega$ [rad/s]")
@@ -132,7 +132,7 @@ RESIDUAL_INPUT_CLIP_SIGMA = 3.0
 # exceed the correction magnitude the data supports, even when the closed loop
 # visits off-manifold states, which caps the gain of the
 # residual->twist->features feedback loop.
-RESIDUAL_OUTPUT_BOUND_SIGMA = 3.0
+RESIDUAL_OUTPUT_BOUND_SIGMA = 6.0
 # Low-speed slip gate: the lateral/yaw residual channels are multiplied by
 # |vx_body_filt| / (|vx_body_filt| + V0). Slip needs momentum, so a slow robot
 # cannot side-slip or be yawed by slip -- structurally, replacing the former
@@ -140,7 +140,7 @@ RESIDUAL_OUTPUT_BOUND_SIGMA = 3.0
 # forward speed (tau ~ 1 s) rather than the instantaneous one keeps the gate
 # open through the braking end of a drift, where the chassis still carries
 # momentum, while pinning the from-rest start transient to zero.
-RESIDUAL_SLIP_GATE_V0 = 0.1  # filtered forward speed [m/s] where the gate passes 1/2
+RESIDUAL_SLIP_GATE_V0 = 0.2  # filtered forward speed [m/s] where the gate passes 1/2
 _VX_FILT_INDEX = RESIDUAL_FEATURE_NAMES.index("vx_body_filt")
 
 # Default time constant [s] of the first-order lag on the *applied* residual

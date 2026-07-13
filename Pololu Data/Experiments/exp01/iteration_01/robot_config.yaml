@@ -1,0 +1,30 @@
+robot:
+  wheel_radius: 0.01595
+  base_diameter: 0.08625
+  max_wheel_speed: 240.0
+  time_constant: 0.12
+  a_slip_max: 2.77
+controller:
+  gains:
+  - 4.5
+  - 6.0
+  - 12.0
+  - 2.5
+  - 5.0
+  gain_schedule:
+    enabled: true
+    scheduled_indices:
+    - 0
+    - 1
+    - 2
+    rho:
+    - 0.5
+    - 0.5
+    - 0.5
+    W:
+    - - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0

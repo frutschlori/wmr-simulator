@@ -1,0 +1,57 @@
+problem: problems/pololu_gains.yaml
+seed: 0
+use_residual_model: false
+optimize_trajectories: true
+baseline_identification_trajectory: null
+baseline_tuning_trajectories_dir: null
+robotcfg_template: null
+log_loading:
+  clip_after_first_trajectory: true
+  mocap_delay: 0.0
+identification_trajectory:
+  opt_steps: 5000
+  learning_rate: 0.01
+  bezier_order: 15
+  time_scaling: s-curve
+  window_length: 50
+  bridge_wait_time: 2.0
+  bridge_time: 10.0
+identification:
+  steps: 2000
+  learning_rate: 0.001
+  window_length: null
+  init_a_slip_max: 0.0
+  estimate_mocap_delay: true
+  mocap_delay_search_range: 0.2
+residual:
+  epochs: 7000
+  batch_size: 2048
+  learning_rate: 1.0e-05
+  hidden_width: 200
+  hidden_depth: 4
+  validation_split: 0.25
+  output_reg_weight: 0.5
+  resample_uniform: true
+tuning_trajectories:
+  num_trajectories: 20
+  opt_steps: 5000
+  learning_rate: 0.01
+  bezier_order: 15
+  time_scaling: s-curve
+  constraint_weight_jitter: 0.5
+  window_length: 50
+gain_tuning:
+  steps: 500
+  learning_rate: 0.001
+  num_realizations: 16
+  num_lhs_points: 100
+  num_adam_optimizations: 10
+  validation_split: 0.2
+  velocity_tracking_weight: 1.0
+  input_weight: 0.0
+  input_delta_weight: 1.0
+  gain_delta_weight: 0.0
+  k_min_stab: 0.001
+  k_max_stab: 30.0
+  k_max_rest: 100.0
+  gain_schedule: null
