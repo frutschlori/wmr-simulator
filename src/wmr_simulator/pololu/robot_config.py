@@ -26,11 +26,12 @@ from pathlib import Path
 from typing import Mapping
 
 HEADER_COMMENT = "# Robot configuration (key=value)\n# Polulu Configuration File\n"
+ROBOT_ID = 10
 
 # Key groups in file order; groups are separated by blank lines like the
 # firmware examples.
 KEY_GROUPS: tuple[tuple[str, ...], ...] = (
-    ("joystick_control_dt_ms", "traj_following_dt_s"),
+    ("robot_id", "joystick_control_dt_ms", "traj_following_dt_s"),
     ("wheel_radius", "wheel_base"),
     ("motor_direction_left", "motor_direction_right"),
     ("motor_max_duty_left", "motor_max_duty_right"),
@@ -41,7 +42,7 @@ KEY_GROUPS: tuple[tuple[str, ...], ...] = (
 )
 
 DEFAULT_ROBOT_CONFIG: dict[str, float] = {
-    "robot_id": 10,
+    "robot_id": ROBOT_ID,
     "joystick_control_dt_ms": 20.0,
     "traj_following_dt_s": 0.05,
     "wheel_radius": 0.01637,
@@ -81,17 +82,24 @@ def load_robot_config_file(path: str | Path) -> dict[str, float]:
 
 def format_robot_config(values: Mapping[str, float]) -> str:
     """Render config values in the firmware file format (header, grouped keys)."""
+    render_values = dict(values)
+    render_values["robot_id"] = ROBOT_ID
+
     known_keys = {key for group in KEY_GROUPS for key in group}
-    missing = known_keys - set(values)
+    missing = known_keys - set(render_values)
     if missing:
         raise ValueError(f"Robot config is missing keys: {sorted(missing)}")
 
     blocks = [HEADER_COMMENT]
     for group in KEY_GROUPS:
-        blocks.append("\n".join(f"{key}={_format_value(values[key])}" for key in group) + "\n")
-    extra_keys = [key for key in values if key not in known_keys]
+        blocks.append(
+            "\n".join(f"{key}={_format_robot_config_value(key, render_values[key])}" for key in group) + "\n"
+        )
+    extra_keys = [key for key in render_values if key not in known_keys]
     if extra_keys:
-        blocks.append("\n".join(f"{key}={_format_value(values[key])}" for key in extra_keys) + "\n")
+        blocks.append(
+            "\n".join(f"{key}={_format_robot_config_value(key, render_values[key])}" for key in extra_keys) + "\n"
+        )
     return "\n".join(blocks)
 
 
@@ -129,6 +137,7 @@ def robot_config_values(
         values["kd_inner"] = 0.0
     if overrides:
         values.update({key: float(value) for key, value in overrides.items()})
+    values["robot_id"] = ROBOT_ID
     return values
 
 
@@ -151,6 +160,12 @@ def export_robot_config(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(format_robot_config(values), encoding="utf-8")
     return output_path
+
+
+def _format_robot_config_value(key: str, value: float) -> str:
+    if key == "robot_id":
+        return str(ROBOT_ID)
+    return _format_value(value)
 
 
 def _format_value(value: float) -> str:
