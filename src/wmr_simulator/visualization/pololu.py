@@ -146,6 +146,80 @@ def plot_logged_summary(
     print(f"Log summary PDF saved at: {output_path}")
     return output_path
 
+def plot_run_comparison(
+    log_groups,
+    labels,
+    *,
+    out_prefix: str = "run_comparison",
+    out_dir: str | Path = "visualize",
+) -> Path:
+    """Overlay groups of logs of the same reference: XY trajectory, the smoothed
+    mocap body twists (v, omega), and the x/y/theta states over time.
+    ``log_groups`` is one list of SimulationLogs (pololu.log_loader) per label;
+    all runs of a group share one color and are drawn as thin lines so the
+    run-to-run spread is visible. ``pose.twists`` carry the Savitzky-Golay
+    filter-derivative velocities. The reference is drawn from the first log of
+    the first group."""
+    plt = _plot_module()
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    output_path = out_dir / f"{out_prefix}.pdf"
+
+    colors = ("tab:blue", "tab:orange", "tab:green", "tab:purple")
+    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+    ax_traj, ax_v, ax_w = axes[0, :]
+    state_axes = axes[1, :]
+
+    reference = np.asarray(log_groups[0][0].reference.states, dtype=float)
+    ref_time = np.asarray(log_groups[0][0].reference.time_s, dtype=float)
+    ax_traj.plot(reference[:, 0], reference[:, 1], color="tab:red", linestyle="--", linewidth=1.0, label="Reference")
+    reference_speed = np.linalg.norm(reference[:, 3:5], axis=1)
+    ax_v.step(ref_time, reference_speed, where="post", color="tab:red", linestyle="--", linewidth=0.9, label="Reference")
+    ax_w.step(ref_time, reference[:, 5], where="post", color="tab:red", linestyle="--", linewidth=0.9, label="Reference")
+    for index, ax in enumerate(state_axes):
+        ax.step(ref_time, reference[:, index], where="post", color="tab:red", linestyle="--", linewidth=0.9, label="Reference")
+
+    run_style = dict(linewidth=0.6, alpha=0.8)
+    for logs, label, color in zip(log_groups, labels, colors):
+        for run_index, log in enumerate(logs):
+            legend_label = label if run_index == 0 else None
+            pose_time = np.asarray(log.pose.time_s, dtype=float)
+            pose = np.asarray(log.pose.states, dtype=float)
+            twists = np.asarray(log.pose.twists, dtype=float)
+            ax_traj.plot(pose[:, 0], pose[:, 1], color=color, **run_style, label=legend_label)
+            ax_v.plot(pose_time, twists[:, 0], color=color, **run_style, label=legend_label)
+            ax_w.plot(pose_time, twists[:, 2], color=color, **run_style, label=legend_label)
+            for index, ax in enumerate(state_axes):
+                ax.plot(pose_time, pose[:, index], color=color, **run_style, label=legend_label)
+
+    ax_traj.set_xlabel("x [m]")
+    ax_traj.set_ylabel("y [m]")
+    ax_traj.set_title("Trajectory")
+    ax_traj.set_aspect("equal", adjustable="box")
+    ax_v.set_xlabel("time [s]")
+    ax_v.set_ylabel("linear velocity [m/s]")
+    ax_v.set_title("Linear Velocity (mocap, smoothed)")
+    ax_w.set_xlabel("time [s]")
+    ax_w.set_ylabel("angular velocity [rad/s]")
+    ax_w.set_title("Angular Velocity (mocap, smoothed)")
+    state_labels = ("x [m]", "y [m]", "theta [rad]")
+    state_titles = ("x State", "y State", "theta State")
+    for index, ax in enumerate(state_axes):
+        ax.set_xlabel("time [s]")
+        ax.set_ylabel(state_labels[index])
+        ax.set_title(state_titles[index])
+    for ax in axes.flat:
+        ax.grid(True)
+        ax.legend()
+
+    fig.tight_layout()
+    fig.savefig(output_path, bbox_inches="tight", transparent=False, facecolor="white")
+    plt.close(fig)
+    print(f"Comparison PDF saved at: {output_path}")
+    return output_path
+
+
 def _plot_motor_model_axes(
     ax_duty,
     time: np.ndarray,
