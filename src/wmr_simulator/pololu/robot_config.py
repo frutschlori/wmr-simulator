@@ -41,6 +41,7 @@ KEY_GROUPS: tuple[tuple[str, ...], ...] = (
 )
 
 DEFAULT_ROBOT_CONFIG: dict[str, float] = {
+    "robot_id": 10,
     "joystick_control_dt_ms": 20.0,
     "traj_following_dt_s": 0.05,
     "wheel_radius": 0.01637,
