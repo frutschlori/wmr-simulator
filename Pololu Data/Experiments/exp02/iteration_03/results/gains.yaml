@@ -1,0 +1,11 @@
+gains:
+- 3.22855281829834
+- 5.304995536804199
+- 2.7848148345947266
+- 4.256350517272949
+- 0.0
+schedule_enabled: false
+schedule: null
+used_residual_model: false
+final_loss: 0.001704773516394198
+final_validation_loss: 0.002177734160795808
