@@ -141,6 +141,7 @@ class TrajectoryOptimizationPipeline:
         problem_path: str,
         time_scaling: str | None = None,
         objective_mode: str = OBJECTIVE_MODE_IDENTIFICATION,
+        fim_a_slip_max: bool = True,
     ):
         self.problem = ProblemDefinition(problem_path)
         self.simulation = SimulationPipeline(problem_path=problem_path, seed=0, reference_trajectories_dir=None)
@@ -148,8 +149,17 @@ class TrajectoryOptimizationPipeline:
         self.controller = self.simulation.controller
         self.controller_gains = self.simulation.gains
         self.estimator = self.simulation.estimator
+        # The encoder low-pass makes the simulated motor loop near-oscillatory,
+        # which ill-conditions the FIM and roughens the descent; trajectory
+        # optimization runs without it (simulation, identification, and gain
+        # tuning keep the filter).
+        self.estimator.wheel_lp_tau = 0.0
         self.time_scaling = normalize_time_scaling(time_scaling)
         self.objective_mode = normalize_objective_mode(objective_mode)
+        # a_slip_max sometimes has near-zero sensitivity, which makes the FIM
+        # objective stiff; excluding it keeps the burnout model in the rollout
+        # at its nominal value but drops it from the design parameters.
+        self.fim_a_slip_max = bool(fim_a_slip_max) and self.robot.a_slip_max > 0.0
         self.control_points = initial_bezier_control_points(self.problem, order=2)
         self.reference_states = self.reference_states_from_control_points(self.control_points)
         self._set_closed_loop_log(self.run_closed_loop_deployment(reference_states=self.reference_states))
@@ -164,10 +174,10 @@ class TrajectoryOptimizationPipeline:
             return jnp.asarray(self.controller_gains, dtype=jnp.float32)
         # Identification mode: deterministic replay-identifiable parameters
         # [r, L_effective] plus a_slip_max when enabled in the problem yaml
-        # (a disabled component has zero sensitivity and would add a dead FIM
-        # column).
+        # and not excluded via fim_a_slip_max (a disabled component has zero
+        # sensitivity and would add a dead FIM column).
         values = [self.robot.r, self.robot.L]
-        if self.robot.a_slip_max > 0.0:
+        if self.fim_a_slip_max:
             values.append(self.robot.a_slip_max)
         return jnp.array(values, dtype=jnp.float32)
 
@@ -217,9 +227,11 @@ class TrajectoryOptimizationPipeline:
 
     def physical_params_from_vector(self, params: jnp.ndarray) -> PhysicalParams:
         params = jnp.asarray(params, dtype=jnp.float32)
-        # Layout mirrors nominal_parameters(): [r, L] + optional a_slip_max
-        # (only present when enabled on the robot).
-        a_slip_max = params[2] if self.robot.a_slip_max > 0.0 else jnp.asarray(0.0, dtype=jnp.float32)
+        # Layout mirrors nominal_parameters(): [r, L] + optional a_slip_max.
+        # When excluded from the FIM, the burnout model keeps its nominal value.
+        a_slip_max = (
+            params[2] if self.fim_a_slip_max else jnp.asarray(self.robot.a_slip_max, dtype=jnp.float32)
+        )
         return PhysicalParams(
             wheel_radius=params[0],
             base_diameter=params[1],
@@ -640,10 +652,10 @@ class TrajectoryOptimizationPipeline:
                         constraint_smooth_max_beta=constraint_smooth_max_beta,
                         tangent_floor_weight=tangent_floor_weight,
                     )
-                final_loss_value = float(final_loss)
-                final_losses.append(final_loss_value)
-                if loss_history.size:
-                    loss_history[-1, trajectory_index] = final_loss_value
+                # Raw (unnormalized) final loss, comparable across trajectories for
+                # best-candidate selection; the per-trajectory histories stay
+                # normalized and untouched.
+                final_losses.append(float(final_loss))
             loss_history = loss_history.tolist()
         else:
             optimized = []
@@ -688,13 +700,9 @@ class TrajectoryOptimizationPipeline:
                         constraint_smooth_max_beta=constraint_smooth_max_beta,
                         tangent_floor_weight=tangent_floor_weight,
                     )
-                final_loss_value = float(final_loss)
-                if loss_history_one:
-                    loss_history_one = list(loss_history_one)
-                    loss_history_one[-1] = final_loss_value
                 optimized.append(optimized_control_points_one)
                 histories.append(loss_history_one)
-                final_losses.append(final_loss_value)
+                final_losses.append(float(final_loss))
             shapes = {tuple(candidate.shape) for candidate in optimized}
             optimized_control_points = jnp.stack(optimized, axis=0) if len(shapes) == 1 else optimized
             loss_history = np.asarray(histories, dtype=float).T.tolist() if histories and histories[0] else []

@@ -219,7 +219,7 @@ def plot_training_trajectory_summary(
     pipeline,
     robot_params,
     tuned_gains,
-    max_trajectories: int = 5,
+    max_trajectories: int | None = 5,
     out_prefix="summary_training",
 ):
     return plot_trajectory_set_summary(

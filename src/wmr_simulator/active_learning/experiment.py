@@ -53,15 +53,19 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
     },
     "identification_trajectory": {
         "opt_steps": 5000,
-        "learning_rate": 1e-2,
-        "bezier_order": 15,
+        "learning_rate": 1e-3,
+        "bezier_order": 10,
         "time_scaling": "s-curve",
         "window_length": 50,
+        # Include a_slip_max in the FIM design parameters. Disable when its low
+        # sensitivity makes the FIM objective stiff; the burnout model then
+        # stays at its nominal value during trajectory optimization.
+        "fim_a_slip_max": False,
         # <name>_bridge.JSN is always exported alongside (same directory): the
         # trajectory plus a wait at the goal and a bridge path back to the
         # start, so the experiment can be repeated without repositioning the robot.
         "bridge_wait_time": 2.0,
-        "bridge_time": 10.0,
+        "bridge_time": 5.0,
     },
     "identification": {
         "steps": 2000,
@@ -71,12 +75,12 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         # Used when the current robot config carries a zero value; must be
         # positive to (re-)enable identification of a_slip_max (log-space
         # optimizer: 0 * exp(theta) = 0). 0 keeps the model disabled.
-        "init_a_slip_max": 0.0,
+        "init_a_slip_max": 5.0,
         # Estimate the mocap delay from the identification log (mocap yaw rate
         # vs IMU gyro z, identification/mocap_delay.py) before identifying; the
         # estimate overrides log_loading.mocap_delay and is folded into
         # problem_identified.yaml (estimator.mocap_delay) for the simulation.
-        "estimate_mocap_delay": True,
+        "estimate_mocap_delay": False,
         "mocap_delay_search_range": 0.2,
     },
     "residual": {
@@ -91,27 +95,27 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
     },
     "tuning_trajectories": {
         "num_trajectories": 20,
-        "opt_steps": 5000,
+        "opt_steps": 500,
         "learning_rate": 1e-2,
-        "bezier_order": 15,
+        "bezier_order": 10,
         "time_scaling": "s-curve",
-        "constraint_weight_jitter": 0.5,
+        "constraint_weight_jitter": 0.3,
         "window_length": 50,
     },
     "gain_tuning": {
-        "steps": 500,
+        "steps": 300,
         "learning_rate": 1e-3,
-        "num_realizations": 16,
-        "num_lhs_points": 100,
-        "num_adam_optimizations": 10,
+        "num_realizations": 4,
+        "num_lhs_points": 250,
+        "num_adam_optimizations": 5,
         "validation_split": 0.2,
         "velocity_tracking_weight": 1.0,
         "input_weight": 0.0,
         "input_delta_weight": 1.0,
         "gain_delta_weight": 0.0,
         "k_min_stab": 1e-3,
-        "k_max_stab": 30.0,
-        "k_max_rest": 100.0,
+        "k_max_stab": 40.0,
+        "k_max_rest": 20.0,
         "gain_schedule": None,  # None -> follow problem yaml
     },
 }

@@ -133,6 +133,7 @@ def stage_plan_identification_trajectory(experiment: Experiment, iteration: int)
             str(paths.problem),
             time_scaling=config["time_scaling"],
             objective_mode="identification",
+            fim_a_slip_max=bool(config["fim_a_slip_max"]),
         )
         pipeline.set_bezier_control_points(pipeline.initial_bezier_control_points(config["bezier_order"]))
         with collect_plots(paths.visualize_dir):
@@ -262,7 +263,9 @@ def stage_plan_tuning_trajectories(experiment: Experiment, iteration: int) -> li
 
 
 def stage_decode_logs(experiment: Experiment, iteration: int) -> list[Path]:
-    """Decode binary SD-card logs in data/ into csv files (skips existing)."""
+    """Decode binary SD-card logs in data/ into csv files (skips existing) and
+    render the log-loader summary plot of every decoded log into
+    visualize/logs/ (skips logs that already have one)."""
     from wmr_simulator.pololu.decode_binary import decode_file
 
     paths = experiment.paths(iteration)
@@ -281,7 +284,33 @@ def stage_decode_logs(experiment: Experiment, iteration: int) -> list[Path]:
             decoded.append(output_path)
     if not candidates:
         print(f"No binary logs found in {paths.data_dir}")
+    _plot_log_summaries(experiment, paths)
     return decoded
+
+
+def _plot_log_summaries(experiment: Experiment, paths: IterationPaths) -> None:
+    from wmr_simulator.pololu.log_loader import load_imu_gyro_z, load_pololu_traj_control_log
+    from wmr_simulator.visualization.pololu import plot_logged_summary
+
+    clip = experiment.config["log_loading"]["clip_after_first_trajectory"]
+    plot_dir = paths.visualize_dir / "logs"
+    for log_path in _list_log_csvs(paths):
+        if (plot_dir / f"{log_path.stem}.pdf").exists():
+            continue
+        try:
+            log = load_pololu_traj_control_log(log_path, clip_after_first_trajectory=clip)
+            imu_time, imu_gyro_z = load_imu_gyro_z(log_path, clip_after_first_trajectory=clip)
+        except ValueError as error:
+            print(f"Log summary plot skipped for {log_path.name}: {error}")
+            continue
+        plot_path = plot_logged_summary(
+            log,
+            out_prefix=log_path.stem,
+            out_dir=plot_dir,
+            imu_time_s=imu_time,
+            imu_gyro_z=imu_gyro_z,
+        )
+        print(f"Log summary plot: {plot_path}")
 
 
 def _list_log_csvs(paths: IterationPaths) -> list[Path]:
@@ -430,7 +459,7 @@ def _resolve_log_path(paths: IterationPaths, log: str | None) -> Path:
         )
     if len(csvs) > 1:
         names = ", ".join(path.name for path in csvs)
-        raise ValueError(f"Multiple logs in {paths.data_dir} ({names}); pass --log to pick the identification run.")
+        print(f"Multiple logs in {paths.data_dir} ({names}); using {csvs[0].name} (pass --log to pick another).")
     return csvs[0]
 
 
@@ -580,6 +609,7 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
             pipeline,
             robot_params=robot_params,
             tuned_gains=result["optimized_gains"],
+            max_trajectories=None,
             out_prefix="summary_training",
         )
         plot_validation_trajectory_summary(

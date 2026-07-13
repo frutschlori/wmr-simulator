@@ -30,14 +30,14 @@ def print_loss_breakdown(label: str, component_history: dict[str, list[float]] |
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--problem", type=str, default="problems/pololu_gains.yaml")
-    parser.add_argument("--reference-trajectories-dir", type=str, default="trajectory_exports/tuning_optimized_5000it")
+    parser.add_argument("--reference-trajectories-dir", type=str, default="trajectory_exports/gain_optimized")
     parser.add_argument("--validation-split", type=float, default=0.2)
     # Optimization hyper-parameters
     parser.add_argument("--num-lhs-points", type=int, default=250) # points on initial search grid, 0 to disable
     parser.add_argument("--num-adam-optimizations", type=int, default=20) # number of best candidates to refine
     parser.add_argument("--steps", type=int, default=300)                 # adam steps
     parser.add_argument("--learning-rate", type=float, default=1e-3)      # adam learning rate
-    parser.add_argument("--num-realizations", type=int, default=1) # noise realizations over 1 trajectory
+    parser.add_argument("--num-realizations", type=int, default=4) # noise realizations over 1 trajectory
     parser.add_argument("--seed", type=int, default=2)
     # Loss weights
     parser.add_argument("--velocity-tracking-weight", type=float, default=3)
@@ -52,7 +52,7 @@ def main():
     parser.add_argument("--fixed-base-diameter", type=float, default=None)
     parser.add_argument("--num-summary-training-trajectories", type=int, default=None)
     # Gain schedule: jointly tune base gains + outer-gain schedule (W), default follows problem yaml, --no-gain-schedule forces W=0 (static)
-    parser.add_argument("--gain-schedule", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--gain-schedule", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--gain-delta-weight", type=float, default=0.0)
     # Learned residual dynamics checkpoint (scripts/train_residual_model.py); tuning
     # then rolls out the residual-augmented dynamics (model params stay fixed).
