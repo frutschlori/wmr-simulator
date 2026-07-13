@@ -1,0 +1,32 @@
+robot:
+  wheel_radius: 0.01593591831624508
+  base_diameter: 0.08692346513271332
+  max_wheel_speed: 242.70632934570312
+  time_constant: 0.12370101362466812
+  a_slip_max: 2.572460651397705
+controller:
+  gains:
+  - 4.618495464324951
+  - 3.478989601135254
+  - 2.6406686305999756
+  - 3.9767699241638184
+  - 0.0
+  gain_schedule:
+    enabled: false
+    scheduled_indices:
+    - 0
+    - 1
+    - 2
+    rho:
+    - 0.5
+    - 0.5
+    - 0.5
+    W:
+    - - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+    - - 0.0
+      - 0.0
+estimator:
+  mocap_delay: 0.0

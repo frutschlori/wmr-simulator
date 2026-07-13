@@ -34,17 +34,20 @@ def main():
     parser.add_argument("--save-trajectory", action="store_true", default=True)
     parser.add_argument("--no-save-trajectory", dest="save_trajectory", action="store_false")
     parser.add_argument("--window-length", type=int, default=50) # replay window length, only for identification mode
-    parser.add_argument("--opt-steps", type=int, default=10000)
-    parser.add_argument("--learning-rate", type=float, default=1e-4)
+    parser.add_argument("--opt-steps", type=int, default=5000)
+    parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--objective-mode", choices=["identification", "gain-tuning"],
                         default="identification")
+    parser.add_argument("--fim-a-slip-max", action=argparse.BooleanOptionalAction, default=False,
+                        help="Include a_slip_max in the FIM parameters (identification mode); "
+                             "--no-fim-a-slip-max drops it when its low sensitivity makes the FIM stiff.")
     # Settings for multiple trajectory synthesis
     parser.add_argument("--num-trajectories", type=int, default=1)
-    parser.add_argument("--constraint-weight-jitter", type=float, default=0.2) # factor for diverse constraints
+    parser.add_argument("--constraint-weight-jitter", type=float, default=0.3) # factor for diverse constraints
     parser.add_argument("--vectorize-trajectories", action="store_true", default=True)
     # Path settings
     parser.add_argument("--time-scaling", choices=["s-curve", "linear"], default="s-curve")
-    parser.add_argument("--bezier-order", type=int, default=15)
+    parser.add_argument("--bezier-order", type=int, default=10)
     parser.add_argument("--trajectory-seed", type=int, default=0)
     # Constraints
     parser.add_argument("--constraint-weight", type=float, default=1.0)
@@ -74,6 +77,7 @@ def main():
         args.problem,
         time_scaling=args.time_scaling,
         objective_mode=args.objective_mode,
+        fim_a_slip_max=args.fim_a_slip_max,
     )
 
     print(f"Loaded problem: {pipeline.problem.path}")
