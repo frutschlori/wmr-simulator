@@ -1,0 +1,44 @@
+rosbag2_bagfile_information:
+  version: 9
+  storage_identifier: mcap
+  duration:
+    nanoseconds: 16579429134
+  starting_time:
+    nanoseconds_since_epoch: 1783948634683021311
+  message_count: 1659
+  topics_with_message_count:
+    - topic_metadata:
+        name: /poses
+        type: motion_capture_tracking_interfaces/msg/NamedPoseArray
+        serialization_format: cdr
+        offered_qos_profiles:
+          - history: unknown
+            depth: 0
+            reliability: best_effort
+            durability: volatile
+            deadline:
+              sec: 0
+              nsec: 10000000
+            lifespan:
+              sec: 9223372036
+              nsec: 854775807
+            liveliness: automatic
+            liveliness_lease_duration:
+              sec: 9223372036
+              nsec: 854775807
+            avoid_ros_namespace_conventions: false
+        type_description_hash: RIHS01_d4c89ff7e0670d5f83b0322513e1c8dc2c3b279a68495daa026c352f0027e5f2
+      message_count: 1659
+  compression_format: ""
+  compression_mode: ""
+  relative_file_paths:
+    - TR03_0.mcap
+  files:
+    - path: TR03_0.mcap
+      starting_time:
+        nanoseconds_since_epoch: 1783948634683021311
+      duration:
+        nanoseconds: 16579429134
+      message_count: 1659
+  custom_data: ~
+  ros_distro: jazzy

@@ -98,23 +98,23 @@ def main():
     parser.add_argument("--export-dir", default="trajectory_exports/baselines")
     parser.add_argument("--name", default=None, help="Export stem (default: baseline_<type>_<timestamp>).")
     # Shared parameters
-    parser.add_argument("--time", type=float, default=15.0, help="Total trajectory time in seconds.")
+    parser.add_argument("--time", type=float, default=5.0, help="Total trajectory time in seconds.")
     parser.add_argument("--center", type=float, nargs=2, default=[0.0, 0.0], help="Path center [x y] in meters.")
     # Circle parameters
-    parser.add_argument("--radius", type=float, default=0.5, help="Circle radius in meters.")
+    parser.add_argument("--radius", type=float, default=1.0, help="Circle radius in meters.")
     parser.add_argument("--start-angle", type=float, default=0.0, help="Circle/spin start angle in radians.")
     parser.add_argument("--clockwise", action="store_true", default=False)
     # Spin parameters (mocap-delay identification)
     parser.add_argument("--max-omega", type=float, default=None,
                         help="Peak angular rate in rad/s (required for spin).")
     # Lemniscate parameters
-    parser.add_argument("--max-speed", type=float, default=None,
+    parser.add_argument("--max-speed", type=float, default=2.0,
                         help="Peak speed in m/s (required for lemniscate, optional amplitude override for ramp).")
-    parser.add_argument("--cycles", type=int, default=3, help="Figure-eight cycles (lemniscate modes).")
+    parser.add_argument("--cycles", type=int, default=1, help="Figure-eight cycles (lemniscate modes).")
     # Lemniscate ramp parameters
-    parser.add_argument("--speed-rate", type=float, default=1.5,
+    parser.add_argument("--speed-rate", type=float, default=1.0,
                         help="Phase-rate growth factor per completed cycle (lemniscate-ramp).")
-    parser.add_argument("--amplitude", type=float, default=1, help="Lemniscate amplitude in meters (ramp mode).")
+    parser.add_argument("--amplitude", type=float, default=5, help="Lemniscate amplitude in meters (ramp mode).")
     parser.add_argument("--ramp-up-fraction", type=float, default=0.2)
     parser.add_argument("--ramp-down-fraction", type=float, default=0.1)
     # Simulation settings
