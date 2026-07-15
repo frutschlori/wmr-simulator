@@ -22,13 +22,17 @@ def plot_logged_summary(
     output_path = out_dir / f"{out_prefix}.pdf"
 
     ref_time = np.asarray(log.reference.time_s, dtype=float)
-    reference = np.asarray(log.reference.states, dtype=float)
+    reference = np.array(log.reference.states, dtype=float, copy=True)
     pose_time = np.asarray(log.pose.time_s, dtype=float)
-    measured_pose = np.asarray(log.pose.states, dtype=float)
+    measured_pose = np.array(log.pose.states, dtype=float, copy=True)
     command_time = np.asarray(log.pose.command_time_s, dtype=float)
     wheel_cmd = np.asarray(log.pose.wheel_cmd, dtype=float)
     wheel_time = np.asarray(log.wheel.time_s, dtype=float)
     wheel_speeds = np.asarray(log.wheel.speeds, dtype=float)
+
+    # Keep plotted headings continuous while leaving the logged states intact.
+    reference[:, 2] = np.unwrap(reference[:, 2])
+    measured_pose[:, 2] = np.unwrap(measured_pose[:, 2])
 
     # Pololu logs carry Savitzky-Golay-smoothed poses in states and filter-
     # derivative twists; the raw (unsmoothed) mocap surviving outlier rejection
@@ -40,7 +44,8 @@ def plot_logged_summary(
     clean_states = getattr(log.pose, "clean_states", None)
     if pose_twists is not None and clean_time is not None and clean_states is not None:
         raw_time = np.asarray(clean_time, dtype=float)
-        raw_pose = np.asarray(clean_states, dtype=float)
+        raw_pose = np.array(clean_states, dtype=float, copy=True)
+        raw_pose[:, 2] = np.unwrap(raw_pose[:, 2])
         mocap_vel_time = pose_time
         mocap_vel = np.asarray(pose_twists, dtype=float)[:, [0, 2]]
         raw_vel_time, raw_vel = _mocap_vel_omega(raw_time, raw_pose)
