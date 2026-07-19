@@ -32,7 +32,7 @@ controller:
   - 2.7848148345947266
   - 4.256350517272949
   - 0.0
-  gain_schedule:
+  gain_parametrization:
     enabled: false
     scheduled_indices:
     - 0

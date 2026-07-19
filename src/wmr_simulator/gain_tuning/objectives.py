@@ -1,7 +1,7 @@
 import jax
 import jax.numpy as jnp
 
-from wmr_simulator.gain_schedule import scheduled_outer_gains_over_refs
+from wmr_simulator.gain_parametrization import outer_gains_over_refs
 
 
 def clip_controller_gains(gains: jax.Array):
@@ -198,7 +198,7 @@ def scheduled_closed_loop_objective_terms(
 
     base_terms = jnp.mean(jax.vmap(realization_loss)(replay_robot_keys, replay_estimator_keys), axis=0)
 
-    outer_gains = scheduled_outer_gains_over_refs(nominal_gains, schedule_params, reference_states)
+    outer_gains = outer_gains_over_refs(nominal_gains, schedule_params, reference_states)
     gain_rate = jnp.diff(outer_gains, axis=0) / pipeline.geometry_dt
     gain_delta_loss = jnp.mean(jnp.sum(gain_rate**2, axis=1))
 

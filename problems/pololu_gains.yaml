@@ -1,4 +1,4 @@
-sim_time: 8.0 # seconds
+sim_time: 5.0 # seconds
 geometry_controller_dt: 0.05 # seconds
 wheel_controller_dt: 0.01 # seconds
 environment:
@@ -23,14 +23,31 @@ controller:
   # base_i are controller.gains[0:3]; W is trained jointly with the gains. W = 0
   # reproduces the static controller exactly. feature_scale is auto-derived from the
   # robot velocity limits (v_max, omega_max). --no-gain-schedule forces W = 0.
-  gain_schedule:
-    enabled: false
-    scheduled_indices: [0, 1, 2]      # kx, ky, kth
-    rho: [0.5, 0.5, 0.5]
-    W:                                # optional init (defaults to zeros = static baseline)
-      - [0.0, 0.0]
-      - [0.0, 0.0]
-      - [0.0, 0.0]
+#  gain_parametrization:
+#    kind: bounded_reference
+#    enabled: false
+#    scheduled_indices: [0, 1, 2]      # kx, ky, kth
+#    rho: [0.5, 0.5, 0.5]
+#    W:                                # optional init (defaults to zeros = static baseline)
+#      - [0.0, 0.0]
+#      - [0.0, 0.0]
+#      - [0.0, 0.0]
+  # Alternative: tanh MLP on the tracking errors + reference speeds, one bounded
+  # factor per scheduled gain: gain_i = base_i * clip(1 + mlp(z)_i, 0, bound) with
+  #   z = [x_e, y_e, theta_e, v_e, omega_e, v_d, |omega_d|] / feature_scale.
+  # theta is a delta on a seeded random init with zero output layer, so theta = 0
+  # (the tuning presearch) is exactly the static controller. Weight matrices are
+  # spectrally normalized to spectral_norm_cap at forward time, capping the
+  # network's Lipschitz constant so the factors stay smooth on noisy/unseen inputs.
+  gain_parametrization:
+    kind: error_mlp
+    enabled: true
+    hidden_sizes: [16]
+    seed: 0
+    scheduled_indices: [0, 1, 2] # kx, ky, kth; motor PI gains stay static ([0,1,2,3,4] schedules all)
+    bound: 5.0             # upper factor bound, clipped to >= 1 when applied
+    learn_bound: false     # true adds the bound to the trainable vector
+    spectral_norm_cap: 1.0 # per-matrix spectral norm cap, 0 disables
 robot:
   type: differential_drive
   wheel_radius: 0.01595   # m

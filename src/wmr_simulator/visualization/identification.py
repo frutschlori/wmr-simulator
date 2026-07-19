@@ -780,7 +780,10 @@ def plot_loss_history(
 
     steps = np.arange(1, len(loss_history) + 1)
 
-    fig, ax = plt.subplots(1, 1, figsize=(8.5, 4.8))
+    if loss_component_history is not None:
+        fig, (ax, total_ax) = plt.subplots(2, 1, figsize=(8.5, 8.4), sharex=True)
+    else:
+        fig, ax = plt.subplots(1, 1, figsize=(8.5, 4.8))
     legend_handles = []
 
     if loss_component_history is not None:
@@ -836,7 +839,6 @@ def plot_loss_history(
                 )[0]
                 legend_handles.append(line)
 
-        ax.set_xlabel("Optimization Step")
         ax.set_ylabel("Tracking loss", color="C0")
         velocity_ax.set_ylabel("Velocity tracking loss", color="C1")
         ax.tick_params(axis="y", colors="C0")
@@ -849,6 +851,39 @@ def plot_loss_history(
         ax.set_title("Controller Tuning Loss")
         ax.grid(True, alpha=0.3)
         ax.legend(handles=legend_handles, loc="best")
+
+        # Second subplot: complete objective (left) and the input-delta term
+        # (right) -- they live on different magnitudes than the tracking terms.
+        input_delta_ax = total_ax.twinx()
+        total_handles = []
+        line = total_ax.plot(steps, np.asarray(loss_history, dtype=float),
+                             color="C2", linestyle="-", linewidth=1.9, label="Train total")[0]
+        total_handles.append(line)
+        if validation_loss_history is not None and len(validation_loss_history) > 0:
+            values = np.asarray(validation_loss_history, dtype=float)
+            line = total_ax.plot(np.arange(1, len(values) + 1), values,
+                                 color="C2", linestyle="--", linewidth=1.7, label="Validation total")[0]
+            total_handles.append(line)
+        if "input_delta" in loss_component_history:
+            values = np.asarray(loss_component_history["input_delta"], dtype=float)
+            line = input_delta_ax.plot(np.arange(1, len(values) + 1), values,
+                                       color="C3", linestyle="-", linewidth=1.9, label="Train input delta")[0]
+            total_handles.append(line)
+        if validation_loss_component_history is not None and "input_delta" in validation_loss_component_history:
+            values = np.asarray(validation_loss_component_history["input_delta"], dtype=float)
+            line = input_delta_ax.plot(np.arange(1, len(values) + 1), values,
+                                       color="C3", linestyle="--", linewidth=1.7, label="Validation input delta")[0]
+            total_handles.append(line)
+        total_ax.set_xlabel("Optimization Step")
+        total_ax.set_ylabel("Total objective", color="C2")
+        input_delta_ax.set_ylabel("Input delta loss", color="C3")
+        total_ax.tick_params(axis="y", colors="C2")
+        input_delta_ax.tick_params(axis="y", colors="C3")
+        total_ax.spines["left"].set_color("C2")
+        input_delta_ax.spines["right"].set_color("C3")
+        total_ax.grid(True, alpha=0.3)
+        total_ax.legend(handles=total_handles, loc="best")
+
         fig.tight_layout()
         fig.savefig(pdf_filename, bbox_inches="tight", transparent=True)
         plt.close(fig)

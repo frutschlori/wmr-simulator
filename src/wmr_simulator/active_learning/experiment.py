@@ -116,7 +116,7 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         "k_min_stab": 1e-3,
         "k_max_stab": 40.0,
         "k_max_rest": 20.0,
-        "gain_schedule": None,  # None -> follow problem yaml
+        "gain_parametrization": None,  # None -> follow problem yaml
     },
 }
 
@@ -287,9 +287,11 @@ def robot_config_from_problem(problem_cfg: dict) -> dict:
         },
     }
     payload["robot"]["a_slip_max"] = float(robot_cfg.get("a_slip_max", 0.0))
-    gain_schedule = problem_cfg["controller"].get("gain_schedule")
-    if gain_schedule is not None:
-        payload["controller"]["gain_schedule"] = copy.deepcopy(gain_schedule)
+    gain_parametrization = problem_cfg["controller"].get(
+        "gain_parametrization", problem_cfg["controller"].get("gain_schedule")
+    )
+    if gain_parametrization is not None:
+        payload["controller"]["gain_parametrization"] = copy.deepcopy(gain_parametrization)
     return payload
 
 
@@ -320,9 +322,12 @@ def write_iteration_problem(
     problem_cfg.setdefault("controller", {})["gains"] = [
         float(gain) for gain in robot_config["controller"]["gains"]
     ]
-    gain_schedule = robot_config["controller"].get("gain_schedule")
-    if gain_schedule is not None:
-        problem_cfg["controller"]["gain_schedule"] = copy.deepcopy(gain_schedule)
+    gain_parametrization = robot_config["controller"].get(
+        "gain_parametrization", robot_config["controller"].get("gain_schedule")
+    )
+    if gain_parametrization is not None:
+        problem_cfg["controller"].pop("gain_schedule", None)
+        problem_cfg["controller"]["gain_parametrization"] = copy.deepcopy(gain_parametrization)
     if update_estimator_geometry and "estimator" in problem_cfg:
         problem_cfg["estimator"]["wheel_radius"] = float(robot_config["robot"]["wheel_radius"])
         problem_cfg["estimator"]["base_diameter"] = float(robot_config["robot"]["base_diameter"])

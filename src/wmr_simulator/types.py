@@ -46,6 +46,10 @@ class PoseLog(NamedTuple):
     # simulated logs.
     clean_time_s: jax.Array | None = None
     clean_states: jax.Array | None = None
+    # Controller gains [kx, ky, kth, kpmotor, kimotor] applied at each geometry
+    # step (command_time_s); time-varying under a gain parametrization. None for
+    # replayed/real logs.
+    gains: jax.Array | None = None
 
 
 class SimulationLog(NamedTuple):

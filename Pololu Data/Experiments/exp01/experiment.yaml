@@ -55,4 +55,4 @@ gain_tuning:
   k_min_stab: 0.001
   k_max_stab: 40.0
   k_max_rest: 20.0
-  gain_schedule: null
+  gain_parametrization: null

@@ -12,9 +12,12 @@ def plot_logged_summary(
     out_dir: str | Path = "visualize",
     imu_time_s: np.ndarray | None = None,
     imu_gyro_z: np.ndarray | None = None,
+    show_gains: bool = False,
 ) -> Path:
     """Six-panel overview of one log; ``imu_gyro_z`` (rad/s, see
-    pololu.log_loader.load_imu_gyro_z) is overlaid on the mocap omega."""
+    pololu.log_loader.load_imu_gyro_z) is overlaid on the mocap omega.
+    ``show_gains`` overlays the applied controller gains (``log.pose.gains``,
+    simulated logs only) on the wheel-speed and state subplots."""
     plt = _plot_module()
 
     out_dir = Path(out_dir)
@@ -130,20 +133,56 @@ def plot_logged_summary(
     ax_wheels.set_ylabel("wheel speed [rad/s]")
     ax_wheels.set_title("Wheel Speeds")
     ax_wheels.grid(True)
-    ax_wheels.legend(handles=[line_cmd_right, line_meas_right, line_cmd_left, line_meas_left])
+    wheel_legend_handles = [line_cmd_right, line_meas_right, line_cmd_left, line_meas_left]
+
+    # Applied controller gains along the run (time-varying under a gain
+    # parametrization): motor PI gains here, outer gains on the state subplots.
+    gains_log = getattr(log.pose, "gains", None)
+    gains_log = None if (not show_gains or gains_log is None) else np.asarray(gains_log, dtype=float)
+    if gains_log is not None:
+        ax_wheel_gains = ax_wheels.twinx()
+        for column, label, style in ((3, r"$k_p$ motor", "-"), (4, r"$k_i$ motor", "--")):
+            wheel_legend_handles.append(
+                ax_wheel_gains.step(
+                    command_time,
+                    gains_log[:, column],
+                    where="post",
+                    color="black",
+                    linestyle=style,
+                    linewidth=0.8,
+                    label=label,
+                )[0]
+            )
+        ax_wheel_gains.set_ylabel("motor gains [-]")
+    ax_wheels.legend(handles=wheel_legend_handles)
 
     labels = ("x [m]", "y [m]", "theta [rad]")
     titles = ("x State", "y State", "theta State")
+    gain_labels = (r"$k_x$", r"$k_y$", r"$k_\theta$")
     for index, ax in enumerate(axes[1, :]):
         ax.step(ref_time, reference[:, index], where="post", color="tab:red", linestyle="--", linewidth=0.9, label="Reference")
         if raw_pose is not None:
             ax.plot(raw_time, raw_pose[:, index], color="tab:blue", **raw_style, label="Measured (raw)")
         ax.plot(pose_time, measured_pose[:, index], color="tab:blue", linewidth=0.95, label="Measured")
+        legend_handles = ax.get_lines()[:]
+        if gains_log is not None:
+            gain_ax = ax.twinx()
+            legend_handles.append(
+                gain_ax.step(
+                    command_time,
+                    gains_log[:, index],
+                    where="post",
+                    color="black",
+                    linewidth=0.8,
+                    label=gain_labels[index],
+                )[0]
+            )
+            gain_ax.set_ylabel(f"{gain_labels[index]} [-]")
         ax.set_xlabel("time [s]")
         ax.set_ylabel(labels[index])
         ax.set_title(titles[index])
         ax.grid(True)
-        ax.legend()
+        ax.legend(handles=legend_handles)
 
     fig.tight_layout(rect=[0, 0, 1, 0.96])
     fig.savefig(output_path, bbox_inches="tight", transparent=False, facecolor="white")
