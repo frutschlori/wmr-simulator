@@ -27,22 +27,51 @@ def print_loss_breakdown(label: str, component_history: dict[str, list[float]] |
         print(f"  {name:<16}: {value:.8f} ({share:.2f}%)")
 
 
+def save_tuning_result(out_path: str, problem_path: str, result: dict) -> None:
+    import yaml
+
+    from wmr_simulator.gain_parametrization import to_cfg
+
+    schedule_params = result.get("schedule_params")
+    payload = {
+        "problem": problem_path,
+        "gains": [float(gain) for gain in result["optimized_gains"]],
+        "static_gains": (
+            None
+            if result.get("static_gains") is None
+            else [float(gain) for gain in result["static_gains"]]
+        ),
+        "schedule_enabled": bool(result["schedule_enabled"]),
+        "schedule": None if schedule_params is None else to_cfg(schedule_params),
+        "final_loss": float(result["loss_history"][-1]),
+        "final_validation_loss": (
+            float(result["validation_loss_history"][-1])
+            if result["validation_loss_history"] is not None
+            else None
+        ),
+    }
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as file:
+        yaml.safe_dump(payload, file, sort_keys=False)
+    print(f"Saved tuning result to {out_path}")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--problem", type=str, default="problems/pololu_gains.yaml")
-    parser.add_argument("--reference-trajectories-dir", type=str, default="trajectory_exports/gain_optimized")
+    parser.add_argument("--reference-trajectories-dir", type=str, default="trajectory_exports/tuning_optimized_5000it")
     parser.add_argument("--validation-split", type=float, default=0.2)
     # Optimization hyper-parameters
     parser.add_argument("--num-lhs-points", type=int, default=250) # points on initial search grid, 0 to disable
-    parser.add_argument("--num-adam-optimizations", type=int, default=20) # number of best candidates to refine
-    parser.add_argument("--steps", type=int, default=300)                 # adam steps
-    parser.add_argument("--learning-rate", type=float, default=1e-3)      # adam learning rate
+    parser.add_argument("--num-adam-optimizations", type=int, default=10) # number of best candidates to refine
+    parser.add_argument("--steps", type=int, default=1000)                 # adam steps
+    parser.add_argument("--learning-rate", type=float, default=5e-5)      # adam learning rate
     parser.add_argument("--num-realizations", type=int, default=4) # noise realizations over 1 trajectory
     parser.add_argument("--seed", type=int, default=2)
     # Loss weights
-    parser.add_argument("--velocity-tracking-weight", type=float, default=3)
+    parser.add_argument("--velocity-tracking-weight", type=float, default=1)
     parser.add_argument("--input-weight", type=float, default=0.0)
-    parser.add_argument("--input-delta-weight", type=float, default=1)
+    parser.add_argument("--input-delta-weight", type=float, default=0.1)
     # Gain bounds
     parser.add_argument("--k-min-stab", type=float, default=1e-3)
     parser.add_argument("--k-max-stab", type=float, default=50.0)
@@ -54,10 +83,21 @@ def main():
     # Gain schedule: jointly tune base gains + outer-gain schedule (W), default follows problem yaml, --no-gain-schedule forces W=0 (static)
     parser.add_argument("--gain-schedule", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--gain-delta-weight", type=float, default=0.0)
+    # Two-stage tuning: run the full static routine (LHS + multistart Adam on the
+    # base gains only) first, then train the parametrization on top of its optimum.
+    # The static stage takes its own step count / learning rate (defaults to
+    # --steps / --learning-rate); the parametrization stage uses --steps and
+    # --learning-rate, which typically wants a lower rate than the static search.
+    parser.add_argument("--static-pretune", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--static-pretune-steps", type=int, default=500)
+    parser.add_argument("--static-pretune-learning-rate", type=float, default=1e-4)
     # Learned residual dynamics checkpoint (scripts/train_residual_model.py); tuning
     # then rolls out the residual-augmented dynamics (model params stay fixed).
     # parser.add_argument("--residual-model", type=str, default="models/residual_pololu.pkl")
     parser.add_argument("--residual-model", type=str, default=None)
+    # Tuning result (gains + trained gain parametrization) is saved here as YAML;
+    # the parametrization block drops into the problem yaml's controller section.
+    parser.add_argument("--out", type=str, default="models/tuned_gains.yaml")
     args = parser.parse_args()
 
     residual_model = None
@@ -89,10 +129,15 @@ def main():
         schedule_enabled=args.gain_schedule,
         gain_delta_weight=args.gain_delta_weight,
         residual_model=residual_model,
+        static_pretune=args.static_pretune,
+        static_pretune_steps=args.static_pretune_steps,
+        static_pretune_learning_rate=args.static_pretune_learning_rate,
     )
     pipeline = result["pipeline"]
     print_physical_params("Robot parameters used for gain tuning:", robot_params)
     print_controller_gains("Initial gains:", pipeline.gains)
+    if result["static_gains"] is not None:
+        print_controller_gains("Static pretune gains:", result["static_gains"])
     print_controller_gains("Optimized gains:", result["optimized_gains"])
     print(f"Velocity tracking weight: {args.velocity_tracking_weight:.8g}")
     print(f"Input regularization weight: {args.input_weight:.8g}")
@@ -112,13 +157,29 @@ def main():
     print(f"Gain schedule enabled: {result['schedule_enabled']}")
     if result.get("schedule_params") is not None:
         import numpy as _np
+
+        from wmr_simulator.gain_parametrization import BoundedReferenceParams, ErrorMlpParams, num_params
+
         schedule_params = result["schedule_params"]
         print(f"Gain delta weight: {args.gain_delta_weight:.8g}")
-        print("Scheduled indices:", list(map(int, schedule_params.scheduled_indices)))
-        print("Feature scale [v_max, omega_max]:", list(map(float, pipeline.gain_schedule_feature_scale)))
-        print("rho:", _np.array2string(_np.asarray(schedule_params.rho), precision=5))
-        print("W (rows = scheduled gains, cols = [v_d, |omega_d|]):")
-        print(_np.array2string(_np.asarray(schedule_params.W), precision=5))
+        if isinstance(schedule_params, BoundedReferenceParams):
+            print("Scheduled indices:", list(map(int, schedule_params.scheduled_indices)))
+            print("Feature scale [v_max, omega_max]:", list(map(float, pipeline.gain_schedule_feature_scale)))
+            print("rho:", _np.array2string(_np.asarray(schedule_params.rho), precision=5))
+            print("W (rows = scheduled gains, cols = [v_d, |omega_d|]):")
+            print(_np.array2string(_np.asarray(schedule_params.W), precision=5))
+        elif isinstance(schedule_params, ErrorMlpParams):
+            from wmr_simulator.gain_parametrization.error_mlp import hidden_sizes
+
+            print(f"Error-MLP parametrization: hidden sizes {list(hidden_sizes(schedule_params))}, "
+                  f"{num_params(schedule_params)} trainable parameters")
+            print("Scheduled indices:", list(map(int, schedule_params.scheduled_indices)))
+            print(f"Factor bound: {float(schedule_params.bound):.5g} "
+                  f"({'learned' if schedule_params.learn_bound else 'fixed'})")
+            print(f"Spectral norm cap: {float(schedule_params.spectral_norm_cap):.5g} (0 = disabled)")
+            print("Feature scale:", _np.array2string(_np.asarray(schedule_params.feature_scale), precision=5))
+
+    save_tuning_result(args.out, args.problem, result)
 
     plot_gain_tuning_summary(
         pipeline,

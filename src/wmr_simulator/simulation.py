@@ -8,7 +8,8 @@ import yaml
 
 from wmr_simulator.controller import Controller
 from wmr_simulator.estimator import DiffDriveEstimator
-from wmr_simulator.gain_schedule import apply_gain_schedule, gain_schedule_params_from_cfg
+from wmr_simulator.gain_parametrization import apply as apply_gain_parametrization
+from wmr_simulator.gain_parametrization import params_from_cfg as gain_parametrization_params_from_cfg
 from wmr_simulator.planner import compute_reference_trajectory
 from wmr_simulator.robot import DiffDrive, DiffDriveState
 from wmr_simulator.types import PhysicalParams, PoseLog, ReferenceLog, SimulationLog, WheelLog
@@ -125,19 +126,28 @@ class SimulationPipeline:
         )
         self.gains = jnp.asarray(self.controller_cfg["gains"], dtype=jnp.float32)
 
-        gain_schedule_cfg = self.controller_cfg.get("gain_schedule")
-        self.gain_schedule_cfg = gain_schedule_cfg
-        self.gain_schedule_enabled = bool(gain_schedule_cfg.get("enabled", False)) if gain_schedule_cfg else False
+        gain_parametrization_cfg = self.controller_cfg.get(
+            "gain_parametrization", self.controller_cfg.get("gain_schedule")
+        )
+        self.gain_parametrization_cfg = gain_parametrization_cfg
+        self.gain_parametrization_enabled = (
+            bool(gain_parametrization_cfg.get("enabled", False)) if gain_parametrization_cfg else False
+        )
+        # Backward-compatible names for existing scripts/tests.
+        self.gain_schedule_cfg = gain_parametrization_cfg
+        self.gain_schedule_enabled = self.gain_parametrization_enabled
         # Feature scales are auto-derived from the robot velocity limits so that the
         # normalized features z = [v_d/v_max, |omega_d|/omega_max] land in ~[0, 1].
         v_max = float(self.robot_cfg.get("v_max", 1.0)) or 1.0
         omega_max = float(self.robot_cfg.get("omega_max", 1.0)) or 1.0
         self.v_max = v_max
         self.omega_max = omega_max
-        self.gain_schedule_feature_scale = [v_max, omega_max]
-        self.gain_schedule_params = gain_schedule_params_from_cfg(
-            gain_schedule_cfg, self.gain_schedule_feature_scale
+        self.gain_parametrization_feature_scale = [v_max, omega_max]
+        self.gain_parametrization_params = gain_parametrization_params_from_cfg(
+            gain_parametrization_cfg, self.gain_parametrization_feature_scale
         )
+        self.gain_schedule_feature_scale = self.gain_parametrization_feature_scale
+        self.gain_schedule_params = self.gain_parametrization_params
 
         master_key = jax.random.PRNGKey(seed)
         target_key, replay_key = jax.random.split(master_key, 2)
@@ -239,12 +249,24 @@ class SimulationPipeline:
         def geometry_step(carry, ref_state):
             robot_state, estimator_state, controller_state, delayed_wheel_ref = carry
             pose_est = self.estimator.get_est_pose(estimator_state)
-            # Scheduling depends only on reference features and is computed once per
-            # geometry step; the scheduled gain vector is reused by the inner loop.
+            # Parametrized gains are computed once per geometry step (from the
+            # reference and the same estimates the controller sees) and reused
+            # by the inner loop.
             if schedule_params is None:
                 step_gains = controller_gains
+                log_gains = nominal_gains
             else:
-                step_gains = apply_gain_schedule(nominal_gains, schedule_params, ref_state)
+                wheel_est = self.estimator.get_est_wheel_speeds(estimator_state)
+                twist_est = jnp.stack(
+                    [
+                        0.5 * model_params.wheel_radius * (wheel_est[0] + wheel_est[1]),
+                        model_params.wheel_radius / model_params.base_diameter * (wheel_est[0] - wheel_est[1]),
+                    ]
+                )
+                step_gains = apply_gain_parametrization(
+                    nominal_gains, schedule_params, ref_state, pose_est=pose_est, twist_est=twist_est
+                )
+                log_gains = step_gains
             wheel_ref = self.controller.compute_wheel_reference(
                 ref_state,
                 pose_est,
@@ -321,6 +343,7 @@ class SimulationPipeline:
                 wheel_outputs[3],
                 wheel_outputs[4],
                 wheel_outputs[5],
+                log_gains,
             )
 
         _, outputs = jax.lax.scan(geometry_step, carry0, reference_states[:-1])
@@ -332,6 +355,7 @@ class SimulationPipeline:
             estimated_wheel_speeds,
             wheel_vel_omega,
             duty_cycles,
+            applied_gains,
         ) = outputs
         initial_pose = self.initial_reference_pose(reference_states)[None, :]
         pose_states = jnp.concatenate([initial_pose, pose_samples.reshape(-1, 3)], axis=0)
@@ -362,6 +386,7 @@ class SimulationPipeline:
                 true_states=true_pose_states,
                 command_time_s=jnp.asarray(self.command_time_grid[: num_reference_samples - 1], dtype=jnp.float32),
                 wheel_cmd=wheel_cmds,
+                gains=applied_gains,
             ),
         )
 

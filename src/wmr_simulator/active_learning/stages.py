@@ -70,11 +70,10 @@ def stage_finalize(experiment: Experiment, iteration: int) -> IterationPaths:
         robot_config.setdefault("estimator", {})["mocap_delay"] = float(identification["mocap_delay"])
     robot_config["controller"]["gains"] = [float(gain) for gain in gains_result["gains"]]
     if gains_result.get("schedule") is not None:
-        robot_config["controller"]["gain_schedule"] = {
+        robot_config["controller"].pop("gain_schedule", None)
+        robot_config["controller"]["gain_parametrization"] = {
+            **gains_result["schedule"],
             "enabled": bool(gains_result["schedule_enabled"]),
-            "scheduled_indices": gains_result["schedule"]["scheduled_indices"],
-            "rho": gains_result["schedule"]["rho"],
-            "W": gains_result["schedule"]["W"],
         }
 
     next_paths = _initialize_iteration(experiment, iteration + 1, robot_config)
@@ -566,7 +565,7 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
         k_max_rest=float(config["k_max_rest"]),
         num_lhs_points=int(config["num_lhs_points"]),
         num_adam_optimizations=int(config["num_adam_optimizations"]),
-        schedule_enabled=config["gain_schedule"],
+        schedule_enabled=config.get("gain_parametrization", config.get("gain_schedule")),
         gain_delta_weight=float(config["gain_delta_weight"]),
         residual_model=residual_model,
     )
@@ -588,13 +587,9 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
     }
     schedule_params = result.get("schedule_params")
     if schedule_params is not None:
-        import numpy as np
+        from wmr_simulator.gain_parametrization import to_cfg as gain_parametrization_to_cfg
 
-        payload["schedule"] = {
-            "scheduled_indices": [int(index) for index in schedule_params.scheduled_indices],
-            "rho": [float(value) for value in np.asarray(schedule_params.rho).ravel()],
-            "W": np.asarray(schedule_params.W, dtype=float).tolist(),
-        }
+        payload["schedule"] = gain_parametrization_to_cfg(schedule_params)
     save_yaml(paths.gains_result, payload)
     print(f"Wrote {paths.gains_result}")
 

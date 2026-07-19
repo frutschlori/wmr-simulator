@@ -125,12 +125,34 @@ def plot_gain_tuning_summary(
     ax_wheels.set_ylabel("wheel speed [rad/s]")
     ax_wheels.set_title("Wheel Speeds")
     ax_wheels.grid(True)
-    ax_wheels.legend(handles=[line_cmd_right, line_meas_right, line_cmd_left, line_meas_left])
+    wheel_legend_handles = [line_cmd_right, line_meas_right, line_cmd_left, line_meas_left]
+
+    # Applied controller gains along the tuned rollout (time-varying under a
+    # gain parametrization): motor PI gains on the wheel-speeds subplot, the
+    # outer gains on their state subplots below.
+    tuned_gains_log = None if tuned_log.pose.gains is None else np.asarray(tuned_log.pose.gains, dtype=float)
+    if tuned_gains_log is not None:
+        ax_wheel_gains = ax_wheels.twinx()
+        for column, label, style in ((3, r"$k_p$ motor", "-"), (4, r"$k_i$ motor", "--")):
+            wheel_legend_handles.append(
+                ax_wheel_gains.step(
+                    command_time,
+                    tuned_gains_log[:, column],
+                    where="post",
+                    color="black",
+                    linestyle=style,
+                    linewidth=0.8,
+                    label=label,
+                )[0]
+            )
+        ax_wheel_gains.set_ylabel("motor gains [-]")
+    ax_wheels.legend(handles=wheel_legend_handles)
 
     _plot_tuned_motor_axes(ax_motor, wheel_time, duty_cycle, wheel_speeds)
 
     state_labels = ("x [m]", "y [m]", "theta [rad]")
     state_names = ("x", "y", "theta")
+    state_gain_labels = (r"$k_x$", r"$k_y$", r"$k_\theta$")
     for index, ax in enumerate(state_axes):
         ax.step(
             reference_time,
@@ -143,11 +165,25 @@ def plot_gain_tuning_summary(
         )
         ax.plot(init_time, init_pose[:, index], color="tab:blue", linewidth=1.0, label="Initial")
         ax.plot(tuned_time, tuned_pose[:, index], color="tab:orange", linewidth=1.2, label="Tuned")
+        legend_handles = ax.get_lines()[:]
+        if tuned_gains_log is not None:
+            gain_ax = ax.twinx()
+            legend_handles.append(
+                gain_ax.step(
+                    command_time,
+                    tuned_gains_log[:, index],
+                    where="post",
+                    color="black",
+                    linewidth=0.8,
+                    label=state_gain_labels[index],
+                )[0]
+            )
+            gain_ax.set_ylabel(f"{state_gain_labels[index]} [-]")
         ax.set_xlabel("time [s]")
         ax.set_ylabel(state_labels[index])
         ax.set_title(f"{state_names[index]} State")
         ax.grid(True)
-        ax.legend()
+        ax.legend(handles=legend_handles)
 
     fig.tight_layout(rect=[0, 0, 1, 0.96])
     fig.savefig(pdf_filename, bbox_inches="tight", transparent=False, facecolor="white")

@@ -10,9 +10,11 @@ import numpy as np
 import pytest
 import yaml
 
-from wmr_simulator.gain_schedule import (
+from wmr_simulator.gain_parametrization import (
+    BoundedReferenceParams,
     apply_gain_schedule,
     gain_schedule_params_from_cfg,
+    params_from_cfg,
     schedule_factors,
     scheduled_outer_gains_over_refs,
     schedule_num_params,
@@ -61,7 +63,8 @@ def test_feature_scale_autoderived_from_robot_limits():
     expected = [robot_cfg["v_max"], robot_cfg["omega_max"]]
     pipeline = _pipeline()
     np.testing.assert_allclose(pipeline.gain_schedule_feature_scale, expected)
-    np.testing.assert_allclose(np.asarray(pipeline.gain_schedule_params.feature_scale), expected)
+    params = gain_schedule_params_from_cfg(_cfg(), pipeline.gain_schedule_feature_scale)
+    np.testing.assert_allclose(np.asarray(params.feature_scale), expected)
 
 
 def test_apply_gain_schedule_shape_and_motor_passthrough():
@@ -106,6 +109,11 @@ def test_cfg_validation_rejects_wrong_features():
     cfg["feature_names"] = ["v_d", "tracking_error"]
     with pytest.raises(ValueError):
         gain_schedule_params_from_cfg(cfg, FEATURE_SCALE)
+
+
+def test_cfg_selects_bounded_reference_kind():
+    params = params_from_cfg({**_cfg(), "kind": "bounded_reference"}, FEATURE_SCALE)
+    assert isinstance(params, BoundedReferenceParams)
 
 
 def test_identity_schedule_matches_static_rollout():

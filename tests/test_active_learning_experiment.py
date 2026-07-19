@@ -71,7 +71,7 @@ def test_finalize_rolls_results_into_next_iteration(tmp_path):
     next_robot_config = load_yaml(next_paths.robot_config)
     assert next_robot_config["robot"]["wheel_radius"] == 0.0171
     assert next_robot_config["controller"]["gains"] == gains["gains"]
-    assert next_robot_config["controller"]["gain_schedule"]["W"] == [[0.1, 0.0]] * 3
+    assert next_robot_config["controller"]["gain_parametrization"]["W"] == [[0.1, 0.0]] * 3
 
     next_problem = load_yaml(next_paths.problem)
     assert next_problem["robot"]["base_diameter"] == 0.0912

@@ -4,7 +4,8 @@ import numpy as np
 import optax
 from jax_tqdm import scan_tqdm
 
-from wmr_simulator.gain_schedule import with_flat_W
+from wmr_simulator.gain_parametrization import num_params as gain_parametrization_num_params
+from wmr_simulator.gain_parametrization import with_flat_params, zero_params
 from wmr_simulator.gain_tuning.objectives import (
     clip_controller_gains,
     scheduled_closed_loop_objective_terms,
@@ -19,11 +20,11 @@ _LOSS_COMPONENT_NAMES = ("tracking", "velocity_tracking", "input", "input_delta"
 # ---------------------------------------------------------------------------
 # Optimizer-value <-> controller-gain reparametrization (base gains only)
 #
-# The trainable vector is [gain_values(5), W_flat(num_w)]. The first five entries
+# The trainable vector is [gain_values(5), parametrization_flat(num_w)]. The first five entries
 # are the base 5-gain vector in a bounded reparam space (log-space for the four
 # "stable" gains, sqrt-space for the motor I gain); they are clipped to [0, 1].
-# The trailing W entries are linear (can be negative) and are NOT clipped here --
-# the schedule's internal clip(W . z, -1, 1) bounds their effect.
+# The trailing parametrization entries are linear (can be negative) and are not
+# clipped here; each parametrization is responsible for bounding its own effect.
 # ---------------------------------------------------------------------------
 
 
@@ -71,13 +72,18 @@ def _with_motor_zero_variants(values: jax.Array) -> jax.Array:
 
 
 def _candidate_optimizer_values(pipeline, init_gain_values, num_w, num_lhs_points):
-    """Build candidate vectors of width (5 + num_w). LHS searches the gain part; W is 0."""
+    """Build candidate vectors of width (5 + num_w). LHS searches the gain part; W is 0.
+
+    ``init_gain_values`` may hold several rows (e.g. the per-start results of a
+    static pretune stage); each becomes its own candidate.
+    """
+    init_gain_values = jnp.atleast_2d(init_gain_values)
     if num_lhs_points <= 0:
-        gain_candidates = init_gain_values[None, :]
+        gain_candidates = init_gain_values
     else:
         lhs_key = jax.random.fold_in(pipeline.robot_key, 1729)
         lhs_values = _latin_hypercube_samples(lhs_key, num_lhs_points, _NUM_GAINS)
-        base_values = jnp.concatenate([init_gain_values[None, :], lhs_values], axis=0)
+        base_values = jnp.concatenate([init_gain_values, lhs_values], axis=0)
         gain_candidates = _with_motor_zero_variants(base_values)
     w_zeros = jnp.zeros((gain_candidates.shape[0], num_w), dtype=jnp.float32)
     return jnp.concatenate([gain_candidates, w_zeros], axis=-1)
@@ -102,17 +108,14 @@ def _make_terms_for_values(
     reference_trajectories = (
         None if reference_trajectories is None else jnp.asarray(reference_trajectories, dtype=jnp.float32)
     )
-    num_scheduled, num_features = schedule_template.W.shape
-
     def terms_for_values(values):
         gains = _controller_gains_from_optimizer_values(
             values[..., :_NUM_GAINS], k_min_stab=k_min_stab, k_max_stab=k_max_stab, k_max_rest=k_max_rest
         )
         if schedule_enabled:
-            W = values[..., _NUM_GAINS:].reshape(num_scheduled, num_features)
+            params = with_flat_params(values[..., _NUM_GAINS:], schedule_template)
         else:
-            W = jnp.zeros((num_scheduled, num_features), dtype=jnp.float32)
-        params = schedule_template._replace(W=W)
+            params = zero_params(schedule_template)
 
         def terms_for_reference(reference_states):
             return scheduled_closed_loop_objective_terms(
@@ -142,13 +145,17 @@ def _select_initial_optimizer_values(
     k_min_stab,
     k_max_stab,
     k_max_rest,
+    lhs_enabled,
 ):
     candidate_losses = jax.vmap(loss_for_optimizer_values)(candidate_values)
     candidate_losses = np.asarray(candidate_losses, dtype=float)
     num_starts = min(int(num_adam_optimizations), int(candidate_values.shape[0]))
     best_indices = np.argsort(candidate_losses)[:num_starts]
-    print("Finished LHS candidate evaluation.")
-    print("Best LHS candidates:")
+    if lhs_enabled:
+        print("Finished LHS candidate evaluation.")
+        print("Best LHS candidates:")
+    else:
+        print("Evaluated initial gain candidates (no LHS search):")
     top_count = min(3, int(candidate_values.shape[0]))
     top_indices = best_indices[:top_count]
     top_gains = np.asarray(
@@ -163,7 +170,7 @@ def _select_initial_optimizer_values(
     for rank, (candidate_index, gains) in enumerate(zip(top_indices, top_gains), start=1):
         gain_text = ", ".join(f"{name}={value:.7g}" for name, value in zip(_GAIN_NAMES, gains))
         print(f"  {rank}. loss={candidate_losses[candidate_index]:.8f}  {gain_text}")
-    return candidate_values[jnp.asarray(best_indices)], candidate_losses[best_indices]
+    return candidate_values[jnp.asarray(best_indices)], candidate_losses[best_indices], best_indices
 
 
 def _run_adam_optimizer(
@@ -266,11 +273,21 @@ def optimize_controller_gains(
 ):
     """Single-stage joint optimization of base gains and the gain schedule.
 
-    The trainable vector is ``[gain_values(5), W_flat(num_w)]``. LHS presearch and
-    multistart operate on the gain part with ``W = 0`` (so the presearch is exactly
-    the old static-gain search). Adam then refines base gains and ``W`` jointly.
-    When ``schedule_enabled`` is False, ``num_w = 0`` and ``W`` is fixed at zero,
-    reproducing the static controller.
+    The trainable vector is ``[gain_values(5), parametrization_flat(num_w)]``. LHS
+    presearch and multistart operate on the gain part with zero parametrization
+    parameters (so the presearch is exactly the old static-gain search). Adam then
+    refines base gains and the parametrization jointly.
+    When ``schedule_enabled`` is False, ``num_w = 0`` and the parametrization is
+    fixed at its identity mapping, reproducing the static controller.
+
+    ``init_gains`` may be a single 5-gain vector or a batch ``(N, 5)`` of them
+    (each becomes its own candidate/start).
+
+    Returns a dict with the best start's gains/parametrization plus the raw
+    per-start loss histories and selection metadata (``best_start_index``,
+    ``start_candidate_indices``, ``final_gains_per_start``) so callers can
+    chain stages and report lineage-consistent histories; use
+    :func:`histories_for_start` to extract one start's history lists.
     """
     if k_min_stab <= 0.0:
         raise ValueError("k_min_stab must be positive for log-space optimization.")
@@ -283,7 +300,7 @@ def optimize_controller_gains(
     if num_adam_optimizations <= 0:
         raise ValueError("num_adam_optimizations must be positive.")
 
-    num_w = int(schedule_template.W.size) if schedule_enabled else 0
+    num_w = gain_parametrization_num_params(schedule_template) if schedule_enabled else 0
 
     replay_robot_keys = jax.random.split(pipeline.robot_key, num_realizations)
     replay_estimator_keys = jax.random.split(pipeline.estimator_key, num_realizations)
@@ -332,13 +349,14 @@ def optimize_controller_gains(
         )
     else:
         print(f"Starting initial gain candidate evaluation (LHS disabled; gain schedule {schedule_state}).")
-    initial_values, initial_losses = _select_initial_optimizer_values(
+    initial_values, initial_losses, start_candidate_indices = _select_initial_optimizer_values(
         candidate_values=candidate_values,
         loss_for_optimizer_values=loss_for_optimizer_values,
         num_adam_optimizations=num_adam_optimizations,
         k_min_stab=k_min_stab,
         k_max_stab=k_max_stab,
         k_max_rest=k_max_rest,
+        lhs_enabled=num_lhs_points > 0,
     )
     final_values, loss_history, validation_loss_history, loss_terms_history, validation_terms_history = _run_adam_optimizer(
         initial_values=initial_values,
@@ -352,31 +370,45 @@ def optimize_controller_gains(
     final_losses = loss_history[-1]
     best_index = int(np.argmin(final_losses))
     best_values = final_values[best_index]
-    best_gains = _controller_gains_from_optimizer_values(
-        best_values[:_NUM_GAINS], k_min_stab=k_min_stab, k_max_stab=k_max_stab, k_max_rest=k_max_rest
+    final_gains_per_start = _controller_gains_from_optimizer_values(
+        final_values[:, :_NUM_GAINS], k_min_stab=k_min_stab, k_max_stab=k_max_stab, k_max_rest=k_max_rest
     )
+    best_gains = final_gains_per_start[best_index]
     if schedule_enabled:
-        best_schedule_params = with_flat_W(best_values[_NUM_GAINS:], schedule_template)
+        best_schedule_params = with_flat_params(best_values[_NUM_GAINS:], schedule_template)
     else:
         best_schedule_params = None
 
-    selected_validation_history = None
-    if validation_loss_history is not None:
-        selected_validation_history = validation_loss_history[:, best_index].tolist()
-    selected_loss_terms_history = loss_terms_history[:, best_index, :]
-    selected_validation_terms_history = None
-    if validation_terms_history is not None:
-        selected_validation_terms_history = validation_terms_history[:, best_index, :]
-    return (
-        best_gains,
-        best_schedule_params,
-        loss_history[:, best_index].tolist(),
-        selected_validation_history,
-        {name: selected_loss_terms_history[:, index].tolist() for index, name in enumerate(_LOSS_COMPONENT_NAMES)},
-        None
-        if selected_validation_terms_history is None
-        else {
-            name: selected_validation_terms_history[:, index].tolist()
+    return {
+        "gains": best_gains,
+        "schedule_params": best_schedule_params,
+        "final_gains_per_start": final_gains_per_start,
+        "best_start_index": best_index,
+        "start_candidate_indices": np.asarray(start_candidate_indices, dtype=int),
+        "loss_history_per_start": loss_history,
+        "validation_loss_history_per_start": validation_loss_history,
+        "loss_terms_history_per_start": loss_terms_history,
+        "validation_loss_terms_history_per_start": validation_terms_history,
+    }
+
+
+def histories_for_start(optimization_result: dict, start_index: int):
+    """Extract one start's history lists from an optimization result dict.
+
+    Returns ``(loss_history, validation_loss_history, loss_component_history,
+    validation_loss_component_history)`` in the list/dict format consumed by
+    reporting and plotting.
+    """
+    loss_history = optimization_result["loss_history_per_start"][:, start_index].tolist()
+    validation_per_start = optimization_result["validation_loss_history_per_start"]
+    validation_loss_history = None if validation_per_start is None else validation_per_start[:, start_index].tolist()
+    terms = optimization_result["loss_terms_history_per_start"][:, start_index, :]
+    loss_component_history = {name: terms[:, index].tolist() for index, name in enumerate(_LOSS_COMPONENT_NAMES)}
+    validation_terms = optimization_result["validation_loss_terms_history_per_start"]
+    validation_loss_component_history = None
+    if validation_terms is not None:
+        validation_loss_component_history = {
+            name: validation_terms[:, start_index, index].tolist()
             for index, name in enumerate(_LOSS_COMPONENT_NAMES)
-        },
-    )
+        }
+    return loss_history, validation_loss_history, loss_component_history, validation_loss_component_history
