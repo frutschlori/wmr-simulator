@@ -1,0 +1,11 @@
+log: Pololu Data/Experiments/exp05/iteration_01/data/TR00.csv
+estimated_params:
+  wheel_radius: 0.01645231619477272
+  base_diameter: 0.08384523540735245
+  max_wheel_speed: 234.3783721923828
+  time_constant: 0.17864836752414703
+  a_slip_max: 3.547194719314575
+mocap_delay: 0.0
+mocap_delay_estimated: false
+final_loss: 0.021061429753899574
+final_motor_loss: 0.7410067319869995
