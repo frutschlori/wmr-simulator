@@ -89,7 +89,7 @@ class Controller:
         ir, il = ctrl_state
         ir += er * self.dt
         il += el * self.dt
-        # Keep motor PI gains in wheel-speed units for numerically stable gradients.
+        # control law
         ur_cmd = ur_ref + kp * er + ki * ir
         ul_cmd = ul_ref + kp * el + ki * il
         # ur_cmd = kp * er + ki * ir
