@@ -15,7 +15,6 @@ CLI stays responsive for bookkeeping commands like status.
 from __future__ import annotations
 
 import shutil
-from contextlib import contextmanager
 from pathlib import Path
 
 from wmr_simulator.active_learning.experiment import (
@@ -105,27 +104,6 @@ def _initialize_iteration(experiment: Experiment, iteration: int, robot_config: 
     if gainmlp_path is not None:
         print(f"  firmware gain-MLP for the robot: {gainmlp_path}")
     return paths
-
-
-@contextmanager
-def _gain_tuning_device(prefer_gpu: bool):
-    """Run the enclosed gain-tuning rollout on the GPU when requested and one is
-    available, else on the process default (CPU). JAX must have been started with
-    the CUDA backend initialized (see scripts/run_active_learning.py)."""
-    if prefer_gpu:
-        import jax
-
-        try:
-            gpu = jax.devices("gpu")[0]
-        except RuntimeError:
-            gpu = None
-        if gpu is not None:
-            print(f"Gain tuning on GPU: {gpu}.")
-            with jax.default_device(gpu):
-                yield
-            return
-        print("Gain tuning requested the GPU but no GPU backend is available; using the CPU.")
-    yield
 
 
 def _export_gain_mlp_if_configured(problem_path: Path, output_path: Path) -> Path | None:
@@ -630,35 +608,34 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
 
     robot_params = resolve_gain_robot_params(str(problem_path), None, None)
     print_physical_params("Robot parameters for gain tuning:", robot_params)
-    with _gain_tuning_device(bool(experiment.config["gain_tuning_on_gpu"])):
-        result = run_gain_tuning_experiment(
-            problem_path=str(problem_path),
-            robot_params=robot_params,
-            num_steps=int(config["steps"]),
-            learning_rate=float(config["learning_rate"]),
-            num_realizations=int(config["num_realizations"]),
-            seed=int(experiment.config["seed"]),
-            reference_trajectories_dir=str(paths.tuning_trajectories_dir),
-            validation_split=float(config["validation_split"]),
-            velocity_tracking_weight=float(config["velocity_tracking_weight"]),
-            input_weight=float(config["input_weight"]),
-            input_delta_weight=float(config["input_delta_weight"]),
-            k_min_stab=float(config["k_min_stab"]),
-            k_max_stab=float(config["k_max_stab"]),
-            k_max_rest=float(config["k_max_rest"]),
-            num_lhs_points=int(config["num_lhs_points"]),
-            num_adam_optimizations=int(config["num_adam_optimizations"]),
-            schedule_enabled=config.get("gain_parametrization", config.get("gain_schedule")),
-            gain_delta_weight=float(config["gain_delta_weight"]),
-            static_pretune=bool(config["static_pretune"]),
-            static_pretune_steps=int(config["static_pretune_steps"]),
-            static_pretune_learning_rate=float(config["static_pretune_learning_rate"]),
-            # Iteration 1 has no prior result to refine from: search the full
-            # presearch range instead of a band around the base gains.
-            presearch_relative_range=0.0 if iteration <= 1 else float(refine["presearch_relative_range"]),
-            warm_start_schedule=bool(refine["warm_start_schedule"]),
-            residual_model=residual_model,
-        )
+    result = run_gain_tuning_experiment(
+        problem_path=str(problem_path),
+        robot_params=robot_params,
+        num_steps=int(config["steps"]),
+        learning_rate=float(config["learning_rate"]),
+        num_realizations=int(config["num_realizations"]),
+        seed=int(experiment.config["seed"]),
+        reference_trajectories_dir=str(paths.tuning_trajectories_dir),
+        validation_split=float(config["validation_split"]),
+        velocity_tracking_weight=float(config["velocity_tracking_weight"]),
+        input_weight=float(config["input_weight"]),
+        input_delta_weight=float(config["input_delta_weight"]),
+        k_min_stab=float(config["k_min_stab"]),
+        k_max_stab=float(config["k_max_stab"]),
+        k_max_rest=float(config["k_max_rest"]),
+        num_lhs_points=int(config["num_lhs_points"]),
+        num_adam_optimizations=int(config["num_adam_optimizations"]),
+        schedule_enabled=config.get("gain_parametrization", config.get("gain_schedule")),
+        gain_delta_weight=float(config["gain_delta_weight"]),
+        static_pretune=bool(config["static_pretune"]),
+        static_pretune_steps=int(config["static_pretune_steps"]),
+        static_pretune_learning_rate=float(config["static_pretune_learning_rate"]),
+        # Iteration 1 has no prior result to refine from: search the full
+        # presearch range instead of a band around the base gains.
+        presearch_relative_range=0.0 if iteration <= 1 else float(refine["presearch_relative_range"]),
+        warm_start_schedule=bool(refine["warm_start_schedule"]),
+        residual_model=residual_model,
+    )
     pipeline = result["pipeline"]
     print_controller_gains("Optimized gains:", result["optimized_gains"])
     print(f"Final tuning loss: {float(result['loss_history'][-1]):.8f}")

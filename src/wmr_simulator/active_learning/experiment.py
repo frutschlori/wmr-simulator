@@ -45,11 +45,6 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
     # (gain_tuning.defaults.GAIN_TUNING_DEFAULTS) instead of the gain_tuning
     # block below, so the two entry points can share one set of values.
     "use_standalone_gain_tuning_defaults": False,
-    # Run the gain-tuning rollout on the GPU when one is available (~2x faster);
-    # the other stages stay on the CPU. Falls back to the CPU with a notice when
-    # no GPU backend is present. See scripts/run_active_learning.py for the
-    # process-global platform setup.
-    "gain_tuning_on_gpu": True,
     # Static baselines, used when optimize_trajectories is false.
     "baseline_identification_trajectory": None,  # reference pickle path
     "baseline_tuning_trajectories_dir": None,    # directory with reference pickles

@@ -47,7 +47,7 @@ controller:
     scheduled_indices: [0, 1, 2, 3, 4] # kx, ky, kth; motor PI gains stay static ([0,1,2,3,4] schedules all)
     bound: 5.0             # upper factor bound, clipped to >= 1 when applied
     learn_bound: false     # true adds the bound to the trainable vector
-    spectral_norm_cap: 1.0 # per-matrix spectral norm cap, 0 disables
+    spectral_norm_cap: 2 # per-matrix spectral norm cap, 0 disables
 robot:
   type: differential_drive
   wheel_radius: 0.01595   # m
@@ -66,9 +66,9 @@ estimator:
   type: "kf"              # estimator type: "kf" (Kalman Filter) or "dr" (Dead Reckoning)
   wheel_radius: 0.016     # estimator's wheel_radius [m]
   base_diameter: 0.078    # estimator's base_diameter [m]
-  noise_pos: 0.002        # position measurement noise [m] (from mocap almost no noise)
+  noise_pos: 0.001        # position measurement noise [m] (from mocap almost no noise)
   noise_angle: 0.035      # orientation noise [rad] ~  2 degrees
-  enc_angle_noise: 0.01   # encoder noise [rad]
+  enc_angle_noise: 0.07  # encoder noise [rad]
   wheel_lp_tau: 0.05      # [s] first-order low-pass on encoder wheel speeds fed to the controller (mirrors firmware; ~30 ms lag). 0 disables.
 
   proc_pos_std: 0.001     # [m]   process noise on x,y per step

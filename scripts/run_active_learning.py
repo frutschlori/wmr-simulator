@@ -36,48 +36,15 @@ rerun an earlier one; delete a stage's outputs to force a rerun under `run`):
     python scripts/run_active_learning.py finalize                --experiment experiments/exp01
 
 Stage hyperparameters live in experiments/exp01/experiment.yaml (editable
-between stages). Every stage runs on the CPU except gain tuning, which uses the
-GPU when one is present (~2x faster; toggle with gain_tuning_on_gpu in
-experiment.yaml). Set JAX_PLATFORMS explicitly to override the platform choice.
+between stages). Set JAX_PLATFORMS=gpu to run the optimization stages on the GPU.
 """
 
 from __future__ import annotations
 
 import argparse
 import os
-import shutil
-import subprocess
-import sys
 
-# Gain tuning benefits from the GPU while the other stages are launch-bound and
-# stay on the CPU. JAX's platform selection is process-global and fixed at first
-# use, so keep the CPU as the default backend (the other stages are unchanged)
-# and additionally initialize the CUDA backend for the tuning-capable commands
-# when a GPU is present; stage_tune_gains then places its rollout on it.
-_GPU_CAPABLE_COMMANDS = {"tune-gains", "run"}
-
-
-def _has_cuda_gpu() -> bool:
-    if not shutil.which("nvidia-smi"):
-        return False
-    try:
-        result = subprocess.run(["nvidia-smi", "-L"], capture_output=True, text=True, timeout=5)
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return result.returncode == 0 and "GPU" in result.stdout
-
-
-def _configure_jax_platforms(argv: list[str]) -> None:
-    if os.environ.get("JAX_PLATFORMS"):
-        return  # explicit user override wins
-    command = argv[1] if len(argv) > 1 else ""
-    if command in _GPU_CAPABLE_COMMANDS and _has_cuda_gpu():
-        os.environ["JAX_PLATFORMS"] = "cpu,cuda"
-    else:
-        os.environ["JAX_PLATFORMS"] = "cpu"
-
-
-_configure_jax_platforms(sys.argv)
+os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 from wmr_simulator.active_learning import stages
 from wmr_simulator.active_learning.experiment import Experiment
