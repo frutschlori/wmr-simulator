@@ -90,8 +90,10 @@ class Controller:
         ir += er * self.dt
         il += el * self.dt
         # Keep motor PI gains in wheel-speed units for numerically stable gradients.
-        ur_cmd = ur_ref + kp * er + ki * ir
-        ul_cmd = ul_ref + kp * el + ki * il
+        # ur_cmd = ur_ref + kp * er + ki * ir
+        # ul_cmd = ul_ref + kp * el + ki * il
+        ur_cmd = kp * er + ki * ir
+        ul_cmd = kp * el + ki * il
         # Map to duty cycles for the motor model.
         duty_r = ur_cmd / motor_gain
         duty_l = ul_cmd / motor_gain
