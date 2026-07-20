@@ -71,6 +71,11 @@ def with_flat_params(theta: jax.Array, template: BoundedReferenceParams) -> Boun
     return template._replace(W=W)
 
 
+def flat_params(params: BoundedReferenceParams) -> jax.Array:
+    """Flat vector reproducing ``params`` via :func:`with_flat_params`."""
+    return params.W.reshape(-1)
+
+
 def zero_params(template: BoundedReferenceParams) -> BoundedReferenceParams:
     """Identity scheduler with the same fixed config as ``template``."""
     return template._replace(W=jnp.zeros_like(template.W))

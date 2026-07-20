@@ -13,11 +13,15 @@ def plot_logged_summary(
     imu_time_s: np.ndarray | None = None,
     imu_gyro_z: np.ndarray | None = None,
     show_gains: bool = False,
+    gains: np.ndarray | None = None,
 ) -> Path:
     """Six-panel overview of one log; ``imu_gyro_z`` (rad/s, see
     pololu.log_loader.load_imu_gyro_z) is overlaid on the mocap omega.
     ``show_gains`` overlays the applied controller gains (``log.pose.gains``,
-    simulated logs only) on the wheel-speed and state subplots."""
+    simulated logs only) on the wheel-speed and state subplots. ``gains``
+    (``(num_commands, num_gains)``, at the command timestamps) overrides that
+    source -- used for recorded logs whose gains are reconstructed offline from
+    the gain parametrization (pololu.gain_reconstruction)."""
     plt = _plot_module()
 
     out_dir = Path(out_dir)
@@ -137,8 +141,11 @@ def plot_logged_summary(
 
     # Applied controller gains along the run (time-varying under a gain
     # parametrization): motor PI gains here, outer gains on the state subplots.
-    gains_log = getattr(log.pose, "gains", None)
-    gains_log = None if (not show_gains or gains_log is None) else np.asarray(gains_log, dtype=float)
+    if gains is not None:
+        gains_log = np.asarray(gains, dtype=float)
+    else:
+        gains_log = getattr(log.pose, "gains", None)
+        gains_log = None if (not show_gains or gains_log is None) else np.asarray(gains_log, dtype=float)
     if gains_log is not None:
         ax_wheel_gains = ax_wheels.twinx()
         for column, label, style in ((3, r"$k_p$ motor", "-"), (4, r"$k_i$ motor", "--")):

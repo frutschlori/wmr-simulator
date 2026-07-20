@@ -4,6 +4,7 @@ import numpy as np
 import optax
 from jax_tqdm import scan_tqdm
 
+from wmr_simulator.gain_parametrization import flat_params as gain_parametrization_flat_params
 from wmr_simulator.gain_parametrization import num_params as gain_parametrization_num_params
 from wmr_simulator.gain_parametrization import with_flat_params, zero_params
 from wmr_simulator.gain_tuning.objectives import (
@@ -71,22 +72,65 @@ def _with_motor_zero_variants(values: jax.Array) -> jax.Array:
     return jnp.concatenate([values, zero_i], axis=0)
 
 
-def _candidate_optimizer_values(pipeline, init_gain_values, num_w, num_lhs_points):
-    """Build candidate vectors of width (5 + num_w). LHS searches the gain part; W is 0.
+def _relative_lhs_values(unit_samples, center_values, relative_range, k_min_stab, k_max_stab, k_max_rest):
+    """Map unit LHS samples into a per-gain band of +/- ``relative_range`` around
+    the center gains (in gain space), returned as optimizer values.
+
+    The gain transform is monotonic, so the gain-space band maps to a per-dim
+    optimizer-space box; a disabled gain (0) keeps a zero-width band.
+    """
+    center_gains = _controller_gains_from_optimizer_values(
+        center_values, k_min_stab=k_min_stab, k_max_stab=k_max_stab, k_max_rest=k_max_rest
+    )
+    lo_values = _controller_gains_to_optimizer_values(
+        center_gains * (1.0 - relative_range), k_min_stab=k_min_stab, k_max_stab=k_max_stab, k_max_rest=k_max_rest
+    )
+    hi_values = _controller_gains_to_optimizer_values(
+        center_gains * (1.0 + relative_range), k_min_stab=k_min_stab, k_max_stab=k_max_stab, k_max_rest=k_max_rest
+    )
+    return lo_values + unit_samples * (hi_values - lo_values)
+
+
+def _candidate_optimizer_values(
+    pipeline,
+    init_gain_values,
+    num_w,
+    num_lhs_points,
+    presearch_relative_range=0.0,
+    k_min_stab=1e-3,
+    k_max_stab=20.0,
+    k_max_rest=20.0,
+    w_init=None,
+):
+    """Build candidate vectors of width (5 + num_w). LHS searches the gain part.
 
     ``init_gain_values`` may hold several rows (e.g. the per-start results of a
-    static pretune stage); each becomes its own candidate.
+    static pretune stage); each becomes its own candidate. When
+    ``presearch_relative_range`` > 0 the LHS samples a +/- band around the (first)
+    init gains instead of the full [k_min_stab, k_max_stab] range. The
+    parametrization part starts at ``w_init`` (identity when None).
     """
     init_gain_values = jnp.atleast_2d(init_gain_values)
     if num_lhs_points <= 0:
         gain_candidates = init_gain_values
     else:
         lhs_key = jax.random.fold_in(pipeline.robot_key, 1729)
-        lhs_values = _latin_hypercube_samples(lhs_key, num_lhs_points, _NUM_GAINS)
+        lhs_unit = _latin_hypercube_samples(lhs_key, num_lhs_points, _NUM_GAINS)
+        if presearch_relative_range and presearch_relative_range > 0.0:
+            lhs_values = _relative_lhs_values(
+                lhs_unit, init_gain_values[0], presearch_relative_range, k_min_stab, k_max_stab, k_max_rest
+            )
+        else:
+            lhs_values = lhs_unit
         base_values = jnp.concatenate([init_gain_values, lhs_values], axis=0)
         gain_candidates = _with_motor_zero_variants(base_values)
-    w_zeros = jnp.zeros((gain_candidates.shape[0], num_w), dtype=jnp.float32)
-    return jnp.concatenate([gain_candidates, w_zeros], axis=-1)
+    if w_init is None:
+        w_part = jnp.zeros((gain_candidates.shape[0], num_w), dtype=jnp.float32)
+    else:
+        w_part = jnp.broadcast_to(
+            jnp.asarray(w_init, dtype=jnp.float32).reshape(1, num_w), (gain_candidates.shape[0], num_w)
+        )
+    return jnp.concatenate([gain_candidates, w_part], axis=-1)
 
 
 def _make_terms_for_values(
@@ -268,6 +312,8 @@ def optimize_controller_gains(
     k_max_rest: float = 20.0,
     num_lhs_points: int = 0,
     num_adam_optimizations: int = 1,
+    presearch_relative_range: float = 0.0,
+    warm_start_schedule: bool = False,
     training_reference_trajectories: jax.Array | None = None,
     validation_reference_trajectories: jax.Array | None = None,
 ):
@@ -337,15 +383,33 @@ def optimize_controller_gains(
     init_gain_values = _controller_gains_to_optimizer_values(
         init_gains, k_min_stab=k_min_stab, k_max_stab=k_max_stab, k_max_rest=k_max_rest
     )
+    # Warm-start the parametrization from the template (e.g. the previous
+    # iteration's trained schedule) instead of the identity mapping.
+    w_init = gain_parametrization_flat_params(schedule_template) if (schedule_enabled and warm_start_schedule) else None
     candidate_values = _candidate_optimizer_values(
-        pipeline=pipeline, init_gain_values=init_gain_values, num_w=num_w, num_lhs_points=num_lhs_points
+        pipeline=pipeline,
+        init_gain_values=init_gain_values,
+        num_w=num_w,
+        num_lhs_points=num_lhs_points,
+        presearch_relative_range=presearch_relative_range,
+        k_min_stab=k_min_stab,
+        k_max_stab=k_max_stab,
+        k_max_rest=k_max_rest,
+        w_init=w_init,
     )
+    if w_init is not None:
+        print("Warm-starting the gain parametrization from the template (previous result).")
     schedule_state = "enabled" if schedule_enabled else "disabled"
     if num_lhs_points > 0:
+        band = (
+            f"+/-{100.0 * presearch_relative_range:.0f}% around the init gains"
+            if presearch_relative_range and presearch_relative_range > 0.0
+            else "full [k_min_stab, k_max_stab] range"
+        )
         print(
             "Starting LHS candidate evaluation "
             f"({num_lhs_points} LHS points * (1, ki=0) = {candidate_values.shape[0]} candidates; "
-            f"gain schedule {schedule_state})."
+            f"presearch {band}; gain schedule {schedule_state})."
         )
     else:
         print(f"Starting initial gain candidate evaluation (LHS disabled; gain schedule {schedule_state}).")

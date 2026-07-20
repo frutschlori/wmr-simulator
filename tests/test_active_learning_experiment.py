@@ -1,7 +1,11 @@
+import json
+
+import numpy as np
 import yaml
 
 from wmr_simulator.active_learning.experiment import Experiment, load_yaml
 from wmr_simulator.active_learning.stages import iteration_status, stage_finalize, stage_init
+from wmr_simulator.pololu.gain_mlp_exporter import reference_forward
 from wmr_simulator.pololu.robot_config import load_robot_config_file
 
 PROBLEM = "problems/pololu_gains.yaml"
@@ -37,6 +41,12 @@ def test_init_creates_iteration_scaffolding(tmp_path):
     assert firmware["kx_traj"] == problem_cfg["controller"]["gains"][0]
     expected_kp_inner = problem_cfg["controller"]["gains"][3] / problem_cfg["robot"]["max_wheel_speed"]
     assert abs(firmware["kp_inner"] - expected_kp_inner) < 1e-9
+
+    # The base problem enables the error-MLP schedule, so its firmware network
+    # is exported next to ROBOTCFG.CFG (identity network before any tuning).
+    assert paths.gainmlp_jsn.is_file()
+    network = json.loads(paths.gainmlp_jsn.read_text())
+    assert network["kind"] == "error_mlp"
 
     status = iteration_status(experiment, 1)
     assert not status["identify"]
@@ -84,3 +94,31 @@ def test_finalize_rolls_results_into_next_iteration(tmp_path):
 
     experiment_reloaded = Experiment.load(experiment.root)
     assert experiment_reloaded.resolve_iteration(None) == 2
+
+
+def test_finalize_exports_trained_gain_mlp(tmp_path):
+    experiment = stage_init(tmp_path / "exp", {"problem": PROBLEM})
+    paths = experiment.paths(1)
+
+    tuned = load_yaml("models/tuned_gains.yaml")
+    identification = {"estimated_params": load_yaml(paths.robot_config)["robot"]}
+    gains = {
+        "gains": [float(gain) for gain in tuned["gains"]],
+        "schedule_enabled": True,
+        "schedule": tuned["schedule"],
+    }
+    with paths.identification_result.open("w") as file:
+        yaml.safe_dump(identification, file)
+    with paths.gains_result.open("w") as file:
+        yaml.safe_dump(gains, file)
+
+    next_paths = stage_finalize(experiment, 1)
+
+    assert next_paths.gainmlp_jsn.is_file()
+    network = json.loads(next_paths.gainmlp_jsn.read_text())
+    assert network["kind"] == "error_mlp"
+    # A trained schedule must produce non-identity factors on the robot.
+    factors = reference_forward(
+        network, ref=[0.3, -0.2, 0.5, 0.4, 1.0], pose=[0.1, 0.0, 0.2], twist=[0.3, 0.8]
+    )
+    assert np.any(np.abs(factors - 1.0) > 1e-3)

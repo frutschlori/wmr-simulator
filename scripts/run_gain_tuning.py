@@ -2,6 +2,7 @@ import os
 # os.environ["JAX_PLATFORMS"] = "cpu"
 
 import argparse
+from wmr_simulator.gain_tuning.defaults import GAIN_TUNING_DEFAULTS
 from wmr_simulator.gain_tuning.pipeline import (resolve_gain_robot_params, run_gain_tuning_experiment)
 from wmr_simulator.types import print_controller_gains, print_physical_params
 from wmr_simulator.visualization.gain_tuning import (
@@ -60,37 +61,42 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--problem", type=str, default="problems/pololu_gains.yaml")
     parser.add_argument("--reference-trajectories-dir", type=str, default="trajectory_exports/tuning_optimized_5000it")
-    parser.add_argument("--validation-split", type=float, default=0.2)
+    parser.add_argument("--validation-split", type=float, default=GAIN_TUNING_DEFAULTS["validation_split"])
     # Optimization hyper-parameters
-    parser.add_argument("--num-lhs-points", type=int, default=250) # points on initial search grid, 0 to disable
-    parser.add_argument("--num-adam-optimizations", type=int, default=10) # number of best candidates to refine
-    parser.add_argument("--steps", type=int, default=1000)                 # adam steps
-    parser.add_argument("--learning-rate", type=float, default=5e-5)      # adam learning rate
-    parser.add_argument("--num-realizations", type=int, default=4) # noise realizations over 1 trajectory
+    parser.add_argument("--num-lhs-points", type=int, default=GAIN_TUNING_DEFAULTS["num_lhs_points"]) # points on initial search grid, 0 to disable
+    parser.add_argument("--num-adam-optimizations", type=int, default=GAIN_TUNING_DEFAULTS["num_adam_optimizations"]) # number of best candidates to refine
+    parser.add_argument("--steps", type=int, default=GAIN_TUNING_DEFAULTS["steps"])                 # adam steps
+    parser.add_argument("--learning-rate", type=float, default=GAIN_TUNING_DEFAULTS["learning_rate"])      # adam learning rate
+    parser.add_argument("--num-realizations", type=int, default=GAIN_TUNING_DEFAULTS["num_realizations"]) # noise realizations over 1 trajectory
     parser.add_argument("--seed", type=int, default=2)
     # Loss weights
-    parser.add_argument("--velocity-tracking-weight", type=float, default=1)
-    parser.add_argument("--input-weight", type=float, default=0.0)
-    parser.add_argument("--input-delta-weight", type=float, default=0.1)
+    parser.add_argument("--velocity-tracking-weight", type=float, default=GAIN_TUNING_DEFAULTS["velocity_tracking_weight"])
+    parser.add_argument("--input-weight", type=float, default=GAIN_TUNING_DEFAULTS["input_weight"])
+    parser.add_argument("--input-delta-weight", type=float, default=GAIN_TUNING_DEFAULTS["input_delta_weight"])
     # Gain bounds
-    parser.add_argument("--k-min-stab", type=float, default=1e-3)
-    parser.add_argument("--k-max-stab", type=float, default=50.0)
-    parser.add_argument("--k-max-rest", type=float, default=20.0)
+    parser.add_argument("--k-min-stab", type=float, default=GAIN_TUNING_DEFAULTS["k_min_stab"])
+    parser.add_argument("--k-max-stab", type=float, default=GAIN_TUNING_DEFAULTS["k_max_stab"])
+    parser.add_argument("--k-max-rest", type=float, default=GAIN_TUNING_DEFAULTS["k_max_rest"])
     # Optional overwrite of robot model parameters
     parser.add_argument("--fixed-wheel-radius", type=float, default=None)
     parser.add_argument("--fixed-base-diameter", type=float, default=None)
     parser.add_argument("--num-summary-training-trajectories", type=int, default=None)
     # Gain schedule: jointly tune base gains + outer-gain schedule (W), default follows problem yaml, --no-gain-schedule forces W=0 (static)
-    parser.add_argument("--gain-schedule", action=argparse.BooleanOptionalAction, default=None)
-    parser.add_argument("--gain-delta-weight", type=float, default=0.0)
+    parser.add_argument("--gain-schedule", action=argparse.BooleanOptionalAction, default=GAIN_TUNING_DEFAULTS["gain_parametrization"])
+    parser.add_argument("--gain-delta-weight", type=float, default=GAIN_TUNING_DEFAULTS["gain_delta_weight"])
     # Two-stage tuning: run the full static routine (LHS + multistart Adam on the
     # base gains only) first, then train the parametrization on top of its optimum.
     # The static stage takes its own step count / learning rate (defaults to
     # --steps / --learning-rate); the parametrization stage uses --steps and
     # --learning-rate, which typically wants a lower rate than the static search.
-    parser.add_argument("--static-pretune", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--static-pretune-steps", type=int, default=500)
-    parser.add_argument("--static-pretune-learning-rate", type=float, default=1e-4)
+    parser.add_argument("--static-pretune", action=argparse.BooleanOptionalAction, default=GAIN_TUNING_DEFAULTS["static_pretune"])
+    parser.add_argument("--static-pretune-steps", type=int, default=GAIN_TUNING_DEFAULTS["static_pretune_steps"])
+    parser.add_argument("--static-pretune-learning-rate", type=float, default=GAIN_TUNING_DEFAULTS["static_pretune_learning_rate"])
+    # Refine from a prior result: narrow the static LHS presearch to a +/- band
+    # around the problem's gains, and/or warm-start the parametrization from the
+    # problem's gain_parametrization (theta) instead of the identity mapping.
+    parser.add_argument("--presearch-relative-range", type=float, default=GAIN_TUNING_DEFAULTS["presearch_relative_range"])
+    parser.add_argument("--warm-start-schedule", action=argparse.BooleanOptionalAction, default=GAIN_TUNING_DEFAULTS["warm_start_schedule"])
     # Learned residual dynamics checkpoint (scripts/train_residual_model.py); tuning
     # then rolls out the residual-augmented dynamics (model params stay fixed).
     # parser.add_argument("--residual-model", type=str, default="models/residual_pololu.pkl")
@@ -132,6 +138,8 @@ def main():
         static_pretune=args.static_pretune,
         static_pretune_steps=args.static_pretune_steps,
         static_pretune_learning_rate=args.static_pretune_learning_rate,
+        presearch_relative_range=args.presearch_relative_range,
+        warm_start_schedule=args.warm_start_schedule,
     )
     pipeline = result["pipeline"]
     print_physical_params("Robot parameters used for gain tuning:", robot_params)
