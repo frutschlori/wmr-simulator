@@ -606,6 +606,10 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
         print("Gain tuning: using standalone run_gain_tuning.py defaults (GAIN_TUNING_DEFAULTS).")
     else:
         config = experiment.config["gain_tuning"]
+    # The cross-iteration refinement policy (presearch band + MLP warm-start) is
+    # active-learning intent and always comes from the experiment's own
+    # gain_tuning block, independent of the standalone hyperparameter swap above.
+    refine = experiment.config["gain_tuning"]
     problem_path = _identified_problem(paths)
     if not any(paths.tuning_trajectories_dir.glob("*.pkl")):
         raise FileNotFoundError(
@@ -651,8 +655,8 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
             static_pretune_learning_rate=float(config["static_pretune_learning_rate"]),
             # Iteration 1 has no prior result to refine from: search the full
             # presearch range instead of a band around the base gains.
-            presearch_relative_range=0.0 if iteration <= 1 else float(config["presearch_relative_range"]),
-            warm_start_schedule=bool(config["warm_start_schedule"]),
+            presearch_relative_range=0.0 if iteration <= 1 else float(refine["presearch_relative_range"]),
+            warm_start_schedule=bool(refine["warm_start_schedule"]),
             residual_model=residual_model,
         )
     pipeline = result["pipeline"]
