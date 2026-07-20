@@ -15,6 +15,7 @@ CLI stays responsive for bookkeeping commands like status.
 from __future__ import annotations
 
 import shutil
+from contextlib import contextmanager
 from pathlib import Path
 
 from wmr_simulator.active_learning.experiment import (
@@ -100,7 +101,53 @@ def _initialize_iteration(experiment: Experiment, iteration: int, robot_config: 
         controller_gains=robot_config["controller"]["gains"],
         template_path=experiment.config.get("robotcfg_template"),
     )
+    gainmlp_path = _export_gain_mlp_if_configured(paths.problem, paths.gainmlp_jsn)
+    if gainmlp_path is not None:
+        print(f"  firmware gain-MLP for the robot: {gainmlp_path}")
     return paths
+
+
+@contextmanager
+def _gain_tuning_device(prefer_gpu: bool):
+    """Run the enclosed gain-tuning rollout on the GPU when requested and one is
+    available, else on the process default (CPU). JAX must have been started with
+    the CUDA backend initialized (see scripts/run_active_learning.py)."""
+    if prefer_gpu:
+        import jax
+
+        try:
+            gpu = jax.devices("gpu")[0]
+        except RuntimeError:
+            gpu = None
+        if gpu is not None:
+            print(f"Gain tuning on GPU: {gpu}.")
+            with jax.default_device(gpu):
+                yield
+            return
+        print("Gain tuning requested the GPU but no GPU backend is available; using the CPU.")
+    yield
+
+
+def _export_gain_mlp_if_configured(problem_path: Path, output_path: Path) -> Path | None:
+    """Export the error-MLP gain parametrization to GAINMLP.JSN for the robot.
+
+    No-op unless the generated iteration problem enables an ``error_mlp`` gain
+    parametrization; the factors are multiplicative so the file sits next to
+    ROBOTCFG.CFG on the SD card and scales the firmware base gains it holds.
+    """
+    from wmr_simulator.gain_parametrization import error_mlp, params_from_cfg, parametrization_kind
+
+    problem_cfg = load_yaml(problem_path)
+    cfg = problem_cfg["controller"].get("gain_parametrization")
+    if cfg is None or not cfg.get("enabled", False) or parametrization_kind(cfg) != error_mlp.KIND:
+        return None
+
+    from wmr_simulator.pololu.gain_mlp_exporter import export_gain_mlp
+
+    robot_cfg = problem_cfg["robot"]
+    feature_scale = [robot_cfg["v_max"], robot_cfg["omega_max"]]
+    params = params_from_cfg(cfg, feature_scale)
+    return export_gain_mlp(output_path, params)
 
 
 # ---------------------------------------------------------------------------
@@ -293,6 +340,7 @@ def _plot_log_summaries(experiment: Experiment, paths: IterationPaths) -> None:
 
     clip = experiment.config["log_loading"]["clip_after_first_trajectory"]
     plot_dir = paths.visualize_dir / "logs"
+    base_gains, gain_params = _log_gain_parametrization(paths)
     for log_path in _list_log_csvs(paths):
         if (plot_dir / f"{log_path.stem}.pdf").exists():
             continue
@@ -302,14 +350,38 @@ def _plot_log_summaries(experiment: Experiment, paths: IterationPaths) -> None:
         except ValueError as error:
             print(f"Log summary plot skipped for {log_path.name}: {error}")
             continue
+        # Recover the applied (scheduled) gains offline; the firmware does not log them.
+        gains = None
+        if gain_params is not None:
+            from wmr_simulator.pololu.gain_reconstruction import applied_gains_over_log
+
+            gains = applied_gains_over_log(log, base_gains, gain_params)
         plot_path = plot_logged_summary(
             log,
             out_prefix=log_path.stem,
             out_dir=plot_dir,
             imu_time_s=imu_time,
             imu_gyro_z=imu_gyro_z,
+            gains=gains,
         )
         print(f"Log summary plot: {plot_path}")
+
+
+def _log_gain_parametrization(paths: IterationPaths):
+    """Base gains + enabled gain parametrization used to record this iteration's
+    logs (``None`` params when no parametrization is enabled)."""
+    problem_cfg = load_yaml(paths.problem)
+    controller = problem_cfg["controller"]
+    base_gains = [float(gain) for gain in controller["gains"]]
+    cfg = controller.get("gain_parametrization", controller.get("gain_schedule"))
+    if cfg is None or not cfg.get("enabled", False):
+        return base_gains, None
+
+    from wmr_simulator.gain_parametrization import params_from_cfg
+
+    robot = problem_cfg["robot"]
+    params = params_from_cfg(cfg, [robot["v_max"], robot["omega_max"]])
+    return base_gains, params
 
 
 def _list_log_csvs(paths: IterationPaths) -> list[Path]:
@@ -527,7 +599,13 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
     from wmr_simulator.visualization.identification import plot_loss_history
 
     paths = experiment.paths(iteration)
-    config = experiment.config["gain_tuning"]
+    if experiment.config["use_standalone_gain_tuning_defaults"]:
+        from wmr_simulator.gain_tuning.defaults import GAIN_TUNING_DEFAULTS
+
+        config = GAIN_TUNING_DEFAULTS
+        print("Gain tuning: using standalone run_gain_tuning.py defaults (GAIN_TUNING_DEFAULTS).")
+    else:
+        config = experiment.config["gain_tuning"]
     problem_path = _identified_problem(paths)
     if not any(paths.tuning_trajectories_dir.glob("*.pkl")):
         raise FileNotFoundError(
@@ -548,27 +626,35 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
 
     robot_params = resolve_gain_robot_params(str(problem_path), None, None)
     print_physical_params("Robot parameters for gain tuning:", robot_params)
-    result = run_gain_tuning_experiment(
-        problem_path=str(problem_path),
-        robot_params=robot_params,
-        num_steps=int(config["steps"]),
-        learning_rate=float(config["learning_rate"]),
-        num_realizations=int(config["num_realizations"]),
-        seed=int(experiment.config["seed"]),
-        reference_trajectories_dir=str(paths.tuning_trajectories_dir),
-        validation_split=float(config["validation_split"]),
-        velocity_tracking_weight=float(config["velocity_tracking_weight"]),
-        input_weight=float(config["input_weight"]),
-        input_delta_weight=float(config["input_delta_weight"]),
-        k_min_stab=float(config["k_min_stab"]),
-        k_max_stab=float(config["k_max_stab"]),
-        k_max_rest=float(config["k_max_rest"]),
-        num_lhs_points=int(config["num_lhs_points"]),
-        num_adam_optimizations=int(config["num_adam_optimizations"]),
-        schedule_enabled=config.get("gain_parametrization", config.get("gain_schedule")),
-        gain_delta_weight=float(config["gain_delta_weight"]),
-        residual_model=residual_model,
-    )
+    with _gain_tuning_device(bool(experiment.config["gain_tuning_on_gpu"])):
+        result = run_gain_tuning_experiment(
+            problem_path=str(problem_path),
+            robot_params=robot_params,
+            num_steps=int(config["steps"]),
+            learning_rate=float(config["learning_rate"]),
+            num_realizations=int(config["num_realizations"]),
+            seed=int(experiment.config["seed"]),
+            reference_trajectories_dir=str(paths.tuning_trajectories_dir),
+            validation_split=float(config["validation_split"]),
+            velocity_tracking_weight=float(config["velocity_tracking_weight"]),
+            input_weight=float(config["input_weight"]),
+            input_delta_weight=float(config["input_delta_weight"]),
+            k_min_stab=float(config["k_min_stab"]),
+            k_max_stab=float(config["k_max_stab"]),
+            k_max_rest=float(config["k_max_rest"]),
+            num_lhs_points=int(config["num_lhs_points"]),
+            num_adam_optimizations=int(config["num_adam_optimizations"]),
+            schedule_enabled=config.get("gain_parametrization", config.get("gain_schedule")),
+            gain_delta_weight=float(config["gain_delta_weight"]),
+            static_pretune=bool(config["static_pretune"]),
+            static_pretune_steps=int(config["static_pretune_steps"]),
+            static_pretune_learning_rate=float(config["static_pretune_learning_rate"]),
+            # Iteration 1 has no prior result to refine from: search the full
+            # presearch range instead of a band around the base gains.
+            presearch_relative_range=0.0 if iteration <= 1 else float(config["presearch_relative_range"]),
+            warm_start_schedule=bool(config["warm_start_schedule"]),
+            residual_model=residual_model,
+        )
     pipeline = result["pipeline"]
     print_controller_gains("Optimized gains:", result["optimized_gains"])
     print(f"Final tuning loss: {float(result['loss_history'][-1]):.8f}")

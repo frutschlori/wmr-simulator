@@ -136,6 +136,8 @@ class ControllerTuningPipeline(SimulationPipeline):
         k_max_rest: float = 20.0,
         num_lhs_points: int = 0,
         num_adam_optimizations: int = 1,
+        presearch_relative_range: float = 0.0,
+        warm_start_schedule: bool = False,
     ):
         return optimize_controller_gains(
             pipeline=self,
@@ -154,6 +156,8 @@ class ControllerTuningPipeline(SimulationPipeline):
             k_max_rest=k_max_rest,
             num_lhs_points=num_lhs_points,
             num_adam_optimizations=num_adam_optimizations,
+            presearch_relative_range=presearch_relative_range,
+            warm_start_schedule=warm_start_schedule,
             training_reference_trajectories=self.training_reference_trajectories,
             validation_reference_trajectories=self.validation_reference_trajectories,
         )
@@ -202,8 +206,17 @@ def run_gain_tuning_experiment(
     static_pretune: bool = False,
     static_pretune_steps: int | None = None,
     static_pretune_learning_rate: float | None = None,
+    presearch_relative_range: float = 0.0,
+    warm_start_schedule: bool = False,
 ):
     """Tune controller gains (optionally jointly with a gain parametrization).
+
+    ``presearch_relative_range`` (> 0) narrows the static LHS presearch to a
+    +/- band around the problem's current gains instead of the full
+    [k_min_stab, k_max_stab] range -- useful for refining across active-learning
+    iterations. ``warm_start_schedule`` initializes the parametrization from the
+    problem's gain_parametrization (e.g. the previous iteration's trained
+    schedule) rather than the identity mapping.
 
     With ``static_pretune`` and an enabled parametrization, the optimization is
     split in two stages: first the full static routine (LHS presearch +
@@ -246,6 +259,8 @@ def run_gain_tuning_experiment(
             k_max_rest=k_max_rest,
             num_lhs_points=stage_lhs_points,
             num_adam_optimizations=stage_adam_starts,
+            presearch_relative_range=presearch_relative_range,
+            warm_start_schedule=warm_start_schedule,
         )
 
     static_pretune = static_pretune and schedule_enabled

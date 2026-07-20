@@ -59,6 +59,24 @@ def apply(base_gains: jax.Array, params, ref_state: jax.Array, pose_est=None, tw
     raise ValueError(f"Unsupported gain parametrization params: {type(params).__name__}.")
 
 
+def gains_over_samples(base_gains, params, ref_states, pose_states, twist_states):
+    """Applied controller gains for a batch of geometry-step samples.
+
+    Vectorizes :func:`apply` over stacked ``ref_states`` ``(N, 8)``, ``pose_states``
+    ``(N, 3)`` and ``twist_states`` ``(N, 2)`` and returns ``(N, num_gains)``.
+    Reference-only parametrizations ignore the pose/twist inputs. This is the
+    offline counterpart to the gains a closed-loop rollout records: replaying it
+    on a recorded log's reference/pose/twist recovers the gains the on-robot
+    controller applied without logging them on the firmware.
+    """
+    import jax.numpy as jnp
+
+    base = jnp.asarray(base_gains)
+    return jax.vmap(lambda ref, pose, twist: apply(base, params, ref, pose, twist))(
+        jnp.asarray(ref_states), jnp.asarray(pose_states), jnp.asarray(twist_states)
+    )
+
+
 def outer_gains_over_refs(base_gains: jax.Array, params, reference_states: jax.Array) -> jax.Array:
     """Parametrized gains over a reference trajectory for diagnostics/penalties.
 
@@ -101,6 +119,19 @@ def zero_params(template):
     if isinstance(template, ErrorMlpParams):
         return error_mlp.zero_params(template)
     raise ValueError(f"Unsupported gain parametrization template: {type(template).__name__}.")
+
+
+def flat_params(params) -> jax.Array:
+    """Flat trainable vector reproducing ``params`` via :func:`with_flat_params`.
+
+    Used to warm-start tuning from an already-trained parametrization (e.g. the
+    previous active-learning iteration) rather than the identity mapping.
+    """
+    if isinstance(params, BoundedReferenceParams):
+        return bounded_reference.flat_params(params)
+    if isinstance(params, ErrorMlpParams):
+        return error_mlp.flat_params(params)
+    raise ValueError(f"Unsupported gain parametrization params: {type(params).__name__}.")
 
 
 def to_cfg(params) -> dict:
