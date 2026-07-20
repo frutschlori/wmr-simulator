@@ -67,7 +67,8 @@ class Controller:
         y_e = -(px_d - px) * np.sin(th) + (py_d - py) * np.cos(th)
         th_e = self.SO2_dist(th_d, th)
         v = v_d * np.cos(th_e) + kx * x_e
-        w = w_d + v_d * (ky * y_e + kth * np.sin(th_e)) + kth * th_e
+        # w = w_d + v_d * (ky * y_e + kth * np.sin(th_e)) + kth * th_e
+        w = w_d + v_d * (ky * y_e + kth * np.sin(th_e))
         ur_ref, ul_ref = self._vw_to_wheels(v, w, r, L)
         wheel_ref = (ur_ref, ul_ref)
         return wheel_ref
