@@ -19,7 +19,7 @@ GAIN_TUNING_DEFAULTS: dict = {
     "learning_rate": 5e-5,
     "num_realizations": 4,
     "num_lhs_points": 250,
-    "num_adam_optimizations": 10,
+    "num_adam_optimizations": 5,
     "validation_split": 0.2,
     "velocity_tracking_weight": 1.0,
     "input_weight": 0.0,
