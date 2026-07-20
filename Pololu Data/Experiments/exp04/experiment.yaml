@@ -3,7 +3,6 @@ seed: 0
 use_residual_model: false
 optimize_trajectories: true
 use_standalone_gain_tuning_defaults: true
-gain_tuning_on_gpu: true
 baseline_identification_trajectory: null
 baseline_tuning_trajectories_dir: null
 robotcfg_template: null
