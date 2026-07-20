@@ -37,5 +37,5 @@ GAIN_TUNING_DEFAULTS: dict = {
     "presearch_relative_range": 0.0,
     # Warm-start the gain parametrization from the problem's gain_parametrization
     # (e.g. the previous iteration's trained schedule) instead of the identity.
-    "warm_start_schedule": False,
+    "warm_start_schedule": True,
 }
