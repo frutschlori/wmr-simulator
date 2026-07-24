@@ -51,7 +51,7 @@ class SimulationPipeline:
         window_length: int | None = None,
         residual_model=None,
     ):
-        # Optional learned residual dynamics (residual_model.residual.ResidualDynamicsModel);
+        # Optional learned residual dynamics (residual_model.residual.ResidualEnsemble);
         # None keeps the nominal dynamics untouched.
         self.residual_model = residual_model
         with open(problem_path, "r", encoding="utf-8") as file:

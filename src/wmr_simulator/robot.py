@@ -4,11 +4,7 @@ import jax
 import jax.numpy as np
 
 from wmr_simulator.residual_model.burnout import traction_limited_ground_speeds
-from wmr_simulator.residual_model.residual import (
-    apply_residual_model,
-    residual_features,
-    residual_filter_update,
-)
+from wmr_simulator.residual_model.residual import apply_residual_model, residual_features
 
 
 class DiffDriveState(NamedTuple):
@@ -22,21 +18,10 @@ class DiffDriveState(NamedTuple):
     vel_omega: jax.Array      #  [v, w]
     duty_cycle: jax.Array     # motor duty cycles in [-1, 1]
     wheel_speed_cmd: jax.Array  # desired wheel speed command for diagnostics
-    # Lateral body velocity (scalar). Always 0 for the nominal model; the learned
-    # residual (residual_model.residual) can introduce chassis side-slip, and the
-    # next step's residual features condition on it. Kept separate from vel_omega
-    # so the logged [v, omega] shape stays backward compatible.
-    vel_lateral: jax.Array
-    # Low-pass-filtered [vx, omega] (residual feature memory; the time constant
-    # lives in the residual model, see ResidualDynamicsModel.feature_filter_tau).
-    # Stays zero without a residual model. Defaulted so state constructions
-    # that predate the field keep working unchanged.
-    twist_filtered: jax.Array = np.zeros(2, dtype=np.float32)
-    # Applied residual state [rho_vx, rho_vy, rho_omega]: the shaped residual
-    # delta drives this through a first-order lag (residual_tau, lives in the
-    # residual model) and the *state* corrects the twist, so the applied
-    # residual is smooth by construction. Zero without a residual model.
-    residual_state: jax.Array = np.zeros(3, dtype=np.float32)
+    # Lateral body velocity (scalar). Always 0 (a true two-wheel differential
+    # drive has no chassis side-slip, and the residual only corrects v/omega);
+    # kept separate from vel_omega so the logged [v, omega] shape is unaffected.
+    vel_lateral: jax.Array = np.zeros((), dtype=np.float32)
 
 
 def body_velocities(wheel_speeds, wheel_radius, base_diameter):
@@ -61,25 +46,6 @@ def integrate_planar_pose(pose, v, omega, dt):
         [
             x + v * cos_t * dt,
             y + v * sin_t * dt,
-            _wrap_to_pi(theta + omega * dt),
-        ]
-    )
-
-
-def integrate_planar_pose_lateral(pose, v_x, v_y, omega, dt):
-    """Euler-integrate a planar pose from a full body twist (v_x, v_y, omega).
-
-    A learned residual can introduce a lateral body velocity v_y (chassis
-    side-slip) that the ideal differential-drive kinematics exclude; with
-    v_y = 0 this reduces exactly to :func:`integrate_planar_pose`.
-    """
-    x, y, theta = pose
-    cos_t = np.cos(theta)
-    sin_t = np.sin(theta)
-    return np.array(
-        [
-            x + (v_x * cos_t - v_y * sin_t) * dt,
-            y + (v_x * sin_t + v_y * cos_t) * dt,
             _wrap_to_pi(theta + omega * dt),
         ]
     )
@@ -154,59 +120,29 @@ class DiffDrive:
         nominal_lag_wheel_speeds = alpha * state.wheel_speeds + (1.0 - alpha) * target_wheel_speeds
 
         logged_wheel_speed_cmd = target_wheel_speeds if wheel_speed_cmd is None else wheel_speed_cmd
+        next_wheel_speeds = nominal_lag_wheel_speeds
+        # 3) Traction limit ("burnout"): ground speeds follow the motor side rate-limited
+        next_ground_speeds = traction_limited_ground_speeds(
+            state.ground_wheel_speeds, next_wheel_speeds, a_slip_max, r, dt
+        )
+        # 4) Body velocities (effective wheelbase, ideal differential-drive kinematics)
+        v_nom, w_nom = body_velocities(next_ground_speeds, r, L)
+
         if residual_model is not None:
-            # 3-5) Learned state-action residual (see residual_model.residual),
-            #      conditioned on the *current* body twist (so the model knows
-            #      whether the robot is already slipping), the nominal lag wheel
-            #      speed, the wheel-speed command, the traction-slip proxy
-            #      against the previous ground speeds, and the low-pass-filtered
-            #      twist memory carried in the state.
-            #      The twist/pose come from the nominal wheel through the
-            #      traction limit + kinematics with the twist residual as the
-            #      final correction (slip + lateral side-slip the ideal
-            #      kinematics exclude). The wheel speed itself is left at its
-            #      nominal lag value (no wheel residual).
-            features = residual_features(
-                np.array([state.vel_omega[0], state.vel_lateral, state.vel_omega[1]]),
-                nominal_lag_wheel_speeds,
-                logged_wheel_speed_cmd,
-                state.ground_wheel_speeds,
-                state.twist_filtered,
-            )
-            delta = apply_residual_model(residual_model, features)
-            # The shaped delta drives the applied-residual state through the
-            # first-order residual lag; the *state* corrects the twist (see
-            # residual_model.residual, module docstring).
-            next_residual_state = residual_filter_update(
-                state.residual_state, delta, dt, residual_model.residual_tau
-            )
-            next_wheel_speeds = nominal_lag_wheel_speeds
-            next_ground_speeds = traction_limited_ground_speeds(
-                state.ground_wheel_speeds, nominal_lag_wheel_speeds, a_slip_max, r, dt
-            )
-            v_nom, w_nom = body_velocities(next_ground_speeds, r, L)
-            v = v_nom + next_residual_state[0]
-            v_y = next_residual_state[1]
-            w = w_nom + next_residual_state[2]
-            next_pose = integrate_planar_pose_lateral(state.pose, v, v_y, w, dt)
-            next_vel_lateral = np.asarray(v_y, dtype=np.float32)
-            # Filter update matches build_residual_dataset / the rollout stage.
-            filter_tau = residual_model.feature_filter_tau
-            beta = np.where(filter_tau >= 1e-3, np.exp(-dt / np.maximum(filter_tau, 1e-3)), 0.0)
-            next_twist_filtered = beta * state.twist_filtered + (1.0 - beta) * np.array([v, w])
+            # 5) Learned additive residual (see residual_model.residual):
+            #    conditioned on the nominal predicted twist [v_nom, omega_nom],
+            #    it corrects the forward speed and yaw rate the ideal kinematics
+            #    get wrong. A mixture-of-experts gate zeroes the correction in
+            #    operating regimes the training data never covered. No lateral
+            #    side-slip in nominal operation, so v_y stays 0.
+            delta = apply_residual_model(residual_model, residual_features(v_nom, w_nom))
+            v = v_nom + delta[0]
+            w = w_nom + delta[1]
         else:
-            next_wheel_speeds = nominal_lag_wheel_speeds
-            # 3) Traction limit ("burnout"): ground speeds follow the motor side rate-limited
-            next_ground_speeds = traction_limited_ground_speeds(
-                state.ground_wheel_speeds, next_wheel_speeds, a_slip_max, r, dt
-            )
-            # 4) Body velocities (effective wheelbase, ideal differential-drive kinematics)
-            v, w = body_velocities(next_ground_speeds, r, L)
-            # 5) Pose integration
-            next_pose = integrate_planar_pose(state.pose, v, w, dt)
-            next_vel_lateral = np.zeros((), dtype=np.float32)
-            next_twist_filtered = state.twist_filtered
-            next_residual_state = state.residual_state
+            v = v_nom
+            w = w_nom
+        # 6) Pose integration (ideal differential-drive kinematics, v_y = 0).
+        next_pose = integrate_planar_pose(state.pose, v, w, dt)
 
         # Logged vel_omega stays [v_x_body, omega].
         next_vel_omega = np.array([v, w])
@@ -219,9 +155,7 @@ class DiffDrive:
             next_vel_omega,
             duty_cycle,
             logged_wheel_speed_cmd,
-            next_vel_lateral,
-            next_twist_filtered,
-            next_residual_state,
+            np.zeros((), dtype=np.float32),
         )
 
     def step_kinematic(
@@ -279,8 +213,6 @@ class DiffDrive:
             duty_cycle=np.array((0.0, 0.0), dtype=np.float32),
             wheel_speed_cmd=np.array((0.0, 0.0), dtype=np.float32),
             vel_lateral=np.zeros((), dtype=np.float32),
-            twist_filtered=np.zeros(2, dtype=np.float32),
-            residual_state=np.zeros(3, dtype=np.float32),
         )
 
     @staticmethod

@@ -21,7 +21,7 @@ GAIN_TUNING_DEFAULTS: dict = {
     "num_lhs_points": 500,
     "num_adam_optimizations": 3,
     "validation_split": 0.2,
-    "velocity_tracking_weight": 1.0,
+    "velocity_tracking_weight": 0.5,
     "input_weight": 0.0,
     "input_delta_weight": 1.0,
     "gain_delta_weight": 0.0,
