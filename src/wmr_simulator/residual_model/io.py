@@ -1,9 +1,9 @@
 """Save/load residual dynamics models.
 
 A checkpoint is a single pickle holding the model config (so the module
-skeleton can be rebuilt), the array leaves (parameters + normalization stats,
-as numpy), and free-form training metadata. Loading is explicit: rebuild the
-skeleton from the config, then swap in the saved leaves.
+skeleton can be rebuilt), the array leaves (expert weights + gate + normalization
+stats, as numpy), and free-form training metadata. Loading is explicit: rebuild
+the skeleton from the config, then swap in the saved leaves.
 """
 
 import pickle
@@ -14,19 +14,19 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from wmr_simulator.residual_model.residual import ResidualDynamicsModel, init_residual_model
+from wmr_simulator.residual_model.residual import ResidualEnsemble, init_residual_model
 
-_CHECKPOINT_FORMAT = "wmr-residual-model-v1"
+_CHECKPOINT_FORMAT = "wmr-residual-ensemble-v1"
 
 
 def save_residual_model(
     path: str | Path,
-    model: ResidualDynamicsModel,
+    model: ResidualEnsemble,
     config: dict,
     metadata: dict | None = None,
 ):
     """``config`` must hold the init_residual_model kwargs
-    (input_dim, hidden_width, hidden_depth, output_dim)."""
+    (input_dim, output_dim, num_experts, hidden_sizes, spectral_norm_cap)."""
     params, _ = eqx.partition(model, eqx.is_array)
     leaves = [np.asarray(leaf) for leaf in jax.tree_util.tree_leaves(params)]
     payload = {
@@ -41,7 +41,7 @@ def save_residual_model(
         pickle.dump(payload, file)
 
 
-def load_residual_model(path: str | Path) -> tuple[ResidualDynamicsModel, dict]:
+def load_residual_model(path: str | Path) -> tuple[ResidualEnsemble, dict]:
     """Returns (model, checkpoint) where checkpoint holds config and metadata."""
     with open(path, "rb") as file:
         payload = pickle.load(file)
@@ -52,9 +52,10 @@ def load_residual_model(path: str | Path) -> tuple[ResidualDynamicsModel, dict]:
     skeleton = init_residual_model(
         jax.random.PRNGKey(0),
         input_dim=int(config["input_dim"]),
-        hidden_width=int(config["hidden_width"]),
-        hidden_depth=int(config["hidden_depth"]),
-        output_dim=int(config.get("output_dim", 3)),
+        output_dim=int(config.get("output_dim", 2)),
+        num_experts=int(config["num_experts"]),
+        hidden_sizes=tuple(config["hidden_sizes"]),
+        spectral_norm_cap=float(config.get("spectral_norm_cap", 0.0)),
     )
     params, static = eqx.partition(skeleton, eqx.is_array)
     treedef = jax.tree_util.tree_structure(params)

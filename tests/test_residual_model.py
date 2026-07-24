@@ -9,13 +9,19 @@ import pytest
 
 from wmr_simulator.residual_model import (
     apply_residual_model,
+    gate_weights,
     init_residual_model,
     load_residual_model,
-    residual_features,
     residual_corrected_twist,
+    residual_features,
     save_residual_model,
 )
-from wmr_simulator.residual_model.residual import RESIDUAL_INPUT_DIM, RESIDUAL_OUTPUT_DIM
+from wmr_simulator.residual_model.residual import (
+    RESIDUAL_INPUT_DIM,
+    RESIDUAL_OUTPUT_DIM,
+    ResidualEnsemble,
+    train_residual_ensemble,
+)
 from wmr_simulator.robot import DiffDrive
 
 ROBOT_CFG = {
@@ -26,8 +32,33 @@ ROBOT_CFG = {
 }
 
 
-def small_model():
-    return init_residual_model(jax.random.PRNGKey(0), hidden_width=16, hidden_depth=2)
+def small_model(num_experts=3, hidden_sizes=(16,), seed=0, spectral_norm_cap=2.0):
+    """Untrained ensemble with a non-trivial gate and non-zero output layers.
+
+    ``init_residual_model`` zero-inits the last layer (so a fresh ensemble is
+    exactly the nominal model); tests that need a *non-zero* residual perturb
+    the final weights and give the gate real centers/scales.
+    """
+    model = init_residual_model(
+        jax.random.PRNGKey(seed),
+        num_experts=num_experts,
+        hidden_sizes=hidden_sizes,
+        spectral_norm_cap=spectral_norm_cap,
+    )
+    key = jax.random.PRNGKey(seed + 1)
+    last_weight = 0.5 * jax.random.normal(key, model.layers[-2].shape)
+    centers = jnp.asarray(np.linspace(-1.0, 1.0, num_experts)[:, None] * np.ones((1, RESIDUAL_INPUT_DIM)))
+    return ResidualEnsemble(
+        layers=(*model.layers[:-2], last_weight, model.layers[-1]),
+        centers=centers.astype(jnp.float32),
+        scales=jnp.ones(num_experts, dtype=jnp.float32),
+        ood_sigma=model.ood_sigma,
+        input_mean=model.input_mean,
+        input_std=model.input_std,
+        target_mean=model.target_mean,
+        target_std=jnp.ones(RESIDUAL_OUTPUT_DIM, dtype=jnp.float32),
+        spectral_norm_cap=spectral_norm_cap,
+    )
 
 
 def test_apply_residual_model_shapes():
@@ -38,19 +69,67 @@ def test_apply_residual_model_shapes():
     assert batch.shape == (7, RESIDUAL_OUTPUT_DIM)
 
 
+def test_residual_features_layout():
+    features = residual_features(0.5, 1.5)
+    assert features.shape == (RESIDUAL_INPUT_DIM,)
+    np.testing.assert_allclose(np.asarray(features), [0.5, 1.5])
+
+
 def test_residual_corrected_twist():
     model = small_model()
-    features = jnp.ones(RESIDUAL_INPUT_DIM)
+    features = residual_features(0.5, 1.0)
     delta = apply_residual_model(model, features)
     v_x, v_y, omega = residual_corrected_twist(model, features, 0.5, 1.0)
     assert np.isclose(float(v_x), 0.5 + float(delta[0]))
-    assert np.isclose(float(v_y), float(delta[1]))
-    assert np.isclose(float(omega), 1.0 + float(delta[2]))
+    assert float(v_y) == 0.0
+    assert np.isclose(float(omega), 1.0 + float(delta[1]))
+
+
+def test_untrained_ensemble_is_zero_residual():
+    """A fresh ensemble (zero final layer) is exactly the nominal model."""
+    model = init_residual_model(jax.random.PRNGKey(0), num_experts=4, hidden_sizes=(16, 16))
+    delta = apply_residual_model(model, residual_features(0.7, 0.3))
+    np.testing.assert_allclose(np.asarray(delta), 0.0, atol=1e-7)
+
+
+def test_gate_zeroes_residual_out_of_distribution():
+    """Far outside every cluster the gate collapses the residual to zero."""
+    model = small_model()
+    # In-distribution but off the origin (zero biases make the origin output
+    # exactly zero regardless of weights, so it is not a useful probe).
+    in_dist = apply_residual_model(model, residual_features(0.4, 0.4))
+    far = apply_residual_model(model, residual_features(1000.0, 1000.0))
+    assert np.linalg.norm(np.asarray(far)) < 1e-3
+    assert np.linalg.norm(np.asarray(in_dist)) > 0.0
+    # Gate weights vanish far away; near a center they dominate the null expert.
+    assert float(gate_weights(model, residual_features(1000.0, 1000.0)).sum()) < 1e-3
+    assert float(gate_weights(model, residual_features(0.4, 0.4)).sum()) > 0.5
+
+
+def test_spectral_norm_bounds_expert_lipschitz():
+    """The spectral-norm cap limits how fast the residual changes with the twist."""
+    model = small_model(spectral_norm_cap=1.0)
+    rng = np.random.default_rng(0)
+    base = jnp.asarray(rng.normal(size=(64, RESIDUAL_INPUT_DIM)).astype(np.float32))
+    step = 1e-3 * jnp.asarray(rng.normal(size=base.shape).astype(np.float32))
+    delta0 = apply_residual_model(model, base)
+    delta1 = apply_residual_model(model, base + step)
+    output_change = jnp.linalg.norm(delta1 - delta0, axis=1)
+    input_change = jnp.linalg.norm(step, axis=1)
+    # Lipschitz constant of the map (physical, target_std = 1 here) is bounded by
+    # cap^depth; with cap=1 and identity normalization the ratio stays modest.
+    assert float(jnp.max(output_change / input_change)) < 5.0
 
 
 def test_save_load_roundtrip(tmp_path):
-    model = small_model()
-    config = {"input_dim": RESIDUAL_INPUT_DIM, "hidden_width": 16, "hidden_depth": 2, "output_dim": 3}
+    model = small_model(num_experts=3, hidden_sizes=(16,))
+    config = {
+        "input_dim": RESIDUAL_INPUT_DIM,
+        "output_dim": RESIDUAL_OUTPUT_DIM,
+        "num_experts": 3,
+        "hidden_sizes": [16],
+        "spectral_norm_cap": 2.0,
+    }
     path = tmp_path / "model.pkl"
     save_residual_model(path, model, config, {"note": "test"})
     loaded, checkpoint = load_residual_model(path)
@@ -64,13 +143,18 @@ def test_save_load_roundtrip(tmp_path):
 
 
 def test_load_rejects_mismatched_config(tmp_path):
-    model = small_model()
-    config = {"input_dim": RESIDUAL_INPUT_DIM, "hidden_width": 32, "hidden_depth": 3, "output_dim": 3}
+    model = small_model(num_experts=3, hidden_sizes=(16,))
+    config = {
+        "input_dim": RESIDUAL_INPUT_DIM,
+        "output_dim": RESIDUAL_OUTPUT_DIM,
+        "num_experts": 3,
+        "hidden_sizes": [32, 32],  # extra layer -> leaf-count mismatch on load
+        "spectral_norm_cap": 2.0,
+    }
     path = tmp_path / "model.pkl"
     save_residual_model(path, model, config)
     with pytest.raises(Exception):
-        loaded, _ = load_residual_model(path)
-        apply_residual_model(loaded, jnp.zeros(RESIDUAL_INPUT_DIM))
+        load_residual_model(path)
 
 
 def test_step_without_residual_unchanged():
@@ -80,6 +164,7 @@ def test_step_without_residual_unchanged():
     baseline = robot.step(state, jnp.asarray([0.5, 0.3]), residual_model=None)
     np.testing.assert_allclose(np.asarray(next_state.pose), np.asarray(baseline.pose))
     assert next_state.vel_omega.shape == (2,)
+    assert float(next_state.vel_lateral) == 0.0
 
 
 def test_step_with_residual_changes_pose_and_keeps_shapes():
@@ -94,6 +179,22 @@ def test_step_with_residual_changes_pose_and_keeps_shapes():
     assert with_residual.pose.shape == (3,)
     assert with_residual.vel_omega.shape == (2,)
     assert not np.allclose(np.asarray(without.pose), np.asarray(with_residual.pose))
+
+
+def test_step_residual_matches_manual_correction():
+    """DiffDrive.step adds exactly the residual delta to the nominal twist."""
+    robot = DiffDrive(ROBOT_CFG, dt=0.01)
+    model = small_model()
+    state = robot.get_init_state(jax.random.PRNGKey(0))
+    duty = jnp.asarray([0.6, 0.2])
+    nominal = robot.step(state, duty)  # residual off -> nominal twist
+    delta = apply_residual_model(model, residual_features(nominal.vel_omega[0], nominal.vel_omega[1]))
+    with_residual = robot.step(state, duty, residual_model=model)
+    np.testing.assert_allclose(
+        np.asarray(with_residual.vel_omega),
+        np.asarray(nominal.vel_omega) + np.asarray(delta),
+        rtol=1e-5,
+    )
 
 
 def test_residual_rollout_differentiable_wrt_gains():
@@ -117,250 +218,39 @@ def test_residual_rollout_differentiable_wrt_gains():
     assert abs(float(grad)) > 0.0
 
 
-def test_residual_features_order():
-    """Layout: [vx, vy, omega, wheel_r/l, cmd_r/l, slip_r/l, v_omega, filt_vx, filt_w]."""
-    features = residual_features(
-        jnp.asarray([1.0, 2.0, 3.0]),  # body twist
-        jnp.asarray([4.0, 5.0]),       # nominal lag wheel speeds
-        jnp.asarray([6.0, 7.0]),       # wheel-speed command
-        jnp.asarray([3.0, 3.0]),       # previous traction-limited ground speeds
-        jnp.asarray([8.0, 9.0]),       # low-pass-filtered [vx, omega]
-    )
-    assert features.shape == (RESIDUAL_INPUT_DIM,)
-    # slip_proxy = wheel - prev_ground, v_omega = vx * omega
-    np.testing.assert_allclose(
-        np.asarray(features),
-        [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 1.0, 2.0, 3.0, 8.0, 9.0],
-    )
-
-
-def test_residual_feature_names():
-    from wmr_simulator.residual_model.residual import RESIDUAL_FEATURE_NAMES
-
-    assert RESIDUAL_FEATURE_NAMES == (
-        "vx_body",
-        "vy_body",
-        "omega",
-        "wheel_speed_r",
-        "wheel_speed_l",
-        "wheel_cmd_r",
-        "wheel_cmd_l",
-        "slip_proxy_r",
-        "slip_proxy_l",
-        "v_omega",
-        "vx_body_filt",
-        "omega_filt",
-    )
-    assert RESIDUAL_INPUT_DIM == 12
-
-
-def test_step_tracks_lateral_velocity_state():
-    robot = DiffDrive(ROBOT_CFG, dt=0.01)
-    model = small_model()
-    state = robot.get_init_state(jax.random.PRNGKey(0))
-    duty = jnp.asarray([0.6, 0.2])
-    wheel_cmd = jnp.asarray([120.0, 40.0])
-    without = robot.step(state, duty)
-    assert float(without.vel_lateral) == 0.0
-    with_residual = robot.step(state, duty, residual_model=model, wheel_speed_cmd=wheel_cmd)
-    assert with_residual.vel_lateral.shape == ()
-    # The residual's lateral correction must be carried in the state so the
-    # next step's features can condition on it. The wheel-speed feature the model
-    # sees is the nominal first-order lag prediction (there is no wheel residual);
-    # the slip proxy differences against the carried traction-limited ground
-    # speeds.
-    alpha = np.exp(-0.01 / ROBOT_CFG["time_constant"])
-    nominal_lag = alpha * state.wheel_speeds + (1.0 - alpha) * ROBOT_CFG["max_wheel_speed"] * duty
-    features = jnp.concatenate(
-        [
-            jnp.asarray([state.vel_omega[0], state.vel_lateral, state.vel_omega[1]]),
-            nominal_lag,
-            wheel_cmd,
-            nominal_lag - state.ground_wheel_speeds,
-            jnp.asarray([state.vel_omega[0] * state.vel_omega[1]]),
-            state.twist_filtered,
-        ]
-    )
-    from wmr_simulator.residual_model import apply_residual_model as apply
-
-    delta = apply(model, features)
-    # The shaped delta drives the applied-residual state through the
-    # first-order residual lag; starting from rho = 0 one step applies
-    # gamma * delta, and the lateral twist is the state, not the raw delta.
-    gamma = 1.0 - np.exp(-0.01 / float(model.residual_tau))
-    np.testing.assert_allclose(
-        np.asarray(with_residual.residual_state), gamma * np.asarray(delta), rtol=1e-5
-    )
-    np.testing.assert_allclose(float(with_residual.vel_lateral), gamma * float(delta[1]), rtol=1e-5)
-    # The wheel speed carried in the state is the pure nominal lag (no wheel residual).
-    np.testing.assert_allclose(
-        np.asarray(with_residual.wheel_speeds), np.asarray(nominal_lag), rtol=1e-5
-    )
-    # The applied command is still carried for diagnostics/logging.
-    np.testing.assert_allclose(np.asarray(with_residual.wheel_speed_cmd), np.asarray(wheel_cmd))
-    # The filtered-twist memory follows the corrected twist with the model's tau.
-    beta = np.exp(-0.01 / float(model.feature_filter_tau))
-    expected_filt = beta * np.asarray(state.twist_filtered) + (1.0 - beta) * np.asarray(
-        [with_residual.vel_omega[0], with_residual.vel_omega[1]]
-    )
-    np.testing.assert_allclose(
-        np.asarray(with_residual.twist_filtered), expected_filt, rtol=1e-5
-    )
-    # Without a residual model the filter state is carried unchanged.
-    np.testing.assert_allclose(np.asarray(without.twist_filtered), 0.0)
-
-
-def test_jacobian_regularization_reduces_sensitivity():
-    """With a strong Jacobian penalty the trained MLP must be measurably
-    flatter (smaller input-output Jacobian norm) than without it."""
-    from wmr_simulator.residual_model.residual import train_residual_model
-
+def test_train_reduces_residual_rmse():
+    """One-step training must beat the zero-residual baseline on a smooth,
+    operating-point-dependent synthetic residual, and route via the gate."""
     rng = np.random.default_rng(0)
-    x = rng.normal(size=(256, RESIDUAL_INPUT_DIM)).astype(np.float32)
-    # High-frequency target: tempts the net into a steep fit.
-    y = np.sin(5.0 * x[:, :RESIDUAL_OUTPUT_DIM]).astype(np.float32)
+    features = np.column_stack(
+        [rng.uniform(-1.0, 1.0, 400), rng.uniform(-2.0, 2.0, 400)]
+    ).astype(np.float32)
+    # Smooth residual as a function of (v_nom, omega_nom).
+    targets = np.column_stack(
+        [0.1 * np.sin(features[:, 0]) + 0.05 * features[:, 1], 0.2 * np.tanh(features[:, 1])]
+    ).astype(np.float32)
 
-    def jacobian_norm(model):
-        from wmr_simulator.residual_model.residual import _shaped_delta
-
-        z = jnp.asarray((x - np.asarray(model.input_mean)) / np.asarray(model.input_std))
-        # Jacobian of the shaped map, matching the training penalty.
-        shaped = lambda zi: _shaped_delta(  # noqa: E731
-            model.mlp, zi, model.input_mean, model.input_std, model.target_mean, model.target_std
-        ) / model.target_std
-        jac = jax.vmap(jax.jacrev(shaped))(z)
-        return float(jnp.mean(jnp.sum(jac**2, axis=(1, 2))))
-
-    common = dict(seed=0, hidden_width=16, hidden_depth=2, epochs=50, batch_size=256)
-    plain, _ = train_residual_model(x, y, x[:0], y[:0], jacobian_reg_weight=0.0, **common)
-    damped, _ = train_residual_model(x, y, x[:0], y[:0], jacobian_reg_weight=1.0, **common)
-    assert jacobian_norm(damped) < 0.5 * jacobian_norm(plain)
-
-
-def test_apply_residual_model_clamps_out_of_distribution_inputs():
-    """Normalized inputs saturate at +-RESIDUAL_INPUT_CLIP_SIGMA: far outside
-    the training range the model must stop extrapolating."""
-    from wmr_simulator.residual_model.residual import RESIDUAL_INPUT_CLIP_SIGMA
-
-    model = small_model()  # identity normalization: features are already sigmas
-    at_clip = apply_residual_model(model, jnp.full(RESIDUAL_INPUT_DIM, RESIDUAL_INPUT_CLIP_SIGMA))
-    far_out = apply_residual_model(model, jnp.full(RESIDUAL_INPUT_DIM, 100.0))
-    np.testing.assert_allclose(np.asarray(far_out), np.asarray(at_clip), rtol=1e-6)
-    inside = apply_residual_model(model, jnp.full(RESIDUAL_INPUT_DIM, 1.0))
-    assert not np.allclose(np.asarray(inside), np.asarray(at_clip))
-
-
-def test_synthetic_start_sequences_shapes_and_stacking():
-    """Synthetic from-rest windows: zero initial state, pose_weight 0, and they
-    stack with (longer) data-like windows via padding + mask."""
-    from wmr_simulator.residual_model.residual import (
-        SYNTHETIC_START_DUTY_PROFILES,
-        build_synthetic_start_sequences,
-        stack_sequences,
+    model, history = train_residual_ensemble(
+        features[:320],
+        targets[:320],
+        features[320:],
+        targets[320:],
+        num_experts=3,
+        hidden_sizes=(16, 16),
+        epochs=200,
+        batch_size=128,
+        seed=0,
     )
-
-    synthetic = build_synthetic_start_sequences(0.01, 248.0, num_steps=10)
-    n = len(SYNTHETIC_START_DUTY_PROFILES)
-    assert synthetic["duty"].shape == (n, 10, 2)
-    assert synthetic["wheel_cmd"].shape == (n, 10, 2)
-    assert synthetic["poses"].shape == (n, 11, 3)
-    np.testing.assert_array_equal(synthetic["init_twist"], 0.0)
-    np.testing.assert_array_equal(synthetic["init_wheel"], 0.0)
-    np.testing.assert_array_equal(synthetic["pose_weight"], 0.0)
-    np.testing.assert_allclose(synthetic["wheel_cmd"], synthetic["duty"] * 248.0)
-
-    np.testing.assert_array_equal(synthetic["init_residual"], 0.0)
-    data_like = {
-        "init_twist": np.zeros((2, 3), np.float32),
-        "init_wheel": np.zeros((2, 2), np.float32),
-        "init_filt": np.zeros((2, 2), np.float32),
-        "init_residual": np.zeros((2, 3), np.float32),
-        "duty": np.zeros((2, 25, 2), np.float32),
-        "wheel_cmd": np.zeros((2, 25, 2), np.float32),
-        "poses": np.zeros((2, 26, 3), np.float32),
-        "dt": np.full((2, 25), 0.01, np.float32),
-        "pose_weight": np.ones(2, np.float32),
-    }
-    stacked = stack_sequences([data_like, synthetic])
-    assert stacked["dt"].shape == (2 + n, 25)
-    np.testing.assert_array_equal(stacked["pose_weight"], [1.0, 1.0] + [0.0] * n)
-    # Synthetic windows are shorter: their padded steps are masked out.
-    np.testing.assert_array_equal(stacked["mask"][2:, 10:], 0.0)
-    np.testing.assert_array_equal(stacked["mask"][:, :10], 1.0)
+    predictions = np.asarray(apply_residual_model(model, features))
+    model_rmse = np.sqrt(np.mean((predictions - targets) ** 2))
+    baseline_rmse = np.sqrt(np.mean(targets**2))
+    assert model_rmse < 0.5 * baseline_rmse
+    assert history["validation_loss"][-1] < history["validation_loss"][0]
 
 
-def test_shaped_output_is_bounded():
-    """The tanh bound caps the physical output at RESIDUAL_OUTPUT_BOUND_SIGMA
-    target stds (plus the target mean), no matter how extreme the inputs."""
-    from wmr_simulator.residual_model.residual import RESIDUAL_OUTPUT_BOUND_SIGMA
-
-    model = small_model()  # identity normalization: std = 1, mean = 0
-    rng = jax.random.PRNGKey(2)
-    features = 100.0 * jax.random.normal(rng, (64, RESIDUAL_INPUT_DIM))
-    deltas = np.asarray(apply_residual_model(model, features))
-    assert np.all(np.abs(deltas) <= RESIDUAL_OUTPUT_BOUND_SIGMA + 1e-6)
-
-
-def test_slip_gate_zeroes_lateral_and_yaw_at_low_speed():
-    """With zero filtered forward speed the vy/omega channels are gated to
-    exactly zero (a slow robot cannot side-slip); at high filtered speed the
-    gate is essentially open. The vx channel is never gated."""
-    from wmr_simulator.residual_model.residual import (
-        RESIDUAL_FEATURE_NAMES,
-        RESIDUAL_SLIP_GATE_V0,
-    )
-
-    model = small_model()
-    vx_filt_index = RESIDUAL_FEATURE_NAMES.index("vx_body_filt")
-
-    slow = jnp.ones(RESIDUAL_INPUT_DIM).at[vx_filt_index].set(0.0)
-    delta_slow = np.asarray(apply_residual_model(model, slow))
-    assert delta_slow[1] == 0.0 and delta_slow[2] == 0.0
-    assert abs(delta_slow[0]) > 0.0
-
-    # Fast case: identity normalization clips features at 3 sigma, so the gate
-    # sees vx_filt = 3 >> V0 and passes almost everything.
-    fast = jnp.ones(RESIDUAL_INPUT_DIM).at[vx_filt_index].set(3.0)
-    delta_fast = np.asarray(apply_residual_model(model, fast))
-    expected_gate = 3.0 / (3.0 + RESIDUAL_SLIP_GATE_V0)
-    assert abs(delta_fast[1]) > 0.0 and abs(delta_fast[2]) > 0.0
-    assert expected_gate > 0.9
-
-
-def test_residual_filter_update_smooths_and_disables():
-    """The applied residual approaches the delta with the exact first-order
-    discretization; tau below 1e-3 disables the lag (state jumps to delta)."""
-    from wmr_simulator.residual_model.residual import residual_filter_update
-
-    rho = jnp.zeros(3)
-    delta = jnp.asarray([1.0, -2.0, 3.0])
-    stepped = residual_filter_update(rho, delta, 0.01, 0.15)
-    gamma = 1.0 - np.exp(-0.01 / 0.15)
-    np.testing.assert_allclose(np.asarray(stepped), gamma * np.asarray(delta), rtol=1e-6)
-    # One 10 ms step covers only a fraction of the demanded correction.
-    assert float(jnp.max(jnp.abs(stepped))) < 0.5 * float(jnp.max(jnp.abs(delta)))
-    # Convergence: many steps approach delta.
-    for _ in range(200):
-        rho = residual_filter_update(rho, delta, 0.01, 0.15)
-    np.testing.assert_allclose(np.asarray(rho), np.asarray(delta), rtol=1e-3)
-    # tau = 0 disables the lag entirely.
-    direct = residual_filter_update(jnp.zeros(3), delta, 0.01, 0.0)
-    np.testing.assert_allclose(np.asarray(direct), np.asarray(delta), rtol=1e-6)
-
-
-def test_step_residual_state_smooths_applied_residual():
-    """In DiffDrive.step the applied residual is the lagged state: two
-    consecutive steps must move the state monotonically toward the (slowly
-    varying) delta rather than jumping."""
-    robot = DiffDrive(ROBOT_CFG, dt=0.01)
-    model = small_model()
-    state = robot.get_init_state(jax.random.PRNGKey(0))
-    duty = jnp.asarray([0.7, 0.4])
-    first = robot.step(state, duty, residual_model=model)
-    second = robot.step(first, duty, residual_model=model)
-    # The state starts at zero and accumulates gradually.
-    assert np.all(np.isfinite(np.asarray(second.residual_state)))
-    gamma = 1.0 - np.exp(-0.01 / float(model.residual_tau))
-    assert gamma < 0.1  # one control step applies well under 10% of the delta
-    # Without a residual model the state is carried unchanged (zero).
-    np.testing.assert_array_equal(np.asarray(robot.step(state, duty).residual_state), 0.0)
+def test_gate_weights_shape():
+    model = small_model(num_experts=4)
+    weights = gate_weights(model, jnp.zeros((6, RESIDUAL_INPUT_DIM)))
+    assert weights.shape == (6, 4)
+    # Expert weights plus the null weight partition unity.
+    assert np.all(np.asarray(weights).sum(axis=1) <= 1.0 + 1e-5)

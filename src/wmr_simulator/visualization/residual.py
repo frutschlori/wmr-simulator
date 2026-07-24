@@ -147,7 +147,8 @@ def plot_rollout_comparison(
     plt.close(fig)
 
     # Residual predictions over time
-    fig, axes = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
+    fig, axes = plt.subplots(RESIDUAL_OUTPUT_DIM, 1, figsize=(10, 3 * RESIDUAL_OUTPUT_DIM), sharex=True)
+    axes = np.atleast_1d(axes)
     for channel, ax in enumerate(axes):
         ax.plot(time_s, dataset["targets"][:, channel], "k-", lw=0.8, label="measured residual")
         ax.plot(time_s, predicted_residual[:, channel], "-", lw=0.8, alpha=0.8, label="predicted residual")
@@ -161,6 +162,68 @@ def plot_rollout_comparison(
     plt.close(fig)
 
     return output_paths
+
+
+def plot_gate_map(
+    model,
+    features: np.ndarray,
+    *,
+    out_dir: str | Path = "visualize",
+    out_name: str = "residual_gate_map.pdf",
+) -> Path:
+    """Expert-gate map over the operating envelope.
+
+    Left: the training operating points [v_nom, omega_nom] colored by which
+    expert wins the gate (argmax over the K expert weights), with the k-means
+    centers overlaid. Right: the residual *coverage* (1 - null-expert weight)
+    on a grid -- where it drops to zero the residual is switched off (unseen
+    regime), the out-of-distribution safety the ensemble provides.
+    """
+    from wmr_simulator.residual_model.residual import gate_weights
+
+    plt = _plot_module()
+    out_dir = _ensure_dir(out_dir)
+    features = np.asarray(features, dtype=float)
+
+    weights = np.asarray(gate_weights(model, features))  # (N, K)
+    winner = weights.argmax(axis=1)
+    centers = np.asarray(model.input_mean) + np.asarray(model.centers) * np.asarray(model.input_std)
+    num_experts = weights.shape[1]
+
+    fig, (ax_experts, ax_cov) = plt.subplots(1, 2, figsize=(13, 5))
+
+    scatter = ax_experts.scatter(
+        features[:, 0], features[:, 1], c=winner, s=4, alpha=0.5, cmap="tab10", vmin=0, vmax=9
+    )
+    ax_experts.scatter(centers[:, 0], centers[:, 1], c="k", marker="x", s=80, label="centers")
+    ax_experts.set_xlabel(r"$v_{nom}$ [m/s]")
+    ax_experts.set_ylabel(r"$\omega_{nom}$ [rad/s]")
+    ax_experts.set_title(f"Active expert ({num_experts} experts)")
+    ax_experts.legend()
+    ax_experts.grid(True, alpha=0.3)
+    fig.colorbar(scatter, ax=ax_experts, label="expert index")
+
+    # Coverage grid: 1 - null weight = sum of the expert weights.
+    margin_x = 0.15 * (np.ptp(features[:, 0]) + 1e-6)
+    margin_y = 0.15 * (np.ptp(features[:, 1]) + 1e-6)
+    grid_v = np.linspace(features[:, 0].min() - margin_x, features[:, 0].max() + margin_x, 120)
+    grid_w = np.linspace(features[:, 1].min() - margin_y, features[:, 1].max() + margin_y, 120)
+    mesh_v, mesh_w = np.meshgrid(grid_v, grid_w)
+    grid_features = np.column_stack([mesh_v.ravel(), mesh_w.ravel()])
+    coverage = np.asarray(gate_weights(model, grid_features)).sum(axis=1).reshape(mesh_v.shape)
+    contour = ax_cov.contourf(mesh_v, mesh_w, coverage, levels=np.linspace(0, 1, 11), cmap="viridis")
+    ax_cov.scatter(features[:, 0], features[:, 1], c="w", s=1, alpha=0.15)
+    ax_cov.scatter(centers[:, 0], centers[:, 1], c="r", marker="x", s=80)
+    ax_cov.set_xlabel(r"$v_{nom}$ [m/s]")
+    ax_cov.set_ylabel(r"$\omega_{nom}$ [rad/s]")
+    ax_cov.set_title("Residual coverage (0 = off / OOD)")
+    fig.colorbar(contour, ax=ax_cov, label="coverage")
+
+    fig.tight_layout()
+    output_path = out_dir / out_name
+    fig.savefig(output_path)
+    plt.close(fig)
+    return output_path
 
 
 def plot_closed_loop_rollout(
