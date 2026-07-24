@@ -21,9 +21,12 @@ GAIN_TUNING_DEFAULTS: dict = {
     "num_lhs_points": 500,
     "num_adam_optimizations": 3,
     "validation_split": 0.2,
-    "velocity_tracking_weight": 0.5,
+    "velocity_tracking_weight": 0.2,
     "input_weight": 0.0,
     "input_delta_weight": 1.0,
+    # Penalty on step-to-step change in the robot yaw rate (normalized by
+    # omega_max); discourages gains that oscillate omega. 0 disables.
+    "omega_delta_weight": 0.0,
     "gain_delta_weight": 0.0,
     "k_min_stab": 1e-3,
     "k_max_stab": 50.0,

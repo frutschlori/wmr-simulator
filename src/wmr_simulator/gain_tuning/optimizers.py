@@ -15,7 +15,7 @@ from wmr_simulator.gain_tuning.objectives import (
 _NUM_GAINS = 5
 _NUM_STABLE_GAINS = 4
 _GAIN_NAMES = ("kx", "ky", "kth", "kpmotor", "kimotor")
-_LOSS_COMPONENT_NAMES = ("tracking", "velocity_tracking", "input", "input_delta", "gain_delta")
+_LOSS_COMPONENT_NAMES = ("tracking", "velocity_tracking", "input", "input_delta", "omega_delta", "gain_delta")
 
 
 # ---------------------------------------------------------------------------
@@ -143,6 +143,7 @@ def _make_terms_for_values(
     velocity_tracking_weight,
     input_weight,
     input_delta_weight,
+    omega_delta_weight,
     gain_delta_weight,
     k_min_stab,
     k_max_stab,
@@ -171,6 +172,7 @@ def _make_terms_for_values(
                 velocity_tracking_weight=velocity_tracking_weight,
                 input_weight=input_weight,
                 input_delta_weight=input_delta_weight,
+                omega_delta_weight=omega_delta_weight,
                 gain_delta_weight=gain_delta_weight,
                 reference_states=reference_states,
             )
@@ -306,6 +308,7 @@ def optimize_controller_gains(
     velocity_tracking_weight: float = 0.0,
     input_weight: float = 0.0,
     input_delta_weight: float = 0.0,
+    omega_delta_weight: float = 0.0,
     gain_delta_weight: float = 0.0,
     k_min_stab: float = 1e-3,
     k_max_stab: float = 20.0,
@@ -362,6 +365,7 @@ def optimize_controller_gains(
             velocity_tracking_weight=velocity_tracking_weight,
             input_weight=input_weight,
             input_delta_weight=input_delta_weight,
+            omega_delta_weight=omega_delta_weight,
             gain_delta_weight=gain_delta_weight,
             k_min_stab=k_min_stab,
             k_max_stab=k_max_stab,

@@ -22,7 +22,7 @@ The heavy lifting (building the pipeline, the closed-loop rollout) lives here;
 
 import numpy as np
 
-TERM_NAMES = ("tracking", "velocity_tracking", "input", "input_delta")
+TERM_NAMES = ("tracking", "velocity_tracking", "input", "input_delta", "omega_delta")
 
 
 def _resolve_gain_tuning_config(experiment):
@@ -51,13 +51,13 @@ def _reference_states_for_sim(run_reference):
 
 
 def _sim_terms(pipeline, base_gains, schedule_params, reference_states, robot_keys, estimator_keys, weights):
-    """Four sim loss terms for a reference already in the sim/global convention."""
+    """Five sim loss terms for a reference already in the sim/global convention."""
     from wmr_simulator.gain_tuning.objectives import (
         closed_loop_objective_terms,
         scheduled_closed_loop_objective_terms,
     )
 
-    vtw, iw, idw = weights
+    vtw, iw, idw, odw = weights
     if schedule_params is None:
         terms = closed_loop_objective_terms(
             pipeline,
@@ -67,9 +67,11 @@ def _sim_terms(pipeline, base_gains, schedule_params, reference_states, robot_ke
             velocity_tracking_weight=vtw,
             input_weight=iw,
             input_delta_weight=idw,
+            omega_delta_weight=odw,
             reference_states=reference_states,
         )
     else:
+        # Drop the trailing gain-schedule term; keep the five base terms.
         terms = scheduled_closed_loop_objective_terms(
             pipeline,
             base_gains,
@@ -79,9 +81,10 @@ def _sim_terms(pipeline, base_gains, schedule_params, reference_states, robot_ke
             velocity_tracking_weight=vtw,
             input_weight=iw,
             input_delta_weight=idw,
+            omega_delta_weight=odw,
             gain_delta_weight=0.0,
             reference_states=reference_states,
-        )[:4]
+        )[:5]
     return np.asarray(terms, dtype=float)
 
 
@@ -97,11 +100,12 @@ def _real_run_terms(pipeline, log, weights):
     """Loss terms of the recorded run, time-aligned to the reference timestamps.
 
     Mirrors ``_base_loss_terms``: pose_mse tracking, [v, omega] velocity error
-    normalized by (v_max, omega_max), and duty-cycle input/input-delta energy.
+    normalized by (v_max, omega_max), duty-cycle input/input-delta energy, and
+    the normalized yaw-rate-chatter penalty.
     """
     import jax.numpy as jnp
 
-    vtw, iw, idw = weights
+    vtw, iw, idw, odw = weights
     ref_states = np.asarray(log.reference.states, dtype=float)
     ref_time = np.asarray(log.reference.time_s, dtype=float)
     if len(ref_states) < 2:
@@ -137,7 +141,14 @@ def _real_run_terms(pipeline, log, weights):
     duty_delta = np.diff(duty_window, axis=0)
     input_delta = float(np.mean(np.sum(duty_delta**2, axis=1)))
 
-    return np.array([tracking, vtw * velocity, iw * input_loss, idw * input_delta])
+    # Yaw-rate chatter of the recorded run (same window, normalized by omega_max):
+    # the real oscillation the sim omega-delta term is meant to reproduce.
+    omega_series = vel_omega[window, 1] if int(window.sum()) >= 2 else vel_omega[:, 1]
+    omega_delta = float(np.mean(np.diff(omega_series / float(pipeline.omega_max)) ** 2))
+
+    return np.array(
+        [tracking, vtw * velocity, iw * input_loss, idw * input_delta, odw * omega_delta]
+    )
 
 
 def _evaluate_iteration(experiment, index, weights, num_realizations, seed):
@@ -213,6 +224,7 @@ def evaluate_pipeline_progress(experiment):
         float(config["velocity_tracking_weight"]),
         float(config["input_weight"]),
         float(config["input_delta_weight"]),
+        float(config.get("omega_delta_weight", 0.0)),
     )
     num_realizations = int(config["num_realizations"])
     seed = int(experiment.config["seed"])

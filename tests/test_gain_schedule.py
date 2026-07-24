@@ -147,8 +147,8 @@ def test_disabled_schedule_objective_matches_static():
             velocity_tracking_weight=0.05, input_delta_weight=0.1, gain_delta_weight=1.0,
         )
     )
-    np.testing.assert_allclose(scheduled_terms[:4], static_terms, atol=1e-5)
-    assert scheduled_terms[4] == pytest.approx(0.0, abs=1e-7)  # gain_delta zero at W=0
+    np.testing.assert_allclose(scheduled_terms[:5], static_terms, atol=1e-5)
+    assert scheduled_terms[5] == pytest.approx(0.0, abs=1e-7)  # gain_delta zero at W=0
 
 
 def test_gradient_wrt_W_is_finite_and_nonzero():

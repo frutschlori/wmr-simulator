@@ -130,6 +130,7 @@ class ControllerTuningPipeline(SimulationPipeline):
         velocity_tracking_weight: float = 0.0,
         input_weight: float = 0.0,
         input_delta_weight: float = 0.0,
+        omega_delta_weight: float = 0.0,
         gain_delta_weight: float = 0.0,
         k_min_stab: float = 1e-3,
         k_max_stab: float = 20.0,
@@ -150,6 +151,7 @@ class ControllerTuningPipeline(SimulationPipeline):
             velocity_tracking_weight=velocity_tracking_weight,
             input_weight=input_weight,
             input_delta_weight=input_delta_weight,
+            omega_delta_weight=omega_delta_weight,
             gain_delta_weight=gain_delta_weight,
             k_min_stab=k_min_stab,
             k_max_stab=k_max_stab,
@@ -195,6 +197,7 @@ def run_gain_tuning_experiment(
     velocity_tracking_weight: float = 0.0,
     input_weight: float = 0.0,
     input_delta_weight: float = 0.0,
+    omega_delta_weight: float = 0.0,
     k_min_stab: float = 1e-3,
     k_max_stab: float = 20.0,
     k_max_rest: float = 20.0,
@@ -253,6 +256,7 @@ def run_gain_tuning_experiment(
             velocity_tracking_weight=velocity_tracking_weight,
             input_weight=input_weight,
             input_delta_weight=input_delta_weight,
+            omega_delta_weight=omega_delta_weight,
             gain_delta_weight=gain_delta_weight,
             k_min_stab=k_min_stab,
             k_max_stab=k_max_stab,
@@ -351,6 +355,16 @@ def run_gain_tuning_experiment(
         controller_gains=optimized_gains,
         schedule_params=schedule_params,
     )
+    # Rollout of the static-pretune gains (base gains only, no parametrization)
+    # so the plots can overlay "tuned (static)" against "tuned (param)". None
+    # when there was no static pretune stage.
+    static_hidden_log = (
+        None
+        if static_gains is None
+        else pipeline.run_closed_loop(
+            robot_params, use_hidden_robot=True, controller_gains=static_gains
+        )
+    )
     return {
         "pipeline": pipeline,
         "init_hidden_log": init_hidden_log,
@@ -358,6 +372,7 @@ def run_gain_tuning_experiment(
         "optimized_gains": optimized_gains,
         "static_pretune": static_pretune,
         "static_gains": static_gains,
+        "static_hidden_log": static_hidden_log,
         "schedule_enabled": schedule_enabled,
         "schedule_params": schedule_params,
         "loss_history": loss_history,

@@ -620,6 +620,7 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
         velocity_tracking_weight=float(config["velocity_tracking_weight"]),
         input_weight=float(config["input_weight"]),
         input_delta_weight=float(config["input_delta_weight"]),
+        omega_delta_weight=float(config.get("omega_delta_weight", 0.0)),
         k_min_stab=float(config["k_min_stab"]),
         k_max_stab=float(config["k_max_stab"]),
         k_max_rest=float(config["k_max_rest"]),
@@ -665,12 +666,15 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
             pipeline,
             init_log=result["init_hidden_log"],
             tuned_log=result["final_hidden_log"],
+            static_log=result.get("static_hidden_log"),
             out_prefix="summary_gain_tuning",
         )
         plot_training_trajectory_summary(
             pipeline,
             robot_params=robot_params,
             tuned_gains=result["optimized_gains"],
+            schedule_params=result["schedule_params"],
+            static_gains=result["static_gains"],
             max_trajectories=None,
             out_prefix="summary_training",
         )
@@ -678,12 +682,15 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
             pipeline,
             robot_params=robot_params,
             tuned_gains=result["optimized_gains"],
+            schedule_params=result["schedule_params"],
+            static_gains=result["static_gains"],
             out_prefix="summary_validation",
         )
         plot_controller_tuning_errors(
             pipeline=pipeline,
             init_log=result["init_hidden_log"],
             tuned_log=result["final_hidden_log"],
+            static_log=result.get("static_hidden_log"),
         )
         plot_loss_history(
             loss_history=result["loss_history"],
