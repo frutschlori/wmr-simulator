@@ -407,7 +407,7 @@ $$
 \begin{aligned}
 x_e &= (x_d-\hat{x})\cos\hat{\theta} + (y_d-\hat{y})\sin\hat{\theta},\\
 y_e &= -(x_d-\hat{x})\sin\hat{\theta} + (y_d-\hat{y})\cos\hat{\theta},\\
-\theta_e &= \text{wrap}(\theta_d - \hat{\theta})
+\theta_e &= \text{dist}_{SO2}(\theta_d - \hat{\theta})
 \end{aligned}
 $$
 
@@ -418,7 +418,7 @@ v^{ref} = v_d \cos\theta_e + k_x x_e
 $$
 
 $$
-\omega^{ref} = \omega_d + v_d(k_y y_e + k_\theta\sin\theta_e) + k_\theta\theta_e
+\omega^{ref} = \omega_d + v_d(k_y y_e + k_\theta\sin\theta_e)
 $$
 
 ---
