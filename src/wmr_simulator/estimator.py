@@ -143,9 +143,16 @@ class DiffDriveEstimator:
         # Generate keys for PRNG
         key, k_enc_r, k_enc_l, k_x_meas, k_y_meas, k_th_meas = jax.random.split(est_state.key, 6)
 
-        # 1) Simulate encoder increments
-        dphi_r_true = ur_true * dt
-        dphi_l_true = ul_true * dt
+        # 1) Simulate encoder increments. The real encoder counts ticks
+        #    accumulated over [t_{k-1}, t_k] = integral(u dt), which for a
+        #    near-linear speed is the trapezoidal average of the previous and
+        #    current wheel speed -- not the endpoint speed alone. Using the
+        #    endpoint (u_k) would make the measured speed lead reality by half a
+        #    sample; the trapezoidal increment restores that half-step of loop
+        #    lag. est_state.u_true carries the previous step's true wheel speeds.
+        u_prev = est_state.u_true
+        dphi_r_true = 0.5 * (u_prev[0] + ur_true) * dt
+        dphi_l_true = 0.5 * (u_prev[1] + ul_true) * dt
 
         dphi_r_meas = dphi_r_true + self.enc_angle_noise * jax.random.normal(k_enc_r)
         dphi_l_meas = dphi_l_true + self.enc_angle_noise * jax.random.normal(k_enc_l)

@@ -118,6 +118,7 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         "velocity_tracking_weight": 1.0,
         "input_weight": 0.0,
         "input_delta_weight": 1.0,
+        "omega_delta_weight": 0.0,
         "gain_delta_weight": 0.0,
         "k_min_stab": 1e-3,
         "k_max_stab": 40.0,

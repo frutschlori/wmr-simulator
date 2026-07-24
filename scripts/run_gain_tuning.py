@@ -73,6 +73,9 @@ def main():
     parser.add_argument("--velocity-tracking-weight", type=float, default=GAIN_TUNING_DEFAULTS["velocity_tracking_weight"])
     parser.add_argument("--input-weight", type=float, default=GAIN_TUNING_DEFAULTS["input_weight"])
     parser.add_argument("--input-delta-weight", type=float, default=GAIN_TUNING_DEFAULTS["input_delta_weight"])
+    # Penalty on step-to-step yaw-rate change (normalized by omega_max); discourages
+    # gains that oscillate omega on the real robot. 0 disables.
+    parser.add_argument("--omega-delta-weight", type=float, default=GAIN_TUNING_DEFAULTS["omega_delta_weight"])
     # Gain bounds
     parser.add_argument("--k-min-stab", type=float, default=GAIN_TUNING_DEFAULTS["k_min_stab"])
     parser.add_argument("--k-max-stab", type=float, default=GAIN_TUNING_DEFAULTS["k_max_stab"])
@@ -127,6 +130,7 @@ def main():
         velocity_tracking_weight=args.velocity_tracking_weight,
         input_weight=args.input_weight,
         input_delta_weight=args.input_delta_weight,
+        omega_delta_weight=args.omega_delta_weight,
         k_min_stab=args.k_min_stab,
         k_max_stab=args.k_max_stab,
         k_max_rest=args.k_max_rest,
@@ -150,6 +154,7 @@ def main():
     print(f"Velocity tracking weight: {args.velocity_tracking_weight:.8g}")
     print(f"Input regularization weight: {args.input_weight:.8g}")
     print(f"Input delta regularization weight: {args.input_delta_weight:.8g}")
+    print(f"Omega delta regularization weight: {args.omega_delta_weight:.8g}")
     print(f"Training trajectories: {pipeline.training_reference_trajectories.shape[0]}")
     print(f"Validation trajectories: {pipeline.validation_reference_trajectories.shape[0]}")
     print(f"Stable gain search range: [{args.k_min_stab:.8g}, {args.k_max_stab:.8g}]")
@@ -193,12 +198,15 @@ def main():
         pipeline,
         init_log=result["init_hidden_log"],
         tuned_log=result["final_hidden_log"],
+        static_log=result.get("static_hidden_log"),
         out_prefix="summary_gain_tuning",
     )
     plot_training_trajectory_summary(
         pipeline,
         robot_params=robot_params,
         tuned_gains=result["optimized_gains"],
+        schedule_params=result["schedule_params"],
+        static_gains=result["static_gains"],
         max_trajectories=args.num_summary_training_trajectories,
         out_prefix="summary_training",
     )
@@ -206,12 +214,15 @@ def main():
         pipeline,
         robot_params=robot_params,
         tuned_gains=result["optimized_gains"],
+        schedule_params=result["schedule_params"],
+        static_gains=result["static_gains"],
         out_prefix="summary_validation",
     )
     plot_controller_tuning_errors(
         pipeline=pipeline,
         init_log=result["init_hidden_log"],
         tuned_log=result["final_hidden_log"],
+        static_log=result.get("static_hidden_log"),
     )
     plot_loss_history(
         loss_history=result["loss_history"],

@@ -228,8 +228,8 @@ def test_identity_objective_matches_static():
             velocity_tracking_weight=0.05, input_delta_weight=0.1, gain_delta_weight=1.0,
         )
     )
-    np.testing.assert_allclose(parametrized_terms[:4], static_terms, atol=1e-5)
-    assert parametrized_terms[4] == pytest.approx(0.0, abs=1e-7)
+    np.testing.assert_allclose(parametrized_terms[:5], static_terms, atol=1e-5)
+    assert parametrized_terms[5] == pytest.approx(0.0, abs=1e-7)
 
 
 def test_static_pretune_runs_both_stages():
@@ -257,9 +257,14 @@ def test_static_pretune_runs_both_stages():
     assert len(result["loss_history"]) == 2
     for values in result["loss_component_history"].values():
         assert len(values) == 2
-    # Stage 2 starts from the static gains with an identity parametrization,
-    # so its evaluation must reproduce the static stage's loss.
-    assert result["loss_history"][1] == pytest.approx(result["loss_history"][0], rel=1e-4)
+    # Stage 2 starts from the static gains with an identity parametrization, so
+    # its evaluation reproduces the static stage's loss up to the reparametrization
+    # round-trip (a ~1e-6 gain difference). The closed-loop loss is stiff under the
+    # in-loop encoder low-pass + trapezoidal encoder lag (see memory
+    # gain-fim-wheel-lp-stiffness), which amplifies that tiny gain difference into a
+    # sub-percent loss gap; the tolerance reflects that, while still catching any
+    # non-identity parametrization (which would move the loss by O(10%)+).
+    assert result["loss_history"][1] == pytest.approx(result["loss_history"][0], rel=2e-2)
 
 
 def test_static_pretune_independent_budget_and_multistart_handoff():

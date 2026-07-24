@@ -78,8 +78,8 @@ TARGET_LABELS = (r"$\Delta v$ [m/s]", r"$\Delta \omega$ [rad/s]")
 
 # Defaults for the ensemble geometry / regularization.
 DEFAULT_NUM_EXPERTS = 4
-DEFAULT_HIDDEN_SIZES = (32, 32)
-DEFAULT_SPECTRAL_NORM_CAP = 2.0
+DEFAULT_HIDDEN_SIZES = (16, 16)
+DEFAULT_SPECTRAL_NORM_CAP = 1.0
 # Gaussian gate bandwidth = (root-mean intra-cluster distance) * this factor;
 # > 1 overlaps neighbouring experts so the hand-off between regimes is smooth.
 DEFAULT_GATE_BANDWIDTH_SCALE = 1.5
@@ -1015,7 +1015,7 @@ def train_main(argv=None):
     parser.add_argument("--gate-bandwidth-scale", type=float, default=DEFAULT_GATE_BANDWIDTH_SCALE)
     # Null "zero expert" distance (bandwidths): beyond it the residual -> 0.
     parser.add_argument("--ood-sigma", type=float, default=DEFAULT_OOD_SIGMA)
-    parser.add_argument("--epochs", type=int, default=5000)
+    parser.add_argument("--epochs", type=int, default=500)
     parser.add_argument("--batch-size", type=int, default=16384)
     parser.add_argument("--learning-rate", type=float, default=5e-4)
     # L2 penalty on the (normalized) residual output; shrinks toward nominal.

@@ -56,13 +56,6 @@ class SimulationPipeline:
         self.residual_model = residual_model
         with open(problem_path, "r", encoding="utf-8") as file:
             problem_cfg = yaml.safe_load(file)
-        # The residual is fit to explain the gap between the nominal model and the
-        # real (noise-free deterministic) mocap data, so it also absorbs whatever
-        # the simulated measurement noise would inject. Whenever a residual is part
-        # of the dynamics, force the noise off so the residual isn't double-counting
-        # it -- both in training's closed-loop check and at deployment.
-        if residual_model is not None:
-            problem_cfg["noise_enabled"] = False
         self.problem = apply_noise_configuration(problem_cfg)
 
         self.problem_path = problem_path

@@ -38,6 +38,7 @@ def _base_loss_terms(
     velocity_tracking_weight: float,
     input_weight: float,
     input_delta_weight: float,
+    omega_delta_weight: float,
 ) -> jax.Array:
     predicted_poses = predicted_log.pose.states[reference_pose_indices]
     tracking_loss = pipeline.pose_mse(predicted_poses, reference_poses)
@@ -54,12 +55,21 @@ def _base_loss_terms(
 
     input_delta = jnp.diff(duty_cycle, axis=0)
     input_delta_loss = jnp.mean(jnp.sum(input_delta**2, axis=1))  # favor input smoothness
+
+    # Angular-rate chatter penalty: the step-to-step change in the robot's yaw
+    # rate over the full wheel-dt series (normalized by omega_max, like the
+    # velocity term). Aggressive motor gains that oscillate omega on the real
+    # robot cost here even when the pose/velocity tracking still looks good in
+    # sim, so the optimizer is pushed toward smoother, more transferable gains.
+    omega = predicted_log.wheel.vel_omega[:, 1] / pipeline.omega_max
+    omega_delta_loss = jnp.mean(jnp.diff(omega) ** 2)
     return jnp.asarray(
         [
             tracking_loss,
             velocity_tracking_weight * velocity_tracking_loss,
             input_weight * input_loss,
             input_delta_weight * input_delta_loss,
+            omega_delta_weight * omega_delta_loss,
         ],
         dtype=jnp.float32,
     )
@@ -73,6 +83,7 @@ def closed_loop_objective(
     velocity_tracking_weight: float = 0.0,
     input_weight: float = 0.0,
     input_delta_weight: float = 0.0,
+    omega_delta_weight: float = 0.0,
     reference_states: jax.Array | None = None,
 ):
     return jnp.sum(
@@ -84,6 +95,7 @@ def closed_loop_objective(
             velocity_tracking_weight=velocity_tracking_weight,
             input_weight=input_weight,
             input_delta_weight=input_delta_weight,
+            omega_delta_weight=omega_delta_weight,
             reference_states=reference_states,
         )
     )
@@ -97,6 +109,7 @@ def closed_loop_objective_terms(
     velocity_tracking_weight: float = 0.0,
     input_weight: float = 0.0,
     input_delta_weight: float = 0.0,
+    omega_delta_weight: float = 0.0,
     reference_states: jax.Array | None = None,
 ):
     reference_states = pipeline.reference_states if reference_states is None else reference_states
@@ -119,6 +132,7 @@ def closed_loop_objective_terms(
             velocity_tracking_weight,
             input_weight,
             input_delta_weight,
+            omega_delta_weight,
         )
 
     terms = jax.vmap(realization_loss)(replay_robot_keys, replay_estimator_keys)
@@ -134,6 +148,7 @@ def scheduled_closed_loop_objective(
     velocity_tracking_weight: float = 0.0,
     input_weight: float = 0.0,
     input_delta_weight: float = 0.0,
+    omega_delta_weight: float = 0.0,
     gain_delta_weight: float = 0.0,
     reference_states: jax.Array | None = None,
 ):
@@ -147,6 +162,7 @@ def scheduled_closed_loop_objective(
             velocity_tracking_weight=velocity_tracking_weight,
             input_weight=input_weight,
             input_delta_weight=input_delta_weight,
+            omega_delta_weight=omega_delta_weight,
             gain_delta_weight=gain_delta_weight,
             reference_states=reference_states,
         )
@@ -162,15 +178,17 @@ def scheduled_closed_loop_objective_terms(
     velocity_tracking_weight: float = 0.0,
     input_weight: float = 0.0,
     input_delta_weight: float = 0.0,
+    omega_delta_weight: float = 0.0,
     gain_delta_weight: float = 0.0,
     reference_states: jax.Array | None = None,
 ):
     """Loss terms for the scheduled controller.
 
-    Returns a 5-vector: the four static terms plus a rate-scaled gain-schedule
-    smoothness penalty. The penalty is a pure function of the reference
-    trajectory (independent of rollout noise). With ``gain_delta_weight = 0`` and
-    an identity schedule (W = 0, b = 0) this reproduces the static objective terms
+    Returns a 6-vector: the five static terms (tracking, velocity_tracking,
+    input, input_delta, omega_delta) plus a rate-scaled gain-schedule smoothness
+    penalty. The penalty is a pure function of the reference trajectory
+    (independent of rollout noise). With ``gain_delta_weight = 0`` and an
+    identity schedule (W = 0, b = 0) this reproduces the static objective terms
     padded with a trailing zero.
     """
     reference_states = pipeline.reference_states if reference_states is None else reference_states
@@ -194,6 +212,7 @@ def scheduled_closed_loop_objective_terms(
             velocity_tracking_weight,
             input_weight,
             input_delta_weight,
+            omega_delta_weight,
         )
 
     base_terms = jnp.mean(jax.vmap(realization_loss)(replay_robot_keys, replay_estimator_keys), axis=0)

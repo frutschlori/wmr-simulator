@@ -12,10 +12,17 @@ def plot_gain_tuning_summary(
     pipeline,
     init_log,
     tuned_log,
+    static_log=None,
     out_prefix="gain_tuning_summary",
 ):
     os.makedirs("visualize", exist_ok=True)
     pdf_filename = os.path.join("visualize", f"{out_prefix}.pdf")
+
+    # When a static-pretune rollout is supplied, the main tuned line is the
+    # parametrized (MLP) result; label it "tuned (param)" and overlay the
+    # static-gain rollout as "tuned (static)". Without one, keep the plain "Tuned".
+    tuned_label = "tuned (param)" if static_log is not None else "Tuned"
+    static_color = "tab:green"
 
     reference_time = np.asarray(tuned_log.reference.time_s, dtype=float)
     reference = np.asarray(tuned_log.reference.states, dtype=float)
@@ -23,6 +30,8 @@ def plot_gain_tuning_summary(
     init_pose = np.asarray(init_log.pose.true_states, dtype=float)
     tuned_time = np.asarray(tuned_log.pose.time_s, dtype=float)
     tuned_pose = np.asarray(tuned_log.pose.true_states, dtype=float)
+    static_time = None if static_log is None else np.asarray(static_log.pose.time_s, dtype=float)
+    static_pose = None if static_log is None else np.asarray(static_log.pose.true_states, dtype=float)
     wheel_time = np.asarray(tuned_log.wheel.time_s, dtype=float)
     wheel_speeds = np.asarray(tuned_log.wheel.speeds, dtype=float)
     duty_cycle = np.asarray(tuned_log.wheel.duty_cycle, dtype=float)
@@ -43,7 +52,9 @@ def plot_gain_tuning_summary(
 
     ax_traj.plot(reference[:, 0], reference[:, 1], color="tab:red", linestyle="--", linewidth=1.0, label="Reference")
     ax_traj.plot(init_pose[:, 0], init_pose[:, 1], color="tab:blue", linewidth=1.0, label="Initial")
-    ax_traj.plot(tuned_pose[:, 0], tuned_pose[:, 1], color="tab:orange", linewidth=1.2, label="Tuned")
+    if static_pose is not None:
+        ax_traj.plot(static_pose[:, 0], static_pose[:, 1], color=static_color, linewidth=1.0, label="tuned (static)")
+    ax_traj.plot(tuned_pose[:, 0], tuned_pose[:, 1], color="tab:orange", linewidth=1.2, label=tuned_label)
     ax_traj.set_xlabel("x [m]")
     ax_traj.set_ylabel("y [m]")
     ax_traj.set_title("Trajectory")
@@ -71,21 +82,32 @@ def plot_gain_tuning_summary(
         linewidth=0.8,
         label=r"ref $\omega$",
     )[0]
+    velocity_prefix = "param" if static_log is not None else "tuned"
     tuned_vel_time, tuned_vel = _pose_vel_omega(tuned_time, tuned_pose)
-    line_tuned_v = ax_vel.plot(tuned_vel_time, tuned_vel[:, 0], color="tab:blue", linewidth=1.0, label="tuned v")[0]
+    line_tuned_v = ax_vel.plot(tuned_vel_time, tuned_vel[:, 0], color="tab:blue", linewidth=1.0, label=f"{velocity_prefix} v")[0]
     line_tuned_w = ax_vel_omega.plot(
         tuned_vel_time,
         tuned_vel[:, 1],
         color="tab:purple",
         linewidth=1.0,
-        label=r"tuned $\omega$",
+        label=rf"{velocity_prefix} $\omega$",
     )[0]
+    velocity_handles = [line_ref_v, line_tuned_v, line_ref_w, line_tuned_w]
+    if static_pose is not None:
+        static_vel_time, static_vel = _pose_vel_omega(static_time, static_pose)
+        line_static_v = ax_vel.plot(
+            static_vel_time, static_vel[:, 0], color=static_color, linewidth=1.0, label="static v"
+        )[0]
+        line_static_w = ax_vel_omega.plot(
+            static_vel_time, static_vel[:, 1], color="tab:olive", linewidth=1.0, label=r"static $\omega$"
+        )[0]
+        velocity_handles = [line_ref_v, line_tuned_v, line_static_v, line_ref_w, line_tuned_w, line_static_w]
     ax_vel.set_xlabel("time [s]")
     ax_vel.set_ylabel("linear velocity [m/s]")
     ax_vel_omega.set_ylabel("angular velocity [rad/s]")
     ax_vel.set_title("Velocity")
     ax_vel.grid(True)
-    ax_vel.legend(handles=[line_ref_v, line_tuned_v, line_ref_w, line_tuned_w], loc="best")
+    ax_vel.legend(handles=velocity_handles, loc="best")
 
     cmd_time, cmd_right = _stair_series(command_time, wheel_cmd[:, 0], wheel_time[-1] if len(wheel_time) else None)
     _, cmd_left = _stair_series(command_time, wheel_cmd[:, 1], wheel_time[-1] if len(wheel_time) else None)
@@ -164,7 +186,9 @@ def plot_gain_tuning_summary(
             label="Reference",
         )
         ax.plot(init_time, init_pose[:, index], color="tab:blue", linewidth=1.0, label="Initial")
-        ax.plot(tuned_time, tuned_pose[:, index], color="tab:orange", linewidth=1.2, label="Tuned")
+        if static_pose is not None:
+            ax.plot(static_time, static_pose[:, index], color=static_color, linewidth=1.0, label="tuned (static)")
+        ax.plot(tuned_time, tuned_pose[:, index], color="tab:orange", linewidth=1.2, label=tuned_label)
         legend_handles = ax.get_lines()[:]
         if tuned_gains_log is not None:
             gain_ax = ax.twinx()
@@ -196,6 +220,8 @@ def plot_trajectory_set_summary(
     robot_params,
     tuned_gains,
     reference_trajectories,
+    schedule_params=None,
+    static_gains=None,
     max_trajectories: int | None = None,
     title: str = "Trajectories",
     out_prefix="trajectory_summary",
@@ -212,6 +238,11 @@ def plot_trajectory_set_summary(
         num_trajectories = min(max_trajectories, num_trajectories)
     colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
 
+    # The main tuned rollout applies the parametrization (MLP) schedule; when a
+    # static-pretune result is supplied it is overlaid (dash-dot) as
+    # "tuned (static)" and the main line is relabeled "tuned (param)".
+    tuned_label = "tuned (param)" if static_gains is not None else "Tuned"
+
     fig, ax = plt.subplots(figsize=(8, 8))
     for index, reference_states in enumerate(reference_trajectories[:num_trajectories]):
         color = colors[index % len(colors)]
@@ -224,6 +255,7 @@ def plot_trajectory_set_summary(
             robot_params,
             use_hidden_robot=True,
             controller_gains=tuned_gains,
+            schedule_params=schedule_params,
             reference_states=reference_states,
         )
         init_pose = np.asarray(init_log.pose.true_states, dtype=float)
@@ -231,13 +263,28 @@ def plot_trajectory_set_summary(
 
         ax.plot(reference_states[:, 0], reference_states[:, 1], color=color, linestyle="--", linewidth=0.8)
         ax.plot(init_pose[:, 0], init_pose[:, 1], color=color, linestyle=":", linewidth=0.7)
+        if static_gains is not None:
+            static_log = pipeline.run_closed_loop(
+                robot_params,
+                use_hidden_robot=True,
+                controller_gains=static_gains,
+                reference_states=reference_states,
+            )
+            static_pose = np.asarray(static_log.pose.true_states, dtype=float)
+            ax.plot(static_pose[:, 0], static_pose[:, 1], color=color, linestyle="-.", linewidth=0.9)
         ax.plot(tuned_pose[:, 0], tuned_pose[:, 1], color=color, linestyle="-", linewidth=0.9)
 
     legend_handles = [
         Line2D([0], [0], color="black", linestyle="--", linewidth=0.8, label="Reference"),
         Line2D([0], [0], color="black", linestyle=":", linewidth=0.7, label="Initial"),
-        Line2D([0], [0], color="black", linestyle="-", linewidth=0.9, label="Tuned"),
     ]
+    if static_gains is not None:
+        legend_handles.append(
+            Line2D([0], [0], color="black", linestyle="-.", linewidth=0.9, label="tuned (static)")
+        )
+    legend_handles.append(
+        Line2D([0], [0], color="black", linestyle="-", linewidth=0.9, label=tuned_label)
+    )
     ax.legend(handles=legend_handles, loc="best")
     ax.set_xlabel("x [m]")
     ax.set_ylabel("y [m]")
@@ -255,6 +302,8 @@ def plot_training_trajectory_summary(
     pipeline,
     robot_params,
     tuned_gains,
+    schedule_params=None,
+    static_gains=None,
     max_trajectories: int | None = 5,
     out_prefix="summary_training",
 ):
@@ -263,6 +312,8 @@ def plot_training_trajectory_summary(
         robot_params=robot_params,
         tuned_gains=tuned_gains,
         reference_trajectories=pipeline.training_reference_trajectories,
+        schedule_params=schedule_params,
+        static_gains=static_gains,
         max_trajectories=max_trajectories,
         title="Training Trajectories",
         out_prefix=out_prefix,
@@ -273,6 +324,8 @@ def plot_validation_trajectory_summary(
     pipeline,
     robot_params,
     tuned_gains,
+    schedule_params=None,
+    static_gains=None,
     out_prefix="summary_validation",
 ):
     return plot_trajectory_set_summary(
@@ -280,13 +333,15 @@ def plot_validation_trajectory_summary(
         robot_params=robot_params,
         tuned_gains=tuned_gains,
         reference_trajectories=pipeline.validation_reference_trajectories,
+        schedule_params=schedule_params,
+        static_gains=static_gains,
         max_trajectories=None,
         title="Validation Trajectories",
         out_prefix=out_prefix,
     )
 
 
-def plot_controller_tuning_errors(pipeline, init_log, tuned_log, out_prefix="ctrl_tuning"):
+def plot_controller_tuning_errors(pipeline, init_log, tuned_log, static_log=None, out_prefix="ctrl_tuning"):
     os.makedirs("visualize", exist_ok=True)
     pdf_filename = os.path.join("visualize", f"{out_prefix}_tracking_errors.pdf")
 
@@ -299,19 +354,30 @@ def plot_controller_tuning_errors(pipeline, init_log, tuned_log, out_prefix="ctr
     )
     init_poses = np.asarray(init_log.pose.states)[reference_pose_indices]
     tuned_poses = np.asarray(tuned_log.pose.states)[reference_pose_indices]
-    plot_len = min(len(reference_poses), len(init_poses), len(tuned_poses), len(pipeline.reference_time_grid))
+    lengths = [len(reference_poses), len(init_poses), len(tuned_poses), len(pipeline.reference_time_grid)]
+    static_errors = None
+    if static_log is not None:
+        static_poses = np.asarray(static_log.pose.states)[reference_pose_indices]
+        lengths.append(len(static_poses))
+    plot_len = min(lengths)
     plot_time = np.asarray(pipeline.reference_time_grid[:plot_len])
 
     init_errors = init_poses[:plot_len] - reference_poses[:plot_len]
     tuned_errors = tuned_poses[:plot_len] - reference_poses[:plot_len]
     init_errors[:, 2] = (init_errors[:, 2] + np.pi) % (2.0 * np.pi) - np.pi
     tuned_errors[:, 2] = (tuned_errors[:, 2] + np.pi) % (2.0 * np.pi) - np.pi
+    if static_log is not None:
+        static_errors = static_poses[:plot_len] - reference_poses[:plot_len]
+        static_errors[:, 2] = (static_errors[:, 2] + np.pi) % (2.0 * np.pi) - np.pi
 
+    tuned_label = "tuned (param)" if static_log is not None else "Tuned gains"
     fig, axes = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
     labels = ["x error [m]", "y error [m]", "theta error [rad]"]
     for idx, label in enumerate(labels):
         axes[idx].plot(plot_time, init_errors[:, idx], label="Initial gains", linewidth=1.2)
-        axes[idx].plot(plot_time, tuned_errors[:, idx], label="Tuned gains", linewidth=1.2)
+        if static_errors is not None:
+            axes[idx].plot(plot_time, static_errors[:, idx], label="tuned (static)", color="tab:green", linewidth=1.2)
+        axes[idx].plot(plot_time, tuned_errors[:, idx], label=tuned_label, color="tab:orange", linewidth=1.2)
         axes[idx].set_ylabel(label)
         axes[idx].grid(True)
         axes[idx].legend()
