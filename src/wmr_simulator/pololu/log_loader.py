@@ -298,7 +298,14 @@ def _clip_before_trajectory_start(
     for start, end in zip(block_starts, block_ends):
         if reference_ts[end - 1] - reference_ts[start] >= min_trajectory_s:
             if start == 0:
-                return data  # trajectory starts the log: keep its mocap/encoder lead-in
+                # Normally the first reference arrives a few control ticks
+                # after the recording begins; keep that short mocap/encoder
+                # lead-in.  A recovered SD-card chunk can instead begin with
+                # seconds of non-reference records, in which case this first
+                # (and only) reference block is still the trajectory and must
+                # define t = 0.
+                if reference_ts[start] - data[0, ts_index] <= max_reference_gap_s:
+                    return data
             return data[data[:, ts_index] >= reference_ts[start]]
     return data
 
