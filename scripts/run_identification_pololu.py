@@ -8,10 +8,6 @@ import jax.numpy as jnp
 import numpy as np
 import yaml
 
-from wmr_simulator.identification.mocap_delay import (
-    estimate_mocap_delay_from_log_file,
-    print_delay_result,
-)
 from wmr_simulator.identification.pipeline import run_single_experiment_identification
 from wmr_simulator.pololu import load_pololu_traj_control_log
 from wmr_simulator.types import (
@@ -56,12 +52,10 @@ def main():
 
     # Path to real experiment log
     parser.add_argument("--pololu-log", type=str,
-                        default="Pololu Data/Experiments/2026_07_07/12/binaries/decoded/TR11.csv")
+                        default="Pololu Data/Experiments/exp05/iteration_01/data/TR01.csv")
                         # default="Pololu Data/Experiments/2026_07_01/TR03.csv")
     parser.add_argument("--clip-after-first-trajectory", action="store_true", default=True)
     # Mocap/encoder smoothing defaults are configured in the measurement_smoothing submodule.
-    parser.add_argument("--estimate-mocap-delay", action="store_true", default=False)
-    parser.add_argument("--mocap-delay-search-range", type=float, default=0.02)
     args = parser.parse_args()
 
     init_params = PhysicalParams(
@@ -72,26 +66,9 @@ def main():
         a_slip_max=jnp.asarray(args.init_a_slip_max),
     )
 
-    with open(args.problem, "r", encoding="utf-8") as file:
-        mocap_delay = float(yaml.safe_load(file).get("estimator", {}).get("mocap_delay", 0.0))
-    mocap_delay_source = "problem yaml"
-    if args.estimate_mocap_delay:
-        try:
-            delay_result = estimate_mocap_delay_from_log_file(
-                args.pololu_log,
-                max_delay_s=args.mocap_delay_search_range,
-            )
-            print_delay_result(delay_result)
-            mocap_delay = delay_result["delay_s"]
-            mocap_delay_source = "estimated from log"
-        except ValueError as error:
-            print(f"Mocap delay estimation skipped: {error}")
-    print(f"Mocap delay compensation: {1000.0 * mocap_delay:.2f} ms ({mocap_delay_source})")
-
     pololu_log = load_pololu_traj_control_log(
         args.pololu_log,
         clip_after_first_trajectory=args.clip_after_first_trajectory,
-        mocap_delay_s=mocap_delay,
     )
 
     result = run_single_experiment_identification(

@@ -46,7 +46,7 @@ __all__ = [
 ]
 
 # Window length (in samples) and polynomial order of the Savitzky-Golay filter.
-# At ~10 ms mocap sampling a window of 21 smooths over ~210 ms; a cubic keeps
+# At ~10 ms mocap sampling a window of 35 smooths over ~350 ms; a cubic keeps
 # the fit flexible enough for the arcs while rejecting per-sample noise (a wider
 # window is needed for the derivative, whose noise shrinks with window length).
 DEFAULT_SAVGOL_WINDOW = 35

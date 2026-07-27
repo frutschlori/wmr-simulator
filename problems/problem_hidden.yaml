@@ -29,7 +29,6 @@ robot:
   alpha_max: 50.0    # rad/s^2
 
 estimator:
-  mocap_delay: 0.0        # mocap transport latency [s] (network+radio/UART); controller sees poses this old. Identify via identification/mocap_delay.py
   type: "kf"              # estimator type: "kf" (Kalman Filter) or "dr" (Dead Reckoning)
   wheel_radius: 0.015     # estimator's wheel_radius [m]
   base_diameter: 0.09     # estimator's base_diameter [m]

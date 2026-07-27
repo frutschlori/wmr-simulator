@@ -1,3 +1,5 @@
+from collections.abc import Sequence
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -142,11 +144,73 @@ class SystemIdentificationPipeline(SimulationPipeline):
         learning_rate: float,
     ):
         return optimize_physical_params_adam(
-            pipeline=self,
+            pipelines=[self],
             init_params=init_params,
             num_steps=num_steps,
             learning_rate=learning_rate,
         )
+
+
+def run_multi_log_identification(
+    problem_path: str,
+    initial_params: PhysicalParams,
+    target_logs: Sequence[SimulationLog],
+    num_steps: int,
+    learning_rate: float,
+    seed: int = 0,
+    window_length: int | None = None,
+    replay_wheel_speed_source: str = "estimated",
+    identify_a_slip_max: bool = True,
+):
+    """Identify one parameter set jointly from several recorded logs.
+
+    One replay pipeline per log (they differ in length, so they cannot be
+    batched); the logs enter the fit through the mean of their normalized
+    losses, see optimizers.optimize_physical_params_adam. Passing a single log
+    reproduces a plain single-log identification. ``identify_a_slip_max=False``
+    keeps the traction limit at ``initial_params``.
+    """
+    pipelines = [
+        SystemIdentificationPipeline(
+            problem_path=problem_path,
+            initial_params=initial_params,
+            seed=seed,
+            window_length=window_length,
+            target_log=target_log,
+            replay_wheel_speed_source=replay_wheel_speed_source,
+        )
+        for target_log in target_logs
+    ]
+    init_replay_logs = [
+        pipeline.replay_rollout(initial_params, target_log=pipeline.target_log, window_length=window_length)
+        for pipeline in pipelines
+    ]
+    estimated_params, loss_history, motor_loss_history, parameter_mse_history = optimize_physical_params_adam(
+        pipelines=pipelines,
+        init_params=initial_params,
+        num_steps=num_steps,
+        learning_rate=learning_rate,
+        identify_a_slip_max=identify_a_slip_max,
+    )
+    final_replay_logs = []
+    for pipeline in pipelines:
+        pipeline.estimated_params = estimated_params
+        final_replay_logs.append(
+            pipeline.replay_rollout(
+                estimated_params,
+                target_log=pipeline.target_log,
+                window_length=window_length,
+            )
+        )
+    return {
+        "pipelines": pipelines,
+        "estimated_params": estimated_params,
+        "loss_history": loss_history,
+        "motor_loss_history": motor_loss_history,
+        "parameter_mse_history": parameter_mse_history,
+        "init_replay_logs": init_replay_logs,
+        "final_replay_logs": final_replay_logs,
+    }
 
 
 def run_single_experiment_identification(

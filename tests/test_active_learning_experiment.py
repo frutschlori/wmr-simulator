@@ -67,6 +67,7 @@ def test_finalize_rolls_results_into_next_iteration(tmp_path):
     }
     gains = {
         "gains": [9.1, 8.2, 6.3, 7.0, 11.0],
+        "static_gains": [4.1, 3.2, 2.3, 5.0, 9.0],
         "schedule_enabled": True,
         "schedule": {"scheduled_indices": [0, 1, 2], "rho": [0.5, 0.5, 0.5], "W": [[0.1, 0.0]] * 3},
     }
@@ -94,6 +95,52 @@ def test_finalize_rolls_results_into_next_iteration(tmp_path):
 
     experiment_reloaded = Experiment.load(experiment.root)
     assert experiment_reloaded.resolve_iteration(None) == 2
+
+
+def test_finalize_writes_static_gain_baseline(tmp_path):
+    experiment = stage_init(tmp_path / "exp", {"problem": PROBLEM})
+    paths = experiment.paths(1)
+
+    identification = {"estimated_params": {"max_wheel_speed": 240.0}}
+    gains = {
+        "gains": [9.1, 8.2, 6.3, 7.0, 11.0],
+        "static_gains": [4.1, 3.2, 2.3, 5.0, 9.0],
+        "schedule_enabled": True,
+        "schedule": {"scheduled_indices": [0, 1, 2], "rho": [0.5, 0.5, 0.5], "W": [[0.1, 0.0]] * 3},
+    }
+    with paths.identification_result.open("w") as file:
+        yaml.safe_dump(identification, file)
+    with paths.gains_result.open("w") as file:
+        yaml.safe_dump(gains, file)
+
+    next_paths = stage_finalize(experiment, 1)
+
+    # Same identified robot params, static gains, and no gain parametrization.
+    static_config = load_yaml(next_paths.robot_config_static)
+    tuned_config = load_yaml(next_paths.robot_config)
+    assert static_config["robot"] == tuned_config["robot"]
+    assert static_config["controller"]["gains"] == gains["static_gains"]
+    assert "gain_parametrization" not in static_config["controller"]
+    assert tuned_config["controller"]["gains"] == gains["gains"]
+
+    static_firmware = load_robot_config_file(next_paths.robotcfg_static_cfg)
+    assert static_firmware["kx_traj"] == 4.1
+    assert abs(static_firmware["kp_inner"] - 5.0 / 240.0) < 1e-9
+    assert load_robot_config_file(next_paths.robotcfg_cfg)["kx_traj"] == 9.1
+
+
+def test_finalize_without_static_gains_writes_no_baseline(tmp_path):
+    experiment = stage_init(tmp_path / "exp", {"problem": PROBLEM})
+    paths = experiment.paths(1)
+
+    with paths.identification_result.open("w") as file:
+        yaml.safe_dump({"estimated_params": {}}, file)
+    with paths.gains_result.open("w") as file:
+        yaml.safe_dump({"gains": [9.1, 8.2, 6.3, 7.0, 11.0], "schedule_enabled": False}, file)
+
+    next_paths = stage_finalize(experiment, 1)
+    assert not next_paths.robot_config_static.exists()
+    assert not next_paths.robotcfg_static_cfg.exists()
 
 
 def test_finalize_exports_trained_gain_mlp(tmp_path):

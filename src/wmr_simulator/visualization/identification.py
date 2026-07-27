@@ -931,6 +931,101 @@ def plot_loss_history(
     print(f"Loss history PDF saved at: {pdf_filename}")
 
 
+PARAMETER_PLOT_SPECS: tuple[tuple[str, str, float], ...] = (
+    ("r", "wheel radius [mm]", 1000.0),
+    ("L", "effective wheelbase [mm]", 1000.0),
+    ("u_max", "max wheel speed [rad/s]", 1.0),
+    ("tau", "motor time constant [s]", 1.0),
+    ("a_slip", "traction limit [m/s^2]", 1.0),
+)
+
+
+def plot_identification_log_parameters(
+    log_names,
+    parameter_samples,
+    joint_params=None,
+    max_z_scores=None,
+    z_scores=None,
+    is_outlier=None,
+    z_threshold=None,
+    out_prefix="identification_log_parameters",
+    out_dir="visualize",
+):
+    """Per-log identified parameters against the joint fit.
+
+    One panel per physical parameter plus the robust deviation score used to
+    exclude logs, so a flagged log can be checked against *which* parameter
+    made it disagree.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    output_filename = os.path.join(out_dir, f"{out_prefix}.pdf")
+
+    samples = np.asarray(parameter_samples, dtype=float)
+    log_names = list(log_names)
+    positions = np.arange(len(log_names))
+    is_outlier = (
+        np.zeros(len(log_names), dtype=bool) if is_outlier is None else np.asarray(is_outlier, dtype=bool)
+    )
+    kept = ~is_outlier
+
+    num_panels = samples.shape[1] + (1 if max_z_scores is not None else 0)
+    fig, axes = plt.subplots(num_panels, 1, figsize=(max(6.0, 1.0 + 0.5 * len(log_names)), 2.0 * num_panels), sharex=True)
+    axes = np.atleast_1d(axes)
+
+    for index, ax in enumerate(axes[: samples.shape[1]]):
+        _, label, scale = PARAMETER_PLOT_SPECS[index]
+        values = scale * samples[:, index]
+        ax.plot(positions[kept], values[kept], "o", color="tab:blue", label="per-log fit")
+        if np.any(is_outlier):
+            ax.plot(positions[is_outlier], values[is_outlier], "X", color="tab:red", markersize=9, label="excluded")
+        if joint_params is not None:
+            ax.axhline(
+                scale * float(np.asarray(joint_params, dtype=float)[index]),
+                color="tab:green",
+                linewidth=1.6,
+                label="joint fit",
+            )
+        ax.set_ylabel(label)
+        ax.grid(True, alpha=0.3)
+        if index == 0:
+            ax.legend(loc="best", fontsize="small")
+
+    if max_z_scores is not None:
+        ax = axes[-1]
+        scores = np.asarray(max_z_scores, dtype=float)
+        ax.bar(positions[kept], scores[kept], color="tab:blue")
+        if np.any(is_outlier):
+            ax.bar(positions[is_outlier], scores[is_outlier], color="tab:red")
+        if z_threshold:
+            ax.axhline(float(z_threshold), color="tab:red", linestyle="--", linewidth=1.2, label="threshold")
+            ax.legend(loc="best", fontsize="small")
+        if z_scores is not None:
+            # Which parameter drove the exclusion; the red marker above sits in
+            # every panel because the whole log is dropped, not one value.
+            driving = np.argmax(np.asarray(z_scores, dtype=float), axis=1)
+            for position in np.flatnonzero(is_outlier):
+                ax.annotate(
+                    PARAMETER_PLOT_SPECS[driving[position]][0],
+                    (position, scores[position]),
+                    textcoords="offset points",
+                    xytext=(0, 3),
+                    ha="center",
+                    fontsize="small",
+                )
+        ax.set_ylabel("max robust z")
+        ax.set_ylim(0.0, 1.15 * max(float(np.max(scores)), float(z_threshold or 0.0)))
+        ax.grid(True, alpha=0.3)
+
+    axes[-1].set_xticks(positions)
+    axes[-1].set_xticklabels(log_names, rotation=45, ha="right")
+    axes[0].set_title("Identified parameters per log")
+    fig.tight_layout()
+    fig.savefig(output_filename, bbox_inches="tight", transparent=True)
+    plt.close(fig)
+    print(f"Per-log identification parameters PDF saved at: {output_filename}")
+    return output_filename
+
+
 def plot_system_id_realization_sweep(
     num_realizations, tracking_losses, parameter_mse, out_prefix="si_realization_sweep", num_seeds=None):
 

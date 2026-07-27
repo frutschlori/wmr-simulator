@@ -130,12 +130,18 @@ class DiffDrive:
 
         if residual_model is not None:
             # 5) Learned additive residual (see residual_model.residual):
-            #    conditioned on the nominal predicted twist [v_nom, omega_nom],
-            #    it corrects the forward speed and yaw rate the ideal kinematics
-            #    get wrong. A mixture-of-experts gate zeroes the correction in
-            #    operating regimes the training data never covered. No lateral
-            #    side-slip in nominal operation, so v_y stays 0.
-            delta = apply_residual_model(residual_model, residual_features(v_nom, w_nom))
+            #    conditioned on the (state, action) pair -- the nominal predicted
+            #    twist and the commanded twist the lag is heading toward -- it
+            #    corrects the forward speed and yaw rate the ideal kinematics get
+            #    wrong. The action half is what lets it express transient errors
+            #    (motor time constant, delay, backlash), which are proportional to
+            #    command minus state. A mixture-of-experts gate zeroes the
+            #    correction in operating regimes the training data never covered.
+            #    No lateral side-slip in nominal operation, so v_y stays 0.
+            v_cmd, w_cmd = body_velocities(target_wheel_speeds, r, L)
+            delta = apply_residual_model(
+                residual_model, residual_features(v_nom, w_nom, v_cmd, w_cmd)
+            )
             v = v_nom + delta[0]
             w = w_nom + delta[1]
         else:

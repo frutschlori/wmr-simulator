@@ -15,9 +15,7 @@ Baseline types:
                      s-curve envelope ramps the rate in from zero and back out
                      to zero, so the robot is never hit with a step in speed.
   - spin:            rotation on the spot, parametrized by time and peak omega
-                     (the total rotation is solved for the peak omega). Meant
-                     for estimating the mocap delay from the IMU-gyro vs mocap
-                     omega difference (identification/mocap_delay.py).
+                     (the total rotation is solved for the peak omega).
 
 The CLI wrapper lives in scripts/generate_baseline_reference.py.
 """
@@ -272,9 +270,7 @@ def spin_reference(
     """Rotation on the spot with s-curve eased heading, peaking at max_omega.
 
     The position stays fixed at `center` and the total rotation is chosen so
-    the quintic s-curve's peak rate lands exactly on max_omega. Intended for
-    mocap-delay identification: the delay shows up as the lag between the IMU
-    gyro rate and the differentiated mocap heading.
+    the quintic s-curve's peak rate lands exactly on max_omega.
     """
     if max_omega <= 0.0:
         raise ValueError("max_omega must be positive.")

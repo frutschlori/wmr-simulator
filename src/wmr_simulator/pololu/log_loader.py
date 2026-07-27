@@ -53,14 +53,12 @@ def load_pololu_traj_control_log(
     path: str | Path,
     *,
     clip_after_first_trajectory: bool = False,
-    mocap_delay_s: float = 0.0,
 ) -> SimulationLog:
     """Load one Pololu traj-control csv into a SimulationLog.
 
-    ``mocap_delay_s`` > 0 compensates the mocap transport latency (network +
-    radio/UART; see identification.mocap_delay): the pose logged at time t was
-    assumed at t - mocap_delay_s, so all mocap timestamps are shifted back by
-    that amount before use.
+    All streams share one time base in seconds, zeroed at the start of the
+    trajectory: any idle stretch the recording carries before the run is dropped
+    (_clip_before_trajectory_start).
 
     The mocap poses are always smoothed with a Savitzky-Golay filter
     (measurement_smoothing.smooth_pose_stream): repeated frames, samples too
@@ -85,7 +83,6 @@ def load_pololu_traj_control_log(
         ("x_des", "y_des", "yaw_des", "v_ff", "w_ff"),
     )
     pose_time, pose_states = _sparse_stream(columns, data, ("x_raw", "y_raw", "yaw_raw"))
-    pose_time = pose_time - np.float32(mocap_delay_s)
     raw_pose_states = pose_states
     # Duplicate frames are dropped inside the filter but the smoothed grid is
     # interpolated back to all raw timestamps, so every stream keeps its
@@ -161,7 +158,7 @@ def load_imu_gyro_z(
     """IMU yaw rate stream from one traj-control csv, converted to rad/s.
 
     The csv logs the gyro in deg/s; timestamps share the time base of
-    load_pololu_traj_control_log (seconds, zeroed at the first logged row).
+    load_pololu_traj_control_log (seconds, zeroed at the trajectory start).
     Returns empty arrays for logs without IMU samples (older logs have the
     gyro columns in the header but never fill them).
     """
@@ -171,7 +168,7 @@ def load_imu_gyro_z(
 
 
 def _read_time_normalized(path: Path, clip_after_first_trajectory: bool) -> tuple[list[str], np.ndarray]:
-    """Read a traj-control csv with the ts column sorted and in seconds from the first row."""
+    """Read a traj-control csv with the ts column sorted and in seconds from the trajectory start."""
     columns, data = _read_csv(path)
     if tuple(columns) != POLOLU_TRAJ_CONTROL_COLUMNS:
         raise ValueError(f"Unexpected columns in {path}: {tuple(columns)}")
@@ -179,10 +176,14 @@ def _read_time_normalized(path: Path, clip_after_first_trajectory: bool) -> tupl
     ts_index = columns.index("ts")
     data = data[np.isfinite(data[:, ts_index])]
     data = data[np.argsort(data[:, ts_index])]
-    time_s = data[:, ts_index] / 1000.0
-    time_s = time_s - time_s[0]
+    if len(data) == 0:
+        # Header-only csv: the decoder emits one for an empty/aborted recording
+        # (a few-byte SD-card binary). Nothing to normalize against.
+        raise ValueError(f"No data rows in {path} (empty recording).")
     data = data.copy()
-    data[:, ts_index] = time_s
+    data[:, ts_index] = data[:, ts_index] / 1000.0
+    data = _clip_before_trajectory_start(columns, data)
+    data[:, ts_index] -= data[0, ts_index]
 
     if clip_after_first_trajectory:
         data = _clip_after_first_reference_stop(columns, data)
@@ -265,6 +266,43 @@ def _col(columns: list[str], data: np.ndarray, name: str) -> np.ndarray:
     return data[:, columns.index(name)]
 
 
+def _clip_before_trajectory_start(
+    columns: list[str],
+    data: np.ndarray,
+    *,
+    max_reference_gap_s: float = 0.5,
+    min_trajectory_s: float = 1.0,
+) -> np.ndarray:
+    """Drop the idle stretch a recording can carry before its trajectory starts.
+
+    A recording is opened before the run is triggered, so a log can begin with a
+    leftover reference sample of the previous run followed by seconds of
+    standstill in which only the IMU keeps logging. Zeroing the time base on the
+    first row then shifts the whole trajectory off t = 0.
+
+    The reference is logged every ~50 ms while a trajectory runs, so reference
+    rows are grouped into blocks separated by gaps longer than
+    ``max_reference_gap_s``; the first block spanning at least
+    ``min_trajectory_s`` is the trajectory and everything before it is dropped.
+    Logs whose reference stream is one contiguous block (the normal case) are
+    returned untouched.
+    """
+    reference_rows = _rows_with(columns, data, ("x_des", "y_des", "yaw_des", "v_ff", "w_ff"))
+    if len(reference_rows) == 0:
+        return data
+
+    ts_index = columns.index("ts")
+    reference_ts = _col(columns, reference_rows, "ts")
+    block_starts = np.concatenate([[0], np.flatnonzero(np.diff(reference_ts) > max_reference_gap_s) + 1])
+    block_ends = np.concatenate([block_starts[1:], [len(reference_ts)]])
+    for start, end in zip(block_starts, block_ends):
+        if reference_ts[end - 1] - reference_ts[start] >= min_trajectory_s:
+            if start == 0:
+                return data  # trajectory starts the log: keep its mocap/encoder lead-in
+            return data[data[:, ts_index] >= reference_ts[start]]
+    return data
+
+
 def _clip_after_first_reference_stop(
     columns: list[str],
     data: np.ndarray,
@@ -332,11 +370,17 @@ def list_pololu_log_paths(log_dir: str | Path) -> list[Path]:
 
 
 def _looks_like_pololu_log(path: Path) -> bool:
+    """True for a traj-control csv with the expected header *and* at least one
+    data row; a header-only file (decoded from an empty/aborted SD-card
+    recording) is not loadable, so discovery skips it rather than failing the
+    whole run on it."""
     try:
-        first_line = path.read_text(encoding="utf-8").splitlines()[0]
-    except (OSError, UnicodeDecodeError, IndexError):
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
         return False
-    columns = tuple(name.strip() for name in first_line.split(","))
+    if len(lines) < 2 or not lines[1].strip():
+        return False
+    columns = tuple(name.strip() for name in lines[0].split(","))
     return columns == POLOLU_TRAJ_CONTROL_COLUMNS
 
 
@@ -352,7 +396,7 @@ if __name__ == "__main__":
     from wmr_simulator.visualization.pololu import plot_logged_summary
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--log", type=str, default="Pololu Data/Experiments/2026_07_07/12/binaries/decoded/TR10.csv")
+    parser.add_argument("--log", type=str, default="Pololu Data/Experiments/exp05/iteration_01/data/TR01.csv")
     parser.add_argument("--output", type=str, default=None, help="Output filename prefix")
     parser.add_argument("--out-dir", type=str, default="visualize")
     parser.add_argument("--clip-after-first-trajectory", default=True, action="store_true")

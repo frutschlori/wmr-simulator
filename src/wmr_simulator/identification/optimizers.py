@@ -22,6 +22,7 @@ from wmr_simulator.types import (
 #     (0 * exp(theta) = 0 with zero gradient) -- pass a positive init to identify it.
 _NUM_POSITIVE_DIMS = 5
 _NUM_OPTIMIZER_DIMS = 5
+_A_SLIP_MAX_DIM = 4
 
 
 def _params_from_optimizer_values(values: jax.Array, init_params: PhysicalParams) -> PhysicalParams:
@@ -43,11 +44,29 @@ def _loss_normalization_scale(initial_loss: jax.Array) -> jax.Array:
 
 
 def optimize_physical_params_adam(
-    pipeline,
+    pipelines,
     init_params: PhysicalParams,
     num_steps: int,
     learning_rate: float,
+    identify_a_slip_max: bool = True,
 ):
+    """Identify one parameter set from one or more target logs.
+
+    Every pipeline contributes its own pose and motor loss, each normalized by
+    its value at the initial parameters, and the optimized loss is the mean over
+    pipelines. The normalization is what makes a joint run meaningful: logs
+    differ in length, speed and excitation, so raw losses would let the longest
+    or fastest log dominate the fit.
+
+    ``identify_a_slip_max=False`` holds the traction limit at its initial value
+    (its optimizer dimension is masked out, so it neither moves nor receives a
+    gradient) while the burnout model stays active in the rollout. Logs that
+    never approach the traction limit carry no information about it, and fitting
+    it anyway just reads noise into a parameter every downstream stage then uses.
+    """
+    pipelines = list(pipelines)
+    if not pipelines:
+        raise ValueError("At least one identification pipeline is required.")
     optimizer = optax.adam(learning_rate)
     current_log_relative = jnp.zeros(_NUM_OPTIMIZER_DIMS, dtype=jnp.float32)
     opt_state = optimizer.init(current_log_relative)
@@ -55,24 +74,33 @@ def optimize_physical_params_adam(
     if num_steps <= 0:
         return init_params, [], [], []
 
-    def params_from_optimizer_values(values):
-        return _params_from_optimizer_values(values, init_params)
+    optimizer_mask = jnp.ones(_NUM_OPTIMIZER_DIMS, dtype=jnp.float32)
+    if not identify_a_slip_max:
+        optimizer_mask = optimizer_mask.at[_A_SLIP_MAX_DIM].set(0.0)
 
-    def pose_loss_for_params(params):
+    def params_from_optimizer_values(values):
+        return _params_from_optimizer_values(optimizer_mask * values, init_params)
+
+    def pose_loss_for_params(pipeline, params):
         return pose_window_replay_mse(
             pipeline=pipeline,
             params=params,
             target_log=pipeline.target_log,
             est_params=pipeline.initial_params,
             window_length=pipeline.window_length,
+            replay_segment_plan=pipeline.replay_segment_plan,
         )
 
-    def motor_loss_for_params(params):
+    def motor_loss_for_params(pipeline, params):
         return pipeline.motor_wheel_speed_mse(params, pipeline.target_log, window_length=pipeline.window_length)
 
     initial_params = params_from_optimizer_values(current_log_relative)
-    pose_loss_scale = _loss_normalization_scale(pose_loss_for_params(initial_params))
-    motor_loss_scale = _loss_normalization_scale(motor_loss_for_params(initial_params))
+    pose_loss_scales = [
+        _loss_normalization_scale(pose_loss_for_params(pipeline, initial_params)) for pipeline in pipelines
+    ]
+    motor_loss_scales = [
+        _loss_normalization_scale(motor_loss_for_params(pipeline, initial_params)) for pipeline in pipelines
+    ]
 
     @scan_tqdm(num_steps, desc="Optimization")
     def train_step(carry, step):
@@ -80,8 +108,22 @@ def optimize_physical_params_adam(
 
         def normalized_loss(next_log_relative):
             params = params_from_optimizer_values(next_log_relative)
-            pose_loss_value = pose_loss_scale * pose_loss_for_params(params)
-            motor_loss_value = motor_loss_scale * motor_loss_for_params(params)
+            pose_loss_value = jnp.mean(
+                jnp.stack(
+                    [
+                        scale * pose_loss_for_params(pipeline, params)
+                        for pipeline, scale in zip(pipelines, pose_loss_scales)
+                    ]
+                )
+            )
+            motor_loss_value = jnp.mean(
+                jnp.stack(
+                    [
+                        scale * motor_loss_for_params(pipeline, params)
+                        for pipeline, scale in zip(pipelines, motor_loss_scales)
+                    ]
+                )
+            )
             return pose_loss_value + motor_loss_value, (pose_loss_value, motor_loss_value)
 
         (loss_value, (pose_loss_value, motor_loss_value)), grads = jax.value_and_grad(
@@ -91,7 +133,7 @@ def optimize_physical_params_adam(
         updates, next_opt_state = optimizer.update(grads, current_opt_state, log_relative)
         next_log_relative = optax.apply_updates(log_relative, updates)
         next_params = params_from_optimizer_values(next_log_relative)
-        parameter_mse = physical_params_mse(next_params, pipeline.hidden_params)
+        parameter_mse = physical_params_mse(next_params, pipelines[0].hidden_params)
         return (next_log_relative, next_opt_state), (pose_loss_value, motor_loss_value, parameter_mse)
 
     (

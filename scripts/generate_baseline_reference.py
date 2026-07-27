@@ -196,7 +196,7 @@ def main():
     parser.add_argument("--radius", type=float, default=1.0, help="Circle radius in meters.")
     parser.add_argument("--start-angle", type=float, default=0.0, help="Circle/spin start angle in radians.")
     parser.add_argument("--clockwise", action="store_true", default=False)
-    # Spin parameters (mocap-delay identification)
+    # Spin parameters
     parser.add_argument("--max-omega", type=float, default=None,
                         help="Peak angular rate in rad/s (required for spin).")
 
