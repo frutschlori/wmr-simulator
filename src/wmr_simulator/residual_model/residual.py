@@ -8,7 +8,7 @@ velocity. A small learned residual corrects the leftover gap between that
 nominal twist and the measured (mocap) twist during *nominal* (non-drifting)
 operation:
 
-    delta = [delta_v, delta_omega] = residual(v_nom, omega_nom)
+    delta = [delta_v, delta_omega] = residual(v_nom, omega_nom, v_cmd, omega_cmd)
 
     v     = v_nom     + delta_v
     v_y   = 0                                # no side-slip in nominal operation
@@ -17,15 +17,41 @@ operation:
 so the corrected twist is integrated with the ideal planar kinematics. This is
 the additive residual of Sym2Real (arXiv:2509.15412), reduced to the two
 degrees of freedom a two-wheel differential drive actually has, conditioned on
-the minimal operating-point descriptor (the nominal twist the model is about to
-produce -- available identically in training and in simulation, where there is
-no encoder).
+a (state, action) pair as in that paper.
+
+Why the descriptor is (state, action) and not the state alone
+-------------------------------------------------------------
+The *state* half is the nominal twist ``[v_nom, omega_nom]``: a bijective linear
+re-parametrization of the (ground-contact) wheel speeds, since
+``u_r = (2v + L omega) / 2r`` and ``u_l = (2v - L omega) / 2r``. Feeding the
+wheel speeds *as well* would add literally no information -- it is the same two
+numbers in a different basis -- and measurably does not help.
+
+The *action* half is the commanded twist ``[v_cmd, omega_cmd]``, i.e. the
+kinematics of the target wheel speeds ``max_wheel_speed * duty`` the motor lag is
+heading toward. This is the information the nominal model has and the state
+alone does not. It matters because the leftover physics splits in two:
+quasi-static effects (Coulomb/viscous friction, wheelbase error) are functions
+of the operating point and were already representable, whereas *transient*
+effects -- a mis-identified motor time constant, transport delay, backlash on
+torque reversal -- appear in proportion to (command - state), which a memoryless
+function of the state alone cannot express at any capacity. Note the motor lag
+gives ``u^+ - u = (1 - alpha) (u_target - u)``, so the commanded twist is the
+nominal acceleration up to a constant; empirically it roughly doubles the share
+of the yaw residual the model explains (held-out RMSE 0.265 -> 0.240 rad/s
+against a 0.287 zero-residual baseline), while the forward channel is already
+saturated by the state alone.
+
+Both halves are available identically in training (encoder speeds through the
+lag; logged duty) and in simulation, where there is no encoder -- ``robot.step``
+builds them from its own lag state and its duty argument. The action is a
+function of the actuation, never of the measured target, so there is no leakage.
 
 Expert ensemble + out-of-distribution gate
 -------------------------------------------
 The residual is a mixture of ``K`` small expert MLPs, each specialized to a
-region of the operating envelope. K-means over the normalized
-``[v_nom, omega_nom]`` training points fixes one center/bandwidth per expert.
+region of the operating envelope. K-means over the normalized descriptor
+(the full (state, action) vector) fixes one center/bandwidth per expert.
 At query time a softmax over Gaussian responsibilities routes to the nearest
 expert(s); a *null* "zero expert" with a fixed responsibility wins whenever the
 query is farther than ``ood_sigma`` bandwidths from every center, so the residual
@@ -68,9 +94,10 @@ import numpy as np
 
 from wmr_simulator.residual_model.burnout import rate_limited_series
 
-# Minimal operating-point descriptor: the nominal predicted body twist. Doubles
-# as the gate's regime descriptor (the k-means / softmax space).
-RESIDUAL_FEATURE_NAMES = ("v_nom", "omega_nom")
+# (state, action) descriptor: the nominal predicted body twist and the commanded
+# twist the motor lag is heading toward (see the module docstring). Doubles as
+# the gate's regime descriptor (the k-means / softmax space).
+RESIDUAL_FEATURE_NAMES = ("v_nom", "omega_nom", "v_cmd", "omega_cmd")
 RESIDUAL_INPUT_DIM = len(RESIDUAL_FEATURE_NAMES)
 RESIDUAL_OUTPUT_DIM = 2  # [delta_v, delta_omega]
 
@@ -175,10 +202,19 @@ def init_residual_model(
     )
 
 
-def residual_features(nominal_v, nominal_omega) -> jax.Array:
-    """Assemble the input descriptor [v_nom, omega_nom] (see RESIDUAL_FEATURE_NAMES)."""
+def residual_features(nominal_v, nominal_omega, commanded_v, commanded_omega) -> jax.Array:
+    """Assemble the descriptor [v_nom, omega_nom, v_cmd, omega_cmd].
+
+    See RESIDUAL_FEATURE_NAMES: the nominal twist is the state, the commanded
+    twist (kinematics of ``max_wheel_speed * duty``) is the action.
+    """
     return jnp.stack(
-        [jnp.asarray(nominal_v, dtype=jnp.float32), jnp.asarray(nominal_omega, dtype=jnp.float32)]
+        [
+            jnp.asarray(nominal_v, dtype=jnp.float32),
+            jnp.asarray(nominal_omega, dtype=jnp.float32),
+            jnp.asarray(commanded_v, dtype=jnp.float32),
+            jnp.asarray(commanded_omega, dtype=jnp.float32),
+        ]
     )
 
 
@@ -323,15 +359,19 @@ def build_residual_dataset(
     passed through the first-order motor lag (matching DiffDrive.step -- the
     simulator has no encoder), the identified traction limit
     (``a_slip_max``, residual_model.burnout) and the ideal differential-drive
-    kinematics. The residual input is this nominal twist and the target is
-    ``measured - nominal``; because the input is a function of the actuation
+    kinematics.
+
+    Commanded twist: the same kinematics applied to the *target* wheel speeds
+    ``max_wheel_speed * duty`` (the action half of the descriptor). The residual
+    input is the concatenation of the two and the target is
+    ``measured - nominal``; because both inputs are functions of the actuation
     (not of the measured target) there is no target leakage and every valid
     interval is a sample (no off-by-one drop).
 
     ``resample_uniform`` interpolates poses (and twists) onto a uniform
     median-dt grid; ``max_dt_factor`` drops mocap intervals longer than that
     multiple of the median (stream gaps make the twist meaningless). Returns
-    float32 ``features`` (N, 2), ``targets`` (N, 2), ``time_s``, ``dt``, and the
+    float32 ``features`` (N, 4), ``targets`` (N, 2), ``time_s``, ``dt``, and the
     measured/nominal twists plus pose arrays for diagnostics.
     """
     pose_time_s = np.asarray(log.pose.time_s, dtype=float)
@@ -391,7 +431,15 @@ def build_residual_dataset(
     omega_nom = r * (u_r_nom - u_l_nom) / effective_wheelbase
     nominal_twist = np.column_stack([v_nom, np.zeros_like(v_nom), omega_nom])
 
-    features = np.column_stack([v_nom, omega_nom])
+    # Action half of the descriptor: the twist of the *target* wheel speeds the
+    # lag is heading toward (matching DiffDrive.step, which builds it from its
+    # duty argument). Not traction-limited -- it is a command, not a state.
+    target_r = max_speed * duty[:, 0]
+    target_l = max_speed * duty[:, 1]
+    v_cmd = 0.5 * r * (target_r + target_l)
+    omega_cmd = r * (target_r - target_l) / effective_wheelbase
+
+    features = np.column_stack([v_nom, omega_nom, v_cmd, omega_cmd])
     targets = np.column_stack(
         [measured_twist[:, 0] - v_nom, measured_twist[:, 2] - omega_nom]
     )
@@ -426,26 +474,21 @@ def split_datasets_by_file(
     validation_split: float,
     seed: int,
 ) -> tuple[list[int], list[int]]:
-    """Train/validation indices into ``datasets``, split by whole file."""
+    """Train/validation indices into ``datasets``, split by whole file.
+
+    Always whole files, never a within-file split: the residual has to learn a
+    complete trajectory, so holding out the tail of every log would train it on
+    truncated runs. With too few files for ``validation_split`` to reach one
+    file, one file is held out anyway and the rest train.
+    """
+    if len(datasets) < 2:
+        raise ValueError("Need at least 2 logs to hold one out for validation.")
     indices = np.arange(len(datasets))
     rng = np.random.default_rng(seed)
     rng.shuffle(indices)
     num_validation = int(np.floor(len(indices) * validation_split))
-    if len(indices) - num_validation == 0:
-        raise ValueError("validation_split leaves no training files.")
+    num_validation = min(max(num_validation, 1), len(indices) - 1)
     return list(indices[num_validation:]), list(indices[:num_validation])
-
-
-def split_dataset_tail(dataset: dict, validation_split: float) -> tuple[dict, dict]:
-    """Within-file split: the last ``validation_split`` fraction (contiguous in
-    time) becomes validation, avoiding leakage from shuffled neighbors."""
-    num_samples = len(dataset["features"])
-    num_validation = int(np.floor(num_samples * validation_split))
-    split_index = num_samples - num_validation
-    keys = ("time_s", "dt", "features", "targets", "measured_twist", "nominal_twist")
-    train = {key: dataset[key][:split_index] for key in keys}
-    validation = {key: dataset[key][split_index:] for key in keys}
-    return train, validation
 
 
 def normalization_stats(values: np.ndarray, min_std: float = 1e-6) -> tuple[np.ndarray, np.ndarray]:
@@ -706,7 +749,23 @@ def simulate_closed_loop_on_log_reference(
     clip_after_first_trajectory: bool = True,
 ):
     """Closed-loop simulation (hidden robot + optional residual) tracking the
-    reference trajectory recorded in a Pololu log. Returns the SimulationLog."""
+    reference trajectory recorded in a Pololu log.
+
+    Returns ``(sim_log, measured_log)``: the simulated SimulationLog and the
+    decoded Pololu log it was driven from, so callers can compare the simulated
+    robot against the real one that recorded the same reference.
+
+    Runs the log's *own* recorded controller: the iteration's ``problem.yaml``
+    supplies the tuned base gains, the error-MLP ``theta`` that was exported to
+    ``GAINMLP.JSN`` and the identified robot/estimator parameters. Using the
+    global ``problem`` config instead compares against a controller that never
+    recorded the log (the stock kx is 4.5 where the tuned one is ~0.003), which
+    makes the comparison meaningless -- so ``problem`` is only the fallback for
+    logs outside an iteration folder.
+    """
+    import yaml
+
+    from wmr_simulator.gain_parametrization import params_from_cfg
     from wmr_simulator.pololu.log_loader import load_pololu_traj_control_log
     from wmr_simulator.simulation import SimulationPipeline
 
@@ -714,17 +773,36 @@ def simulate_closed_loop_on_log_reference(
         log_path,
         clip_after_first_trajectory=clip_after_first_trajectory,
     )
-    pipeline = SimulationPipeline(problem_path=problem, seed=seed, residual_model=model)
+    problem_path = problem_path_for_log(log_path, problem)
+    config = yaml.safe_load(open(problem_path, "r", encoding="utf-8"))
+    controller_cfg = config["controller"]
+    parametrization_cfg = controller_cfg.get(
+        "gain_parametrization", controller_cfg.get("gain_schedule")
+    )
+    schedule_params = (
+        params_from_cfg(parametrization_cfg, [config["robot"]["v_max"], config["robot"]["omega_max"]])
+        if parametrization_cfg and parametrization_cfg.get("enabled", False)
+        else None
+    )
+
+    pipeline = SimulationPipeline(problem_path=problem_path, seed=seed, residual_model=model)
     reference_states = jnp.asarray(
         pipeline._fit_reference_states(np.asarray(log.reference.states, dtype=float)),
         dtype=jnp.float32,
     )
-    return pipeline.run_closed_loop(
+    # Start where the real robot started, not where the reference starts: the
+    # robot is placed by hand and the initial offset it has to drive out is part
+    # of the recorded tracking error. Simulating from the reference start hands
+    # the sim a head start the real run never had.
+    sim_log = pipeline.run_closed_loop(
         pipeline.hidden_params,
         use_hidden_robot=True,
         controller_gains=pipeline.gains,
+        schedule_params=schedule_params,
         reference_states=reference_states,
+        initial_pose=jnp.asarray(log.pose.states[0], dtype=jnp.float32),
     )
+    return sim_log, log
 
 
 def robot_params_from_problem(problem_path: str):
@@ -743,12 +821,45 @@ def robot_params_from_problem(problem_path: str):
     )
 
 
-def gather_log_paths(log_dirs: list[str], recursive: bool = True) -> list:
-    """All loadable Pololu logs under the given directories (recursively).
+def problem_path_for_log(log_path: str, default_problem_path: str) -> str:
+    """Problem config the robot was actually running when this log was recorded.
 
-    ``recursive`` walks every subdirectory (experiments store logs in
+    Active-learning logs live in ``<experiment>/<iteration_XX>/data/TRxx.csv``
+    and each iteration folder carries the ``problem.yaml`` that produced its
+    ``ROBOTCFG.CFG`` / ``GAINMLP.JSN`` export -- the identified robot parameters
+    and tuned controller gains that were running for those runs. They differ per
+    iteration (the motor time constant alone moves by ~50% between the stock
+    config and the identified ones), so a single global config misstates the
+    nominal model for every log but its own. Falls back to
+    ``default_problem_path`` for logs outside such a folder.
+    """
+    from pathlib import Path
+
+    iteration_problem = Path(log_path).parent.parent / "problem.yaml"
+    return str(iteration_problem) if iteration_problem.is_file() else default_problem_path
+
+
+def robot_params_for_log(log_path: str, default_problem_path: str):
+    """Physical params the robot was configured with when this log was recorded."""
+    return robot_params_from_problem(problem_path_for_log(log_path, default_problem_path))
+
+
+DATA_DIR_NAME = "data"
+
+
+def gather_log_paths(log_dirs: list[str], recursive: bool = True) -> list:
+    """Loadable Pololu logs under the given directories.
+
+    ``recursive`` descends into an experiment tree (logs live in
     ``iteration_XX/data/``); otherwise only direct children are scanned. Files
     are deduplicated and returned in sorted order.
+
+    Recursion deliberately stops *at* each ``data/`` directory: only logs
+    sitting directly inside one are collected. Subfolders of ``data/`` hold
+    special runs -- baseline comparisons, no-gain-MLP ablations, single-shape
+    sweeps (``circle/``, ``lemniscate/``, ``*_no_mlp/``) -- which must not be
+    baked into the residual training set. Logs lying directly in a scanned
+    directory are kept too, so pointing at a flat folder still works.
     """
     from pathlib import Path
 
@@ -761,7 +872,11 @@ def gather_log_paths(log_dirs: list[str], recursive: bool = True) -> list:
             raise ValueError(f"Log path must be a directory: {directory}")
         if recursive:
             paths.extend(
-                p for p in directory.rglob("*") if p.is_file() and _looks_like_pololu_log(p)
+                path
+                for path in directory.rglob("*")
+                if path.is_file()
+                and (path.parent.name == DATA_DIR_NAME or path.parent == directory)
+                and _looks_like_pololu_log(path)
             )
         else:
             paths.extend(list_pololu_log_paths(directory))
@@ -797,7 +912,14 @@ def train_from_logs(
     recursive: bool = True,
     out_dir: str = "visualize",
 ) -> ResidualEnsemble:
-    """Build datasets from all logs under ``log_dirs``, train, save checkpoint + plots."""
+    """Build datasets from all logs under ``log_dirs``, train, save checkpoint + plots.
+
+    ``log_dirs`` may span several active-learning iterations: one-step training is
+    gain-independent (the descriptor is built from the logged duty, so whatever
+    controller produced it is irrelevant), which is what makes pooling iterations
+    with different tuned gains sound. Per-log robot params keep the nominal model
+    correct across the pool (see ``robot_params_for_log``).
+    """
     from datetime import datetime
     from pathlib import Path
 
@@ -809,35 +931,26 @@ def train_from_logs(
         plot_training_history,
     )
 
-    params = robot_params_from_problem(problem)
     log_paths = gather_log_paths(log_dirs, recursive=recursive)
     datasets = []
     for path in log_paths:
+        # Per-log params: the nominal model each log is a residual *of* is the one
+        # its own iteration was running (see problem_path_for_log).
+        params = robot_params_for_log(str(path), problem)
         log = load_pololu_traj_control_log(path, clip_after_first_trajectory=clip_after_first_trajectory)
         dataset = build_residual_dataset(log, params, resample_uniform=resample_uniform)
         datasets.append(dataset)
-        print(f"{path}: {len(dataset['features'])} samples")
+        print(f"{path}: {len(dataset['features'])} samples  (params from {problem_path_for_log(str(path), problem)})")
 
-    num_validation_files = int(np.floor(len(datasets) * validation_split))
-    file_split = num_validation_files >= 1 and len(datasets) - num_validation_files >= 1
-    if file_split:
-        train_indices, validation_indices = split_datasets_by_file(datasets, validation_split, seed)
-        train_features, train_targets = stack_datasets([datasets[i] for i in train_indices])
-        validation_features, validation_targets = stack_datasets([datasets[i] for i in validation_indices])
-        train_segments = [len(datasets[i]["features"]) for i in train_indices]
-        validation_segments = [len(datasets[i]["features"]) for i in validation_indices]
-        train_files = [str(log_paths[i]) for i in train_indices]
-        validation_files = [str(log_paths[i]) for i in validation_indices]
-        print(f"Split by file: {len(train_indices)} train, {len(validation_indices)} validation")
-        print(f"  validation files: {[Path(f).name for f in validation_files]}")
-    else:
-        splits = [split_dataset_tail(dataset, validation_split) for dataset in datasets]
-        train_features, train_targets = stack_datasets([train for train, _ in splits])
-        validation_features, validation_targets = stack_datasets([val for _, val in splits])
-        train_segments = [len(train["features"]) for train, _ in splits]
-        validation_segments = [len(val["features"]) for _, val in splits]
-        train_files = validation_files = [str(path) for path in log_paths]
-        print(f"Too few files for a file split; using per-file tail split ({validation_split:.0%})")
+    train_indices, validation_indices = split_datasets_by_file(datasets, validation_split, seed)
+    train_features, train_targets = stack_datasets([datasets[i] for i in train_indices])
+    validation_features, validation_targets = stack_datasets([datasets[i] for i in validation_indices])
+    train_segments = [len(datasets[i]["features"]) for i in train_indices]
+    validation_segments = [len(datasets[i]["features"]) for i in validation_indices]
+    train_files = [str(log_paths[i]) for i in train_indices]
+    validation_files = [str(log_paths[i]) for i in validation_indices]
+    print(f"Split by file: {len(train_indices)} train, {len(validation_indices)} validation")
+    print(f"  validation files: {[Path(f).name for f in validation_files]}")
 
     print(f"Training samples: {len(train_features)}, validation samples: {len(validation_features)}")
 
@@ -905,11 +1018,20 @@ def train_from_logs(
     from wmr_simulator.visualization.residual import plot_closed_loop_rollout
 
     first_train_log = train_files[0]
-    sim_log = simulate_closed_loop_on_log_reference(
+    sim_log, measured_log = simulate_closed_loop_on_log_reference(
         model, problem, first_train_log, seed=seed, clip_after_first_trajectory=clip_after_first_trajectory
     )
+    # Same loop with the residual switched off: the control that says whether
+    # the residual moved the simulated robot toward the real one or past it.
+    nominal_sim_log, _ = simulate_closed_loop_on_log_reference(
+        None, problem, first_train_log, seed=seed, clip_after_first_trajectory=clip_after_first_trajectory
+    )
     plot_closed_loop_rollout(
-        sim_log, out_prefix=f"residual_closed_loop_{Path(first_train_log).stem}", out_dir=out_dir
+        sim_log,
+        out_prefix=f"residual_closed_loop_{Path(first_train_log).stem}",
+        nominal_sim_log=nominal_sim_log,
+        measured_log=measured_log,
+        out_dir=out_dir,
     )
     print(f"Plots saved to {out_dir}/")
     return model
@@ -939,7 +1061,7 @@ def evaluate_on_log(
         validation_files = checkpoint["metadata"].get("validation_files", [])
         print(f"  trained validation files: {[Path(f).name for f in validation_files]}")
 
-    params = robot_params_from_problem(problem)
+    params = robot_params_for_log(log_path, problem)
     log = load_pololu_traj_control_log(log_path, clip_after_first_trajectory=clip_after_first_trajectory)
     dataset = build_residual_dataset(log, params, resample_uniform=resample_uniform)
 
@@ -1016,7 +1138,7 @@ def train_main(argv=None):
     # Null "zero expert" distance (bandwidths): beyond it the residual -> 0.
     parser.add_argument("--ood-sigma", type=float, default=DEFAULT_OOD_SIGMA)
     parser.add_argument("--epochs", type=int, default=500)
-    parser.add_argument("--batch-size", type=int, default=16384)
+    parser.add_argument("--batch-size", type=int, default=32768)
     parser.add_argument("--learning-rate", type=float, default=5e-4)
     # L2 penalty on the (normalized) residual output; shrinks toward nominal.
     parser.add_argument("--output-reg-weight", type=float, default=1e-2)
@@ -1123,7 +1245,4 @@ def _wrap_to_pi(angle):
 
 
 if __name__ == "__main__":
-    import os
-
-    # os.environ.setdefault("JAX_PLATFORMS", "cpu")
     train_main()

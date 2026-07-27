@@ -82,6 +82,35 @@ def is_compact_format(bin_file, start_pos):
     return True
 
 
+def find_compact_start(data, start_pos=0):
+    """Return the start of the longest valid Compact Tagged record run.
+
+    SD-card log chunks can be cut in the middle of a record.  In that case the
+    file magic is still present, but the bytes immediately after it complete
+    the preceding chunk's record and therefore cannot be interpreted as a new
+    record header.  Searching for the longest self-consistent run lets a
+    standalone decode recover the records owned by this chunk.
+    """
+    if start_pos == len(data):
+        return start_pos
+
+    runs = {}
+    best_count = 0
+    best_pos = None
+    for pos in range(len(data) - 5, start_pos - 1, -1):
+        tag = data[pos + 4]
+        record_end = pos + 5 + 4 * FLOAT_COUNTS.get(tag, 0)
+        if tag in FLOAT_COUNTS and record_end <= len(data):
+            runs[pos] = 1 + runs.get(record_end, 0)
+            if runs[pos] >= best_count:
+                best_count = runs[pos]
+                best_pos = pos
+
+    # A short match can occur by chance in arbitrary bytes.  Real logs have
+    # thousands of records, while ten is also the existing format probe size.
+    return best_pos if best_count >= 10 else None
+
+
 def csv_output_path(input_path, output_dir=None):
     filename = os.path.basename(input_path) + ".csv"
     if output_dir is not None:
@@ -109,6 +138,20 @@ def decode_file(input_path, output_path=None):
         bin_file.seek(current_pos)  # seek back
 
         records = []
+        if not is_compact:
+            bin_file.seek(0)
+            recovered_start = find_compact_start(bin_file.read(), current_pos)
+            if recovered_start is None:
+                print("Error: Unsupported or damaged Compact Tagged Binary format.")
+                return False
+            if recovered_start != current_pos:
+                print(
+                    "Warning: File starts mid-record; skipping "
+                    f"{recovered_start - current_pos} continuation bytes."
+                )
+                bin_file.seek(recovered_start)
+            is_compact = True
+
         if is_compact:
             print("Detected Compact Tagged Binary format")
             csv_header = CSV_HEADER

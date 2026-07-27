@@ -1,6 +1,7 @@
 __all__ = [
     "SystemIdentificationPipeline",
     "run_multi_experiment_identification",
+    "run_multi_log_identification",
     "run_single_experiment_identification",
     "run_validation_identification",
     "run_window_replay_identification",
@@ -16,6 +17,10 @@ def __getattr__(name):
         from wmr_simulator.identification.pipeline import run_single_experiment_identification
 
         return run_single_experiment_identification
+    if name == "run_multi_log_identification":
+        from wmr_simulator.identification.pipeline import run_multi_log_identification
+
+        return run_multi_log_identification
     if name in {
         "run_multi_experiment_identification",
         "run_validation_identification",

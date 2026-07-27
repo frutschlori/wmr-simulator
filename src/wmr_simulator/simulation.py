@@ -201,8 +201,8 @@ class SimulationPipeline:
         reference_states = self.reference_states if reference_states is None else reference_states
         return jnp.asarray(reference_states[0, :3], dtype=jnp.float32)
 
-    def _init_states(self, robot_key, estimator_key, reference_states=None):
-        pose0 = self.initial_reference_pose(reference_states)
+    def _init_states(self, robot_key, estimator_key, reference_states=None, start_pose=None):
+        pose0 = self.initial_reference_pose(reference_states) if start_pose is None else start_pose
         robot_state = self.robot.get_init_state(key=robot_key, init_pose=pose0)
         estimator_state = self.estimator.get_init_state(key=estimator_key, start_pose=pose0)
         controller_state = jnp.zeros(2, dtype=jnp.float32)
@@ -227,7 +227,16 @@ class SimulationPipeline:
         wheel_speed_log_source: str = "estimated",
         reference_states=None,
         residual_model=None,
+        initial_pose=None,
     ) -> SimulationLog:
+        """Roll out the closed loop along ``reference_states``.
+
+        ``initial_pose`` [x, y, theta] starts the robot (and its estimator)
+        somewhere other than the reference's first pose. Comparing a simulated
+        run against a recorded one needs it: the real robot is never placed
+        exactly on the reference start, and the initial offset it has to drive
+        out is part of what the tracking error measures.
+        """
         if wheel_speed_log_source not in {"estimated", "true"}:
             raise ValueError("wheel_speed_log_source must be 'estimated' or 'true'.")
         residual_model = self.residual_model if residual_model is None else residual_model
@@ -235,7 +244,12 @@ class SimulationPipeline:
         estimator_key = self.target_estimator_key if estimator_key is None else estimator_key
         model_params = robot_params if est_params is None else est_params
         reference_states = self.reference_states if reference_states is None else reference_states
-        carry0 = self._init_states(robot_key, estimator_key, reference_states)
+        start_pose = (
+            self.initial_reference_pose(reference_states)
+            if initial_pose is None
+            else jnp.asarray(initial_pose, dtype=jnp.float32)
+        )
+        carry0 = self._init_states(robot_key, estimator_key, reference_states, start_pose)
 
         nominal_gains = self.gains if controller_gains is None else controller_gains
 
@@ -350,9 +364,9 @@ class SimulationPipeline:
             duty_cycles,
             applied_gains,
         ) = outputs
-        initial_pose = self.initial_reference_pose(reference_states)[None, :]
-        pose_states = jnp.concatenate([initial_pose, pose_samples.reshape(-1, 3)], axis=0)
-        true_pose_states = jnp.concatenate([initial_pose, true_pose_samples.reshape(-1, 3)], axis=0)
+        start_pose_row = start_pose[None, :]
+        pose_states = jnp.concatenate([start_pose_row, pose_samples.reshape(-1, 3)], axis=0)
+        true_pose_states = jnp.concatenate([start_pose_row, true_pose_samples.reshape(-1, 3)], axis=0)
         duty_inputs = duty_cycles.reshape(-1, 2)
         selected_wheel_speeds = true_wheel_speeds if wheel_speed_log_source == "true" else estimated_wheel_speeds
         initial_wheel_speeds = carry0[0].wheel_speeds if wheel_speed_log_source == "true" else carry0[1].u_lp

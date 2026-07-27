@@ -14,10 +14,12 @@ CLI stays responsive for bookkeeping commands like status.
 
 from __future__ import annotations
 
+import copy
 import shutil
 from pathlib import Path
 
 from wmr_simulator.active_learning.experiment import (
+    ITERATION_PREFIX,
     Experiment,
     IterationPaths,
     collect_plots,
@@ -66,8 +68,6 @@ def stage_finalize(experiment: Experiment, iteration: int) -> IterationPaths:
     gains_result = load_yaml(paths.gains_result)
     robot_config = load_yaml(paths.robot_config)
     robot_config["robot"].update(identification["estimated_params"])
-    if "mocap_delay" in identification:
-        robot_config.setdefault("estimator", {})["mocap_delay"] = float(identification["mocap_delay"])
     robot_config["controller"]["gains"] = [float(gain) for gain in gains_result["gains"]]
     if gains_result.get("schedule") is not None:
         robot_config["controller"].pop("gain_schedule", None)
@@ -76,34 +76,77 @@ def stage_finalize(experiment: Experiment, iteration: int) -> IterationPaths:
             "enabled": bool(gains_result["schedule_enabled"]),
         }
 
-    next_paths = _initialize_iteration(experiment, iteration + 1, robot_config)
+    next_paths = _initialize_iteration(
+        experiment,
+        iteration + 1,
+        robot_config,
+        static_gains=gains_result.get("static_gains"),
+    )
     print(f"Created {next_paths.root} from iteration {iteration:02d} results.")
     print(f"  firmware config for the robot: {next_paths.robotcfg_cfg}")
     return next_paths
 
 
-def _initialize_iteration(experiment: Experiment, iteration: int, robot_config: dict) -> IterationPaths:
+def _initialize_iteration(
+    experiment: Experiment,
+    iteration: int,
+    robot_config: dict,
+    static_gains: list[float] | None = None,
+) -> IterationPaths:
     from wmr_simulator.pololu.robot_config import export_robot_config
     from wmr_simulator.types import PhysicalParams
 
     paths = experiment.paths(iteration)
     paths.create_directories()
+    physical_params = PhysicalParams(
+        wheel_radius=robot_config["robot"]["wheel_radius"],
+        base_diameter=robot_config["robot"]["base_diameter"],
+        max_wheel_speed=robot_config["robot"]["max_wheel_speed"],
+    )
     save_yaml(paths.robot_config, robot_config)
     write_iteration_problem(experiment.config["problem"], robot_config, paths.problem)
     export_robot_config(
         paths.robotcfg_cfg,
-        physical_params=PhysicalParams(
-            wheel_radius=robot_config["robot"]["wheel_radius"],
-            base_diameter=robot_config["robot"]["base_diameter"],
-            max_wheel_speed=robot_config["robot"]["max_wheel_speed"],
-        ),
+        physical_params=physical_params,
         controller_gains=robot_config["controller"]["gains"],
         template_path=experiment.config.get("robotcfg_template"),
     )
     gainmlp_path = _export_gain_mlp_if_configured(paths.problem, paths.gainmlp_jsn)
     if gainmlp_path is not None:
         print(f"  firmware gain-MLP for the robot: {gainmlp_path}")
+    if static_gains is not None:
+        _write_static_gain_config(experiment, paths, robot_config, physical_params, static_gains)
+        print(f"  static-gain baseline for the robot: {paths.robotcfg_static_cfg}")
     return paths
+
+
+def _write_static_gain_config(
+    experiment: Experiment,
+    paths: IterationPaths,
+    robot_config: dict,
+    physical_params,
+    static_gains: list[float],
+) -> None:
+    """Write the gain-MLP-free baseline variant of this iteration's robot config.
+
+    Same identified robot parameters, but the gains of the static pretune stage
+    and no gain parametrization, so the two can be benchmarked against each
+    other on the robot (copy ROBOTCFG_static.CFG as ROBOTCFG.CFG without a
+    GAINMLP.JSN next to it).
+    """
+    from wmr_simulator.pololu.robot_config import export_robot_config
+
+    static_config = copy.deepcopy(robot_config)
+    static_config["controller"]["gains"] = [float(gain) for gain in static_gains]
+    static_config["controller"].pop("gain_parametrization", None)
+    static_config["controller"].pop("gain_schedule", None)
+    save_yaml(paths.robot_config_static, static_config)
+    export_robot_config(
+        paths.robotcfg_static_cfg,
+        physical_params=physical_params,
+        controller_gains=static_config["controller"]["gains"],
+        template_path=experiment.config.get("robotcfg_template"),
+    )
 
 
 def _export_gain_mlp_if_configured(problem_path: Path, output_path: Path) -> Path | None:
@@ -140,6 +183,8 @@ def stage_plan_identification_trajectory(experiment: Experiment, iteration: int)
     paths = experiment.paths(iteration)
     paths.create_directories()
     config = experiment.config["identification_trajectory"]
+    identification_plot_dir = paths.visualize_dir / "identification"
+    identification_plot_dir.mkdir(parents=True, exist_ok=True)
 
     if not experiment.config["optimize_trajectories"]:
         baseline = experiment.config.get("baseline_identification_trajectory")
@@ -160,7 +205,7 @@ def stage_plan_identification_trajectory(experiment: Experiment, iteration: int)
             fim_a_slip_max=bool(config["fim_a_slip_max"]),
         )
         pipeline.set_bezier_control_points(pipeline.initial_bezier_control_points(config["bezier_order"]))
-        with collect_plots(paths.visualize_dir):
+        with collect_plots(identification_plot_dir):
             _, loss_history = pipeline.optimize_bezier_trajectory(
                 order=config["bezier_order"],
                 num_steps=config["opt_steps"],
@@ -195,7 +240,7 @@ def stage_plan_identification_trajectory(experiment: Experiment, iteration: int)
         jsn_path,
         wait_time=float(config["bridge_wait_time"]),
         bridge_time=float(config["bridge_time"]),
-        plot_path=paths.visualize_dir / "identification_trajectory_bridge.pdf",
+        plot_path=identification_plot_dir / "identification_trajectory_bridge.pdf",
     )
     print(f"Exported bridged repeat variant: {bridged_path}")
     print(f"Copy {jsn_path.name} and {paths.robotcfg_cfg.name} to the robot SD card, run the")
@@ -260,8 +305,6 @@ def stage_plan_tuning_trajectories(experiment: Experiment, iteration: int) -> li
         print(f"Optimized {len(control_point_batch)} tuning trajectories "
               f"(final losses {final_losses.min():.4e} .. {final_losses.max():.4e})")
 
-    plot_dir = paths.visualize_dir / "tuning_trajectories"
-    plot_dir.mkdir(parents=True, exist_ok=True)
     saved = []
     for index, control_points in enumerate(control_point_batch):
         pipeline.set_bezier_control_points(control_points)
@@ -272,10 +315,6 @@ def stage_plan_tuning_trajectories(experiment: Experiment, iteration: int) -> li
                     filename_prefix=f"tuning_trajectory_{index:02d}",
                 )
             )
-        )
-        pipeline.plot_trajectory(
-            window_length=config["window_length"],
-            out_path=str(plot_dir / f"trajectory_{index:02d}.pdf"),
         )
     print(f"Saved {len(saved)} tuning trajectory pickles to {paths.tuning_trajectories_dir}")
     return saved
@@ -382,134 +421,224 @@ def stage_identify(
     experiment: Experiment,
     iteration: int,
     log: str | None = None,
-    estimate_mocap_delay: bool | None = None,
 ) -> dict:
-    """Run parameter identification on the recorded identification log.
+    """Identify the robot parameters from every identification log of this iteration.
 
-    Optionally estimates the mocap transport delay first (mocap yaw rate vs
-    IMU gyro z cross-correlation) and shifts the mocap timestamps accordingly.
+    All decoded logs sitting *directly* in data/ are identification data (record
+    several, diverse trajectories per iteration); subdirectories are reserved for
+    baseline comparison runs and stay out of the fit. Identification is cheap, so
+    the stage first runs it per log, flags logs whose parameters disagree with the
+    median of the batch (identification.outlier_z_threshold, 0 disables), and only
+    then fits one parameter set jointly to the remaining logs. A parameter the
+    recorded motion does not excite is better held fixed than fitted, see
+    identification.identify_a_slip_max.
+
     Writes results/identification.yaml and problem_identified.yaml (the base
-    problem with the updated robot block and estimator mocap_delay) used by
-    all downstream stages.
+    problem with the updated robot block) used by all downstream stages.
     """
     import jax.numpy as jnp
+    import numpy as np
 
-    from wmr_simulator.identification.mocap_delay import (
-        estimate_mocap_delay_from_log_file,
-        print_delay_result,
-    )
-    from wmr_simulator.identification.pipeline import run_single_experiment_identification
+    from wmr_simulator.identification.outliers import robust_parameter_outliers
+    from wmr_simulator.identification.pipeline import run_multi_log_identification
     from wmr_simulator.pololu.log_loader import load_pololu_traj_control_log
-    from wmr_simulator.types import PhysicalParams, print_physical_params
-    from wmr_simulator.visualization.identification import plot_loss_history, plot_system_id
+    from wmr_simulator.types import PhysicalParams, physical_params_to_array, print_physical_params
+    from wmr_simulator.visualization.identification import (
+        plot_identification_log_parameters,
+        plot_loss_history,
+        plot_system_id,
+    )
 
     paths = experiment.paths(iteration)
     config = experiment.config["identification"]
     log_config = experiment.config["log_loading"]
-    log_path = _resolve_log_path(paths, log)
-    print(f"Identification log: {log_path}")
-
-    if estimate_mocap_delay is None:
-        estimate_mocap_delay = bool(config["estimate_mocap_delay"])
-    mocap_delay = float(log_config["mocap_delay"])
-    if estimate_mocap_delay:
-        try:
-            delay_result = estimate_mocap_delay_from_log_file(
-                log_path,
-                max_delay_s=float(config["mocap_delay_search_range"]),
-            )
-            print_delay_result(delay_result)
-            mocap_delay = float(delay_result["delay_s"])
-        except ValueError as error:
-            print(f"Mocap delay estimation skipped: {error}")
-            print(f"Falling back to configured mocap_delay = {1000.0 * mocap_delay:.2f} ms")
-    print(f"Mocap delay compensation: {1000.0 * mocap_delay:.2f} ms")
+    log_paths = _resolve_log_paths(paths, log)
+    print(f"Identification logs ({len(log_paths)}): {', '.join(path.name for path in log_paths)}")
 
     robot_config = load_yaml(paths.robot_config)["robot"]
+    identify_a_slip_max = bool(config["identify_a_slip_max"])
+    a_slip_max = float(robot_config.get("a_slip_max", 0.0))
+    if identify_a_slip_max and a_slip_max == 0.0:
+        # A zero value keeps the burnout model disabled in the log-space optimizer;
+        # fall back to the experiment config init to (re-)enable identification.
+        # With identification off there is nothing to re-enable: a disabled limit
+        # stays disabled instead of being silently switched on at the init value.
+        a_slip_max = float(config["init_a_slip_max"])
     init_params = PhysicalParams(
         wheel_radius=jnp.asarray(robot_config["wheel_radius"]),
         base_diameter=jnp.asarray(robot_config["base_diameter"]),
         max_wheel_speed=jnp.asarray(robot_config["max_wheel_speed"]),
         time_constant=jnp.asarray(robot_config["time_constant"]),
-        # A zero value keeps the burnout model disabled in the log-space optimizer;
-        # fall back to the experiment config init to (re-)enable identification.
-        a_slip_max=jnp.asarray(robot_config.get("a_slip_max", 0.0) or config["init_a_slip_max"]),
+        a_slip_max=jnp.asarray(a_slip_max),
+    )
+    if not identify_a_slip_max:
+        print(f"Holding a_slip_max at {a_slip_max:.3f} m/s^2 (identification.identify_a_slip_max is off).")
+
+    def identify(target_logs):
+        return run_multi_log_identification(
+            problem_path=str(paths.problem),
+            initial_params=init_params,
+            target_logs=target_logs,
+            num_steps=int(config["steps"]),
+            learning_rate=float(config["learning_rate"]),
+            seed=int(experiment.config["seed"]),
+            window_length=config["window_length"],
+            identify_a_slip_max=identify_a_slip_max,
+        )
+
+    pololu_logs = [
+        load_pololu_traj_control_log(
+            log_path,
+            clip_after_first_trajectory=log_config["clip_after_first_trajectory"],
+        )
+        for log_path in log_paths
+    ]
+
+    per_log_results = []
+    for log_path, pololu_log in zip(log_paths, pololu_logs):
+        print(f"Identifying on {log_path.name} ...")
+        per_log_results.append(identify([pololu_log]))
+    parameter_samples = np.asarray(
+        [physical_params_to_array(result["estimated_params"]) for result in per_log_results], dtype=float
     )
 
-    pololu_log = load_pololu_traj_control_log(
-        log_path,
-        clip_after_first_trajectory=log_config["clip_after_first_trajectory"],
-        mocap_delay_s=mocap_delay,
-    )
-    result = run_single_experiment_identification(
-        problem_path=str(paths.problem),
-        initial_params=init_params,
-        num_steps=int(config["steps"]),
-        learning_rate=float(config["learning_rate"]),
-        seed=int(experiment.config["seed"]),
-        window_length=config["window_length"],
-        target_log=pololu_log,
-    )
-    estimated_params = result["estimated_params"]
-    print_physical_params("Estimated parameters:", estimated_params)
-    print(f"Final normalized geometry loss: {float(result['loss_history'][-1]):.8f}")
-    print(f"Final normalized motor loss:    {float(result['motor_loss_history'][-1]):.8f}")
+    report = robust_parameter_outliers(parameter_samples, z_threshold=float(config["outlier_z_threshold"]))
+    kept_indices = [index for index in range(len(log_paths)) if not report.is_outlier[index]]
+    if not kept_indices:
+        raise RuntimeError("Outlier detection excluded every log; lower identification.outlier_z_threshold.")
+    _print_per_log_parameters(log_paths, parameter_samples, per_log_results, report)
+
+    if len(kept_indices) == len(log_paths) and len(log_paths) == 1:
+        # A joint fit on a single log is exactly the per-log fit; don't redo it.
+        joint_result = per_log_results[0]
+    else:
+        print(f"Joint identification on {len(kept_indices)} log(s) ...")
+        joint_result = identify([pololu_logs[index] for index in kept_indices])
+
+    estimated_params = joint_result["estimated_params"]
+    print_physical_params("Estimated parameters (joint):", estimated_params)
+    print(f"Final normalized geometry loss: {float(joint_result['loss_history'][-1]):.8f}")
+    print(f"Final normalized motor loss:    {float(joint_result['motor_loss_history'][-1]):.8f}")
 
     payload = {
-        "log": str(log_path),
-        "estimated_params": {
-            "wheel_radius": float(estimated_params.wheel_radius),
-            "base_diameter": float(estimated_params.base_diameter),
-            "max_wheel_speed": float(estimated_params.max_wheel_speed),
-            "time_constant": float(estimated_params.time_constant),
-            "a_slip_max": float(estimated_params.a_slip_max),
-        },
-        "mocap_delay": mocap_delay,
-        "mocap_delay_estimated": bool(estimate_mocap_delay),
-        "final_loss": float(result["loss_history"][-1]),
-        "final_motor_loss": float(result["motor_loss_history"][-1]),
+        "logs": [str(log_paths[index]) for index in kept_indices],
+        "excluded_logs": [str(log_paths[index]) for index in range(len(log_paths)) if report.is_outlier[index]],
+        "estimated_params": _estimated_params_dict(estimated_params),
+        "final_loss": float(joint_result["loss_history"][-1]),
+        "final_motor_loss": float(joint_result["motor_loss_history"][-1]),
+        "outlier_z_threshold": float(config["outlier_z_threshold"]),
+        "outlier_detection_evaluated": bool(report.evaluated),
+        "identify_a_slip_max": identify_a_slip_max,
+        "per_log": [
+            {
+                "log": str(log_paths[index]),
+                "estimated_params": _estimated_params_dict(result["estimated_params"]),
+                "final_loss": float(result["loss_history"][-1]),
+                "final_motor_loss": float(result["motor_loss_history"][-1]),
+                "max_robust_z": float(report.max_z_scores[index]),
+                "excluded": bool(report.is_outlier[index]),
+            }
+            for index, result in enumerate(per_log_results)
+        ],
     }
     save_yaml(paths.identification_result, payload)
 
     identified_robot_config = load_yaml(paths.robot_config)
     identified_robot_config["robot"].update(payload["estimated_params"])
-    identified_robot_config.setdefault("estimator", {})["mocap_delay"] = mocap_delay
     write_iteration_problem(experiment.config["problem"], identified_robot_config, paths.problem_identified)
     print(f"Wrote {paths.identification_result} and {paths.problem_identified}")
 
-    with collect_plots(paths.visualize_dir):
-        plot_system_id(
-            pipeline=result["pipeline"],
-            init_target_log=result["init_target_log"],
-            init_log=result["init_replay_log"],
-            predicted_log=result["final_replay_log"],
-            out_prefix=f"identification_{Path(log_path).stem}",
-        )
+    with collect_plots(paths.visualize_dir / "identification"):
+        # Kept logs are shown under the joint parameters (what downstream stages
+        # use); excluded ones under their own fit, which is what got them flagged.
+        for position, index in enumerate(kept_indices):
+            pipeline = joint_result["pipelines"][position]
+            plot_system_id(
+                pipeline=pipeline,
+                init_target_log=pipeline.target_log,
+                init_log=joint_result["init_replay_logs"][position],
+                predicted_log=joint_result["final_replay_logs"][position],
+                out_prefix=f"identification_{log_paths[index].stem}",
+            )
+        for index, result in enumerate(per_log_results):
+            if not report.is_outlier[index]:
+                continue
+            plot_system_id(
+                pipeline=result["pipelines"][0],
+                init_target_log=result["pipelines"][0].target_log,
+                init_log=result["init_replay_logs"][0],
+                predicted_log=result["final_replay_logs"][0],
+                out_prefix=f"identification_{log_paths[index].stem}_excluded",
+            )
         plot_loss_history(
-            loss_history=result["loss_history"],
-            motor_loss_history=result["motor_loss_history"],
+            loss_history=joint_result["loss_history"],
+            motor_loss_history=joint_result["motor_loss_history"],
             out_prefix="system_id",
+        )
+        plot_identification_log_parameters(
+            log_names=[path.stem for path in log_paths],
+            parameter_samples=parameter_samples,
+            joint_params=np.asarray(physical_params_to_array(estimated_params), dtype=float),
+            max_z_scores=report.max_z_scores if report.evaluated else None,
+            z_scores=report.z_scores if report.evaluated else None,
+            is_outlier=report.is_outlier,
+            z_threshold=float(config["outlier_z_threshold"]),
         )
     return payload
 
 
-def _resolve_log_path(paths: IterationPaths, log: str | None) -> Path:
+def _estimated_params_dict(params) -> dict:
+    return {
+        "wheel_radius": float(params.wheel_radius),
+        "base_diameter": float(params.base_diameter),
+        "max_wheel_speed": float(params.max_wheel_speed),
+        "time_constant": float(params.time_constant),
+        "a_slip_max": float(params.a_slip_max),
+    }
+
+
+def _print_per_log_parameters(log_paths, parameter_samples, per_log_results, report) -> None:
+    header = (
+        f"{'log':<12}{'r [mm]':>10}{'L [mm]':>10}{'u_max':>10}"
+        f"{'tau [s]':>10}{'a_slip':>10}{'loss':>12}{'max z':>8}"
+    )
+    print("Per-log identification:")
+    print(header)
+    for index, log_path in enumerate(log_paths):
+        values = parameter_samples[index]
+        total_loss = float(per_log_results[index]["loss_history"][-1]) + float(
+            per_log_results[index]["motor_loss_history"][-1]
+        )
+        marker = "  EXCLUDED" if report.is_outlier[index] else ""
+        print(
+            f"{log_path.stem:<12}{1000.0 * values[0]:>10.2f}{1000.0 * values[1]:>10.2f}{values[2]:>10.2f}"
+            f"{values[3]:>10.4f}{values[4]:>10.3f}{total_loss:>12.6f}"
+            f"{report.max_z_scores[index]:>8.2f}{marker}"
+        )
+    if not report.evaluated:
+        print("  (outlier detection off: disabled by threshold, too few logs, or no parameter spread)")
+
+
+def _resolve_log_paths(paths: IterationPaths, log: str | None) -> list[Path]:
+    """Identification logs of an iteration: every decoded log directly in data/,
+    or just the one named by ``--log``.
+
+    Baseline comparison runs live in subdirectories of data/ and are not
+    identification data, so discovery stays one level deep (list_pololu_log_paths
+    does not recurse)."""
     if log is not None:
         log_path = Path(log)
         if not log_path.is_file():
             log_path = paths.data_dir / log
         if not log_path.is_file():
             raise FileNotFoundError(f"Log not found: {log}")
-        return log_path
+        return [log_path]
     csvs = _list_log_csvs(paths)
     if not csvs:
         raise FileNotFoundError(
             f"No decoded Pololu logs in {paths.data_dir}. Copy the SD-card logs there and run decode-logs."
         )
-    if len(csvs) > 1:
-        names = ", ".join(path.name for path in csvs)
-        print(f"Multiple logs in {paths.data_dir} ({names}); using {csvs[0].name} (pass --log to pick another).")
-    return csvs[0]
+    return csvs
 
 
 # ---------------------------------------------------------------------------
@@ -517,40 +646,69 @@ def _resolve_log_path(paths: IterationPaths, log: str | None) -> Path:
 # ---------------------------------------------------------------------------
 
 
+def residual_training_iterations(experiment: Experiment, iteration: int) -> list[int]:
+    """Iteration indices whose decoded logs feed the residual model at ``iteration``.
+
+    With ``residual.pool_previous_iterations`` the model trains on every decoded
+    log of this iteration *and all earlier ones*, so each iteration sees strictly
+    more data than the last (multiple trajectories per iteration accumulate).
+    Later iterations are never included, so rerunning an old one reproduces what
+    it originally saw.
+
+    Pooling is sound because one-step residual training is gain-independent: the
+    descriptor is built from each log's own recorded duty, so it does not matter
+    that earlier iterations ran different tuned gains. Each log's *nominal* model
+    still comes from its own iteration's params (residual.robot_params_for_log),
+    which is what keeps the pool consistent.
+    """
+    if not experiment.config["residual"].get("pool_previous_iterations", True):
+        candidates = [iteration]
+    else:
+        candidates = [index for index in experiment.iteration_indices() if index <= iteration]
+    return [index for index in candidates if _list_log_csvs(experiment.paths(index))]
+
+
 def stage_train_residual(experiment: Experiment, iteration: int) -> Path:
-    """Train the residual dynamics model on all decoded logs of this iteration."""
+    """Train the residual dynamics model on the pooled decoded logs (see
+    residual_training_log_dirs)."""
     from wmr_simulator.residual_model.residual import train_from_logs
 
     paths = experiment.paths(iteration)
     config = experiment.config["residual"]
     log_config = experiment.config["log_loading"]
     problem_path = _identified_problem(paths)
-    if not _list_log_csvs(paths):
-        raise FileNotFoundError(f"No decoded Pololu logs in {paths.data_dir}.")
-
-    # Use the delay settled during identification so the residual twist targets
-    # align with the actions the same way the identification replay did.
-    mocap_delay = float(log_config["mocap_delay"])
-    if paths.identification_result.is_file():
-        mocap_delay = float(load_yaml(paths.identification_result).get("mocap_delay", mocap_delay))
-    print(f"Mocap delay compensation for residual dataset: {1000.0 * mocap_delay:.2f} ms")
+    pooled_iterations = residual_training_iterations(experiment, iteration)
+    if not pooled_iterations:
+        raise FileNotFoundError(
+            f"No decoded Pololu logs in {paths.data_dir} or any earlier iteration."
+        )
+    log_dirs = [experiment.paths(index).data_dir for index in pooled_iterations]
+    num_logs = sum(len(_list_log_csvs(experiment.paths(index))) for index in pooled_iterations)
+    print(
+        f"Residual training pool: {num_logs} logs from {len(pooled_iterations)} iteration(s) "
+        f"({', '.join(f'{ITERATION_PREFIX}{index:02d}' for index in pooled_iterations)})"
+    )
 
     train_from_logs(
         problem=str(problem_path),
-        log_dir=str(paths.data_dir),
+        log_dirs=[str(directory) for directory in log_dirs],
         out=str(paths.residual_model),
+        num_experts=int(config["num_experts"]),
+        hidden_sizes=tuple(int(size) for size in config["hidden_sizes"]),
+        spectral_norm_cap=float(config["spectral_norm_cap"]),
+        gate_bandwidth_scale=float(config["gate_bandwidth_scale"]),
+        ood_sigma=float(config["ood_sigma"]),
         epochs=int(config["epochs"]),
         batch_size=int(config["batch_size"]),
         learning_rate=float(config["learning_rate"]),
-        hidden_width=int(config["hidden_width"]),
-        hidden_depth=int(config["hidden_depth"]),
         validation_split=float(config["validation_split"]),
         seed=int(experiment.config["seed"]),
         output_reg_weight=float(config["output_reg_weight"]),
         clip_after_first_trajectory=log_config["clip_after_first_trajectory"],
-        mocap_delay_s=mocap_delay,
         resample_uniform=bool(config["resample_uniform"]),
-        out_dir=str(paths.visualize_dir),
+        # log_dirs are the data/ directories themselves; no subdirectories to walk.
+        recursive=False,
+        out_dir=str(paths.visualize_dir / "residual model"),
     )
     return paths.residual_model
 
@@ -639,10 +797,20 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
     )
     pipeline = result["pipeline"]
     print_controller_gains("Optimized gains:", result["optimized_gains"])
+    if result["static_gains"] is not None:
+        print_controller_gains("Static-pretune gains (benchmark baseline):", result["static_gains"])
     print(f"Final tuning loss: {float(result['loss_history'][-1]):.8f}")
 
     payload = {
         "gains": [float(gain) for gain in result["optimized_gains"]],
+        # Gains of the static pretune stage (no parametrization); finalize
+        # exports them as the iteration's ROBOTCFG_static.CFG baseline. None
+        # when there was no static stage (parametrization or pretune disabled).
+        "static_gains": (
+            None
+            if result["static_gains"] is None
+            else [float(gain) for gain in result["static_gains"]]
+        ),
         "schedule_enabled": bool(result["schedule_enabled"]),
         "schedule": None,
         "used_residual_model": residual_model is not None,
@@ -661,7 +829,7 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
     save_yaml(paths.gains_result, payload)
     print(f"Wrote {paths.gains_result}")
 
-    with collect_plots(paths.visualize_dir):
+    with collect_plots(paths.visualize_dir / "gain tuning"):
         plot_gain_tuning_summary(
             pipeline,
             init_log=result["init_hidden_log"],
@@ -738,7 +906,6 @@ def stage_run(
     experiment: Experiment,
     iteration: int,
     log: str | None = None,
-    estimate_mocap_delay: bool | None = None,
 ) -> None:
     """Run every stage of the iteration that can proceed, in order.
 
@@ -766,7 +933,7 @@ def stage_run(
         return
 
     if not status["identify"]:
-        stage_identify(experiment, iteration, log=log, estimate_mocap_delay=estimate_mocap_delay)
+        stage_identify(experiment, iteration, log=log)
     if experiment.config["use_residual_model"] and not paths.residual_model.is_file():
         stage_train_residual(experiment, iteration)
     if not status["plan-tuning-trajectories"]:
