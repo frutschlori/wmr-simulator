@@ -62,8 +62,8 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         "clip_after_first_trajectory": True,
     },
     "identification_trajectory": {
-        "opt_steps": 5000,
-        "learning_rate": 1e-3,
+        "opt_steps": 1000,
+        "learning_rate": 1e-2,
         "bezier_order": 10,
         "time_scaling": "s-curve",
         "window_length": 50,
@@ -93,7 +93,7 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         # at the robot config's value instead, with the burnout model still
         # active in the rollout -- the counterpart of
         # identification_trajectory.fim_a_slip_max.
-        "identify_a_slip_max": True,
+        "identify_a_slip_max": False,
         # Traction limit init (m/s^2; burnout model, residual_model.burnout).
         # Used when the current robot config carries a zero value; must be
         # positive to (re-)enable identification of a_slip_max (log-space
@@ -108,7 +108,7 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         # Per-matrix spectral-norm cap on the experts (Lipschitz bound); 0 disables.
         "spectral_norm_cap": 1.5,
         # Gaussian gate bandwidth = intra-cluster RMS distance * this (>1 overlaps).
-        "gate_bandwidth_scale": 1.5,
+        "gate_bandwidth_scale": 1.0,
         # Null "zero expert" distance in bandwidths; beyond it the residual -> 0.
         "ood_sigma": 3.0,
         "epochs": 500,

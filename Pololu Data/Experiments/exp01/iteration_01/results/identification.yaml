@@ -1,0 +1,86 @@
+logs:
+- Pololu Data/Experiments/exp01/iteration_01/data/TR04.csv
+- Pololu Data/Experiments/exp01/iteration_01/data/TR05.csv
+- Pololu Data/Experiments/exp01/iteration_01/data/TR06.csv
+- Pololu Data/Experiments/exp01/iteration_01/data/TR07.csv
+- Pololu Data/Experiments/exp01/iteration_01/data/TR08.csv
+- Pololu Data/Experiments/exp01/iteration_01/data/TR09.csv
+excluded_logs: []
+estimated_params:
+  wheel_radius: 0.016034459695219994
+  base_diameter: 0.0823935940861702
+  max_wheel_speed: 223.41551208496094
+  time_constant: 0.15449434518814087
+  a_slip_max: 3.0
+final_loss: 0.5113694667816162
+final_motor_loss: 0.5319073796272278
+outlier_z_threshold: 3.5
+outlier_detection_evaluated: true
+identify_a_slip_max: false
+per_log:
+- log: Pololu Data/Experiments/exp01/iteration_01/data/TR04.csv
+  estimated_params:
+    wheel_radius: 0.01600722223520279
+    base_diameter: 0.08158032596111298
+    max_wheel_speed: 221.24755859375
+    time_constant: 0.15469223260879517
+    a_slip_max: 3.0
+  final_loss: 0.13936901092529297
+  final_motor_loss: 0.5069501399993896
+  max_robust_z: 1.1952977758137528
+  excluded: false
+- log: Pololu Data/Experiments/exp01/iteration_01/data/TR05.csv
+  estimated_params:
+    wheel_radius: 0.016536220908164978
+    base_diameter: 0.08119120448827744
+    max_wheel_speed: 222.7279815673828
+    time_constant: 0.1519877016544342
+    a_slip_max: 3.0
+  final_loss: 0.04760206490755081
+  final_motor_loss: 0.5213942527770996
+  max_robust_z: 1.5979198811043815
+  excluded: false
+- log: Pololu Data/Experiments/exp01/iteration_01/data/TR06.csv
+  estimated_params:
+    wheel_radius: 0.016284678131341934
+    base_diameter: 0.08252881467342377
+    max_wheel_speed: 224.0724334716797
+    time_constant: 0.1543876975774765
+    a_slip_max: 3.0
+  final_loss: 0.07687918096780777
+  final_motor_loss: 0.5410480499267578
+  max_robust_z: 0.41980295143876123
+  excluded: false
+- log: Pololu Data/Experiments/exp01/iteration_01/data/TR07.csv
+  estimated_params:
+    wheel_radius: 0.016269629821181297
+    base_diameter: 0.08246918767690659
+    max_wheel_speed: 224.414794921875
+    time_constant: 0.15107524394989014
+    a_slip_max: 3.0
+  final_loss: 0.10884615778923035
+  final_motor_loss: 0.5476461052894592
+  max_robust_z: 1.091948239423013
+  excluded: false
+- log: Pololu Data/Experiments/exp01/iteration_01/data/TR08.csv
+  estimated_params:
+    wheel_radius: 0.01609187200665474
+    base_diameter: 0.08273813873529434
+    max_wheel_speed: 223.99844360351562
+    time_constant: 0.1597404032945633
+    a_slip_max: 3.0
+  final_loss: 0.2029544711112976
+  final_motor_loss: 0.5385796427726746
+  max_robust_z: 1.593925863368887
+  excluded: false
+- log: Pololu Data/Experiments/exp01/iteration_01/data/TR09.csv
+  estimated_params:
+    wheel_radius: 0.015694962814450264
+    base_diameter: 0.08271955698728561
+    max_wheel_speed: 223.8175811767578
+    time_constant: 0.15557727217674255
+    a_slip_max: 3.0
+  final_loss: 0.5718790888786316
+  final_motor_loss: 0.5307038426399231
+  max_robust_z: 1.9930550851512603
+  excluded: false

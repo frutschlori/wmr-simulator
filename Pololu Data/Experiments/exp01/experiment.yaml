@@ -1,0 +1,70 @@
+problem: problems/pololu_gains.yaml
+seed: 0
+use_residual_model: true
+optimize_trajectories: true
+use_standalone_gain_tuning_defaults: false
+baseline_identification_trajectory: null
+baseline_tuning_trajectories_dir: null
+robotcfg_template: null
+log_loading:
+  clip_after_first_trajectory: true
+identification_trajectory:
+  opt_steps: 1000
+  learning_rate: 0.01
+  bezier_order: 10
+  time_scaling: s-curve
+  window_length: 50
+  fim_a_slip_max: false
+  bridge_wait_time: 2.0
+  bridge_time: 5.0
+identification:
+  steps: 2000
+  learning_rate: 0.0005
+  window_length: null
+  outlier_z_threshold: 3.5
+  identify_a_slip_max: false
+  init_a_slip_max: 5.0
+residual:
+  num_experts: 4
+  hidden_sizes:
+  - 16
+  - 16
+  spectral_norm_cap: 1.5
+  gate_bandwidth_scale: 1.0
+  ood_sigma: 3.0
+  epochs: 500
+  batch_size: 16384
+  learning_rate: 0.0005
+  validation_split: 0.2
+  output_reg_weight: 0.01
+  resample_uniform: true
+  pool_previous_iterations: true
+tuning_trajectories:
+  num_trajectories: 20
+  opt_steps: 500
+  learning_rate: 0.01
+  bezier_order: 10
+  time_scaling: s-curve
+  constraint_weight_jitter: 0.3
+  window_length: 50
+gain_tuning:
+  steps: 500
+  learning_rate: 0.0001
+  num_realizations: 1
+  num_lhs_points: 500
+  num_adam_optimizations: 3
+  validation_split: 0.2
+  velocity_tracking_weight: 0.2
+  input_weight: 0.0
+  input_delta_weight: 1.0
+  omega_delta_weight: 0.0
+  gain_delta_weight: 0.0
+  k_min_stab: 0.001
+  k_max_stab: 40.0
+  k_max_rest: 20.0
+  gain_parametrization: null
+  static_pretune: true
+  static_pretune_steps: 500
+  static_pretune_learning_rate: 0.0001
+  presearch_relative_range: 0.3
+  warm_start_schedule: true

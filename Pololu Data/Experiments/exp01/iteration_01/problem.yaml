@@ -1,0 +1,76 @@
+sim_time: 5.0
+geometry_controller_dt: 0.05
+wheel_controller_dt: 0.01
+environment:
+  min:
+  - -1.5
+  - -2.5
+  max:
+  - 1.5
+  - 2.5
+  obstacles: []
+start:
+- -1.0
+- -1
+- 0.0
+goal:
+- 0.0
+- 1
+planner:
+  waypoints:
+  - - 0.5
+    - 0.0
+    - -1.57
+  - - 1.0
+    - 0.5
+    - 1.57
+  time: 5.0
+controller:
+  gains:
+  - 4.5
+  - 6.0
+  - 12.0
+  - 2.5
+  - 5.0
+  gain_parametrization:
+    kind: error_mlp
+    enabled: true
+    hidden_sizes:
+    - 16
+    seed: 0
+    scheduled_indices:
+    - 0
+    - 1
+    - 2
+    - 3
+    - 4
+    bound: 5.0
+    learn_bound: false
+    spectral_norm_cap: 2
+robot:
+  type: differential_drive
+  wheel_radius: 0.016
+  base_diameter: 0.0842
+  max_wheel_speed: 250.0
+  time_constant: 0.12
+  a_slip_max: 3.0
+  v_max: 2.5
+  a_max: 5.0
+  a_max_lateral: 6.0
+  omega_max: 10.0
+  alpha_max: 20.0
+noise_enabled: true
+estimator:
+  type: kf
+  wheel_radius: 0.016
+  base_diameter: 0.0842
+  noise_pos: 0.001
+  noise_angle: 0.035
+  enc_angle_noise: 0.035
+  wheel_lp_tau: 0.053
+  proc_pos_std: 0.001
+  proc_theta_std: 0.01
+  start:
+  - 0.0
+  - 0.0
+  - 0.0
