@@ -119,6 +119,31 @@ def test_loader_keeps_lead_in_of_logs_that_start_on_their_trajectory(synthetic_l
     assert float(log.reference.time_s[0]) == pytest.approx(0.02, abs=1e-6)
 
 
+def test_loader_zeroes_time_when_a_recovered_chunk_has_a_long_initial_gap(synthetic_log):
+    """A chunk may start after the recording clock but before its first
+    surviving reference record; that gap is not a valid trajectory lead-in."""
+    header, *rows = synthetic_log.read_text(encoding="utf-8").splitlines()
+    columns = header.split(",")
+    ts_index = columns.index("ts")
+    lead_in_s = 2.0
+    shifted = []
+    for row in rows:
+        fields = row.split(",")
+        fields[ts_index] = f"{float(fields[ts_index]) + 1000.0 * lead_in_s:.0f}"
+        shifted.append(",".join(fields))
+
+    idle_rows = []
+    for ts in np.arange(0.0, 1000.0 * lead_in_s, 5.0):
+        fields = {name: "" for name in columns}
+        fields.update(ts=f"{ts:.0f}", gyro_z="0.01")
+        idle_rows.append(",".join(fields[name] for name in columns))
+    synthetic_log.write_text("\n".join([header, *idle_rows, *shifted]) + "\n", encoding="utf-8")
+
+    log = load_pololu_traj_control_log(synthetic_log)
+    assert float(log.reference.time_s[0]) == 0.0
+    assert float(log.pose.time_s[0]) == 0.0
+
+
 def test_loader_fills_savgol_twists(synthetic_log):
     log = load_pololu_traj_control_log(synthetic_log)
     twists = np.asarray(log.pose.twists, dtype=float)
