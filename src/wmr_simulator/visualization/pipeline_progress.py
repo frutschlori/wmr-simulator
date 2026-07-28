@@ -5,7 +5,8 @@ One figure, three panels:
 - a grouped bar chart with five gain groups (kx, ky, kth, kpmotor, kimotor),
   one bar per iteration at each group; gains are the controller gains deployed
   to record each iteration (see ``evaluate_pipeline_progress``);
-- two loss panels laid out exactly like the gain-tuning loss-history plot
+- two loss panels laid out exactly like the gain-tuning loss-history plot,
+  evaluated on Gain-MLP circle benchmark runs (one point = run mean)
   (``visualization.identification.plot_loss_history``): panel 1 carries the
   tracking loss (left) and velocity-tracking loss (right); panel 2 carries the
   total objective (left) and input-delta loss (right). Solid = closed-loop sim
@@ -66,7 +67,7 @@ def plot_pipeline_progress(records, experiment_root, out_path=None, out_prefix="
         os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
 
     fig = plt.figure(figsize=(16, 9))
-    fig.suptitle(f"Pipeline Progress: {experiment_root.name}", fontsize=16)
+    fig.suptitle(f"Pipeline Progress: {experiment_root.name} (circle benchmark)", fontsize=16)
     ax_gains = plt.subplot2grid((2, 2), (0, 0), colspan=2, fig=fig)
     ax_track = plt.subplot2grid((2, 2), (1, 0), fig=fig)
     ax_total = plt.subplot2grid((2, 2), (1, 1), fig=fig)

@@ -1,9 +1,9 @@
 """Cross-iteration evaluation of a full active-learning pipeline run.
 
-For every iteration this evaluates the recorded closed-loop runs that sit
-*directly* in ``data/`` (runs nested in sub-folders are deliberately ignored;
-they are kept for separate comparison plots) against the reference each run
-tracked, and computes the same four gain-tuning loss terms
+For every iteration this evaluates every recorded Gain-MLP circle benchmark in
+``data/with gain MLP/circle`` (also accepting the older
+``data/with_gain_MLP/circle`` spelling) against the reference each run
+tracked. It computes the same four gain-tuning loss terms
 (``tracking, velocity_tracking, input, input_delta``) in two ways:
 
 - ``sim``  — closed-loop simulation of that iteration's *recording* controller
@@ -12,13 +12,19 @@ tracked, and computes the same four gain-tuning loss terms
   on the identified nominal model, along each run's reference;
 - ``real`` — the actual recorded mocap/encoder trajectory of the run.
 
-The two are directly comparable (same controller, same reference), so plotting
-them together shows both how the real tracking improves across iterations and
-how well the identified sim predicts reality.
+The two are directly comparable (same controller, same reference).  Each
+iteration's plotted point is the mean over all of its available circle runs,
+which shows both how the real tracking improves across iterations and how well
+the identified sim predicts reality.
 
 The heavy lifting (building the pipeline, the closed-loop rollout) lives here;
 ``visualization.pipeline_progress`` only renders the returned records.
 """
+
+import contextlib
+import io
+import tempfile
+from pathlib import Path
 
 import numpy as np
 
@@ -151,19 +157,57 @@ def _real_run_terms(pipeline, log, weights):
     )
 
 
+def _gain_mlp_circle_directory(paths) -> Path | None:
+    """Return the direct Gain-MLP circle benchmark directory, if recorded."""
+    for directory_name in ("with gain MLP", "with_gain_MLP"):
+        circle_dir = paths.data_dir / directory_name / "circle"
+        if circle_dir.is_dir():
+            return circle_dir
+    return None
+
+
+def _load_gain_mlp_circle_logs(paths) -> list:
+    """Decode and load all direct circle benchmark recordings for one iteration.
+
+    Benchmark logs are intentionally nested below ``data/`` and normally kept
+    as SD-card binaries.  Decode them in a temporary directory so progress
+    plots remain read-only with respect to the experiment data.
+    """
+    from wmr_simulator.pololu.decode_binary import decode_file
+    from wmr_simulator.pololu.log_loader import load_pololu_traj_control_log
+
+    circle_dir = _gain_mlp_circle_directory(paths)
+    if circle_dir is None:
+        return []
+
+    logs = []
+    with tempfile.TemporaryDirectory(prefix="pipeline_progress_circle_") as temp_name:
+        temporary_dir = Path(temp_name)
+        for log_path in sorted(path for path in circle_dir.glob("TR*") if path.is_file()):
+            csv_path = log_path if log_path.suffix.lower() == ".csv" else temporary_dir / f"{log_path.name}.csv"
+            if csv_path != log_path:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    if not decode_file(str(log_path), str(csv_path)):
+                        print(f"Progress evaluation skipped unreadable log: {log_path}")
+                        continue
+            try:
+                logs.append(load_pololu_traj_control_log(csv_path, clip_after_first_trajectory=True))
+            except ValueError as error:
+                print(f"Progress evaluation skipped {log_path}: {error}")
+    return logs
+
+
 def _evaluate_iteration(experiment, index, weights, num_realizations, seed):
-    """Return ``(sim_terms, real_terms)`` averaged over the iteration's direct
-    runs, or ``None`` when the iteration has no directly-placed runs."""
+    """Return circle-benchmark sim/real terms averaged over one iteration."""
     import jax
 
-    from wmr_simulator.active_learning.stages import _list_log_csvs, _log_gain_parametrization
+    from wmr_simulator.active_learning.stages import _log_gain_parametrization
     from wmr_simulator.gain_tuning.pipeline import ControllerTuningPipeline, resolve_gain_robot_params
-    from wmr_simulator.pololu.log_loader import load_pololu_traj_control_log
     import jax.numpy as jnp
 
     paths = experiment.paths(index)
-    csv_paths = _list_log_csvs(paths)
-    if not csv_paths:
+    logs = _load_gain_mlp_circle_logs(paths)
+    if not logs:
         return None
     problem_path = paths.problem_identified if paths.problem_identified.is_file() else paths.problem
     if not problem_path.is_file():
@@ -183,8 +227,7 @@ def _evaluate_iteration(experiment, index, weights, num_realizations, seed):
 
     sim_terms = []
     real_terms = []
-    for csv_path in csv_paths:
-        log = load_pololu_traj_control_log(str(csv_path))
+    for log in logs:
         real = _real_run_terms(pipeline, log, weights)
         if real is None:
             continue
@@ -212,7 +255,7 @@ def evaluate_pipeline_progress(experiment):
     ``gains`` (the base controller gains deployed to *record* the iteration,
     from its ``problem.yaml``; iteration 1 is the initial hand-set gains, later
     iterations are the previous iteration's tuned result) and ``sim`` / ``real``
-    (loss-term dicts, None when the iteration has no directly-placed recorded
+    (loss-term dicts, None when the iteration has no Gain-MLP circle benchmark
     runs). The recording gains are used (rather than the iteration's own tuned
     ``results/gains.yaml``) so every iteration is represented and the gains line
     up with the controller the sim/real losses are evaluated under.
