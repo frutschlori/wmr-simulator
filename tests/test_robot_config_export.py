@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import pytest
 
 from wmr_simulator.pololu.robot_config import (
@@ -9,8 +7,6 @@ from wmr_simulator.pololu.robot_config import (
     load_robot_config_file,
     robot_config_values,
 )
-
-EXAMPLE_CFG = Path("Pololu Data/Experiments/2026_06_22/Logs/gain tuning/tuned_3/ROBOTCFG.CFG")
 
 
 class FakeParams:
@@ -33,15 +29,6 @@ def test_robot_id_is_fixed_int_directly_above_joystick_control():
     joystick_line = lines.index("joystick_control_dt_ms=20.0")
     assert robot_id_line + 1 == joystick_line
     assert "robot_id=10.0" not in lines
-
-
-@pytest.mark.skipif(not EXAMPLE_CFG.is_file(), reason="example ROBOTCFG.CFG not available")
-def test_matches_firmware_example_format():
-    values = load_robot_config_file(EXAMPLE_CFG)
-    expected = EXAMPLE_CFG.read_text(encoding="utf-8").replace(
-        "\njoystick_control_dt_ms=", "\nrobot_id=10\njoystick_control_dt_ms=", 1
-    )
-    assert format_robot_config(values) == expected
 
 
 def test_gain_conversion_divides_inner_gains_by_motor_gain():

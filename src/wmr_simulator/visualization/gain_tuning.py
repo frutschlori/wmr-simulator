@@ -18,7 +18,7 @@ def plot_gain_tuning_summary(
     os.makedirs("visualize", exist_ok=True)
     pdf_filename = os.path.join("visualize", f"{out_prefix}.pdf")
 
-    # When a static-pretune rollout is supplied, the main tuned line is the
+    # When a static-tune rollout is supplied, the main tuned line is the
     # parametrized (MLP) result; label it "tuned (param)" and overlay the
     # static-gain rollout as "tuned (static)". Without one, keep the plain "Tuned".
     tuned_label = "tuned (param)" if static_log is not None else "Tuned"
@@ -239,7 +239,7 @@ def plot_trajectory_set_summary(
     colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
 
     # The main tuned rollout applies the parametrization (MLP) schedule; when a
-    # static-pretune result is supplied it is overlaid (dash-dot) as
+    # static-tune result is supplied it is overlaid (dash-dot) as
     # "tuned (static)" and the main line is relabeled "tuned (param)".
     tuned_label = "tuned (param)" if static_gains is not None else "Tuned"
 

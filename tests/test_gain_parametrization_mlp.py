@@ -232,13 +232,14 @@ def test_identity_objective_matches_static():
     assert parametrized_terms[5] == pytest.approx(0.0, abs=1e-7)
 
 
-def test_static_pretune_runs_both_stages():
+def test_static_tune_runs_independently_of_parametrized_run():
     from wmr_simulator.gain_tuning.pipeline import resolve_gain_robot_params, run_gain_tuning_experiment
 
     robot_params = resolve_gain_robot_params(PROBLEM, None, None)
-    # num_steps=0 keeps both stages at pure evaluation, so the identity
-    # continuity between the stages is exact (Adam records pre-update losses,
-    # so with steps > 0 the stage boundary values would not be comparable).
+    # num_steps=0 keeps both runs at pure evaluation. With an identity
+    # parametrization and the same init gains they must score the same loss (up
+    # to the reparametrization round-trip), which pins that the parametrized
+    # run's presearch is evaluated with the parametrization in the loop.
     result = run_gain_tuning_experiment(
         problem_path=PROBLEM,
         robot_params=robot_params,
@@ -248,26 +249,25 @@ def test_static_pretune_runs_both_stages():
         num_lhs_points=0,
         num_adam_optimizations=1,
         schedule_enabled=True,
-        static_pretune=True,
+        static_tune=True,
     )
-    assert result["static_pretune"] is True
+    assert result["static_tune"] is True
     assert result["static_gains"] is not None
     assert isinstance(result["schedule_params"], ErrorMlpParams)
-    # Concatenated histories: one initial evaluation per stage.
-    assert len(result["loss_history"]) == 2
+    # Separate histories: one initial evaluation each, not concatenated.
+    assert len(result["loss_history"]) == 1
+    assert len(result["static_loss_history"]) == 1
     for values in result["loss_component_history"].values():
-        assert len(values) == 2
-    # Stage 2 starts from the static gains with an identity parametrization, so
-    # its evaluation reproduces the static stage's loss up to the reparametrization
-    # round-trip (a ~1e-6 gain difference). The closed-loop loss is stiff under the
-    # in-loop encoder low-pass + trapezoidal encoder lag (see memory
-    # gain-fim-wheel-lp-stiffness), which amplifies that tiny gain difference into a
+        assert len(values) == 1
+    # The closed-loop loss is stiff under the in-loop encoder low-pass +
+    # trapezoidal encoder lag (see memory gain-fim-wheel-lp-stiffness), which
+    # amplifies the ~1e-6 reparametrization round-trip difference into a
     # sub-percent loss gap; the tolerance reflects that, while still catching any
     # non-identity parametrization (which would move the loss by O(10%)+).
-    assert result["loss_history"][1] == pytest.approx(result["loss_history"][0], rel=2e-2)
+    assert result["loss_history"][0] == pytest.approx(result["static_loss_history"][0], rel=2e-2)
 
 
-def test_static_pretune_independent_budget_and_multistart_handoff():
+def test_static_tune_independent_budget_and_init_gains():
     from wmr_simulator.gain_tuning.pipeline import resolve_gain_robot_params, run_gain_tuning_experiment
 
     robot_params = resolve_gain_robot_params(PROBLEM, None, None)
@@ -280,16 +280,50 @@ def test_static_pretune_independent_budget_and_multistart_handoff():
         num_lhs_points=2,
         num_adam_optimizations=2,
         schedule_enabled=True,
-        static_pretune=True,
-        static_pretune_steps=2,
-        static_pretune_learning_rate=1e-3,
+        static_tune=True,
+        static_tune_steps=2,
+        static_tune_learning_rate=1e-3,
+        static_init_gains=[0.5, 0.5, 0.5, 1.0, 0.0],
     )
-    # Static stage: initial eval + 2 steps; parametrization stage (both static
-    # starts continued, no new LHS): initial eval + 1 step.
-    assert len(result["loss_history"]) == 3 + 2
+    # Each run keeps its own budget: static initial eval + 2 steps, parametrized
+    # initial eval + 1 step.
+    assert len(result["static_loss_history"]) == 3
+    assert len(result["loss_history"]) == 2
     for values in result["loss_component_history"].values():
-        assert len(values) == 3 + 2
+        assert len(values) == 2
+    for values in result["static_loss_component_history"].values():
+        assert len(values) == 3
     assert isinstance(result["schedule_params"], ErrorMlpParams)
+
+
+def test_seed_parametrization_from_static_uses_static_results_as_candidates():
+    # First-iteration policy: the parametrized run's presearch gets the static
+    # run's converged gains as extra candidates. With the LHS off, they are the
+    # only candidates besides the problem's gains, so the winning start must be
+    # one of them (the static Adam result beats the untuned problem gains).
+    from wmr_simulator.gain_tuning.pipeline import resolve_gain_robot_params, run_gain_tuning_experiment
+
+    robot_params = resolve_gain_robot_params(PROBLEM, None, None)
+    result = run_gain_tuning_experiment(
+        problem_path=PROBLEM,
+        robot_params=robot_params,
+        num_steps=0,
+        learning_rate=1e-3,
+        num_realizations=1,
+        num_lhs_points=0,
+        num_adam_optimizations=1,
+        schedule_enabled=True,
+        static_tune=True,
+        static_tune_steps=3,
+        static_tune_learning_rate=1e-2,
+        seed_parametrization_from_static=True,
+    )
+    static_gains = np.asarray(result["static_gains"], dtype=float)
+    optimized_gains = np.asarray(result["optimized_gains"], dtype=float)
+    np.testing.assert_allclose(optimized_gains, static_gains, rtol=1e-4)
+    # Still two independent runs: separate histories, static run kept its budget.
+    assert len(result["static_loss_history"]) == 4
+    assert len(result["loss_history"]) == 1
 
 
 def test_gradient_wrt_theta_is_finite_and_nonzero_at_identity():

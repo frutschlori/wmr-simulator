@@ -8,7 +8,7 @@ An experiment lives in its own directory and holds one folder per iteration:
         robot_config.yaml           current-best robot params + gains (iteration input)
         ROBOTCFG.CFG                firmware export of robot_config.yaml (copy to SD card)
         GAINMLP.JSN                 firmware export of the error-MLP gain schedule (if enabled)
-        robot_config_static_gains.yaml  same params with the static-pretune gains
+        robot_config_static_gains.yaml  same params with the static-tune gains
         ROBOTCFG_static.CFG         firmware export of it: the gain-MLP-free
                                     baseline for benchmarking on the robot
                                     (rename to ROBOTCFG.CFG on the SD card and
