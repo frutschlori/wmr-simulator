@@ -32,11 +32,13 @@ GAIN_TUNING_DEFAULTS: dict = {
     "k_max_stab": 50.0,
     "k_max_rest": 20.0,
     "gain_parametrization": None,  # None -> follow problem yaml
-    "static_pretune": True,
-    "static_pretune_steps": 500,
-    "static_pretune_learning_rate": 1e-4,
-    # Narrow the static LHS presearch to a +/- band around the problem's current
-    # gains (0 -> full [k_min_stab, k_max_stab] range); refines across iterations.
+    # Run an independent static-gain tuning (LHS + multistart Adam, no
+    # parametrization) next to the parametrized one, as a comparison baseline.
+    "static_tune": True,
+    "static_tune_steps": 500,
+    "static_tune_learning_rate": 1e-4,
+    # Narrow each run's LHS presearch to a +/- band around its init gains
+    # (0 -> full [k_min_stab, k_max_stab] range); refines across iterations.
     "presearch_relative_range": 0.0,
     # Warm-start the gain parametrization from the problem's gain_parametrization
     # (e.g. the previous iteration's trained schedule) instead of the identity.

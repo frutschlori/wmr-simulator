@@ -129,7 +129,7 @@ def _write_static_gain_config(
 ) -> None:
     """Write the gain-MLP-free baseline variant of this iteration's robot config.
 
-    Same identified robot parameters, but the gains of the static pretune stage
+    Same identified robot parameters, but the gains of the static tuning run
     and no gain parametrization, so the two can be benchmarked against each
     other on the robot (copy ROBOTCFG_static.CFG as ROBOTCFG.CFG without a
     GAINMLP.JSN next to it).
@@ -766,6 +766,16 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
 
     robot_params = resolve_gain_robot_params(str(problem_path), None, None)
     print_physical_params("Robot parameters for gain tuning:", robot_params)
+    # The static run is an independent controller option, so it refines the
+    # previous iteration's *static* gains (robot_config_static_gains.yaml,
+    # written by finalize) rather than the parametrized run's base gains, which
+    # are what the iteration problem carries.
+    static_init_gains = None
+    if paths.robot_config_static.is_file():
+        static_init_gains = [
+            float(gain) for gain in load_yaml(paths.robot_config_static)["controller"]["gains"]
+        ]
+        print(f"Static run starts from the previous iteration's static gains: {static_init_gains}")
     result = run_gain_tuning_experiment(
         problem_path=str(problem_path),
         robot_params=robot_params,
@@ -786,9 +796,15 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
         num_adam_optimizations=int(config["num_adam_optimizations"]),
         schedule_enabled=config.get("gain_parametrization", config.get("gain_schedule")),
         gain_delta_weight=float(config["gain_delta_weight"]),
-        static_pretune=bool(config["static_pretune"]),
-        static_pretune_steps=int(config["static_pretune_steps"]),
-        static_pretune_learning_rate=float(config["static_pretune_learning_rate"]),
+        static_tune=bool(config["static_tune"]),
+        static_tune_steps=int(config["static_tune_steps"]),
+        static_tune_learning_rate=float(config["static_tune_learning_rate"]),
+        static_init_gains=static_init_gains,
+        # Iteration 1 has no trained parametrization to warm-start from, so both
+        # presearches are the same evaluation; hand the parametrized run the
+        # static run's converged gains as extra candidates instead of letting it
+        # start from raw LHS winners. Later iterations keep the two lineages apart.
+        seed_parametrization_from_static=iteration <= 1,
         # Iteration 1 has no prior result to refine from: search the full
         # presearch range instead of a band around the base gains.
         presearch_relative_range=0.0 if iteration <= 1 else float(refine["presearch_relative_range"]),
@@ -798,14 +814,14 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
     pipeline = result["pipeline"]
     print_controller_gains("Optimized gains:", result["optimized_gains"])
     if result["static_gains"] is not None:
-        print_controller_gains("Static-pretune gains (benchmark baseline):", result["static_gains"])
+        print_controller_gains("Static-tune gains (benchmark baseline):", result["static_gains"])
     print(f"Final tuning loss: {float(result['loss_history'][-1]):.8f}")
 
     payload = {
         "gains": [float(gain) for gain in result["optimized_gains"]],
-        # Gains of the static pretune stage (no parametrization); finalize
+        # Gains of the independent static run (no parametrization); finalize
         # exports them as the iteration's ROBOTCFG_static.CFG baseline. None
-        # when there was no static stage (parametrization or pretune disabled).
+        # when there was no static run (parametrization or static_tune off).
         "static_gains": (
             None
             if result["static_gains"] is None
@@ -819,6 +835,16 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
             float(result["validation_loss_history"][-1])
             if result["validation_loss_history"] is not None
             else None
+        ),
+        # Same losses for the independent static run, so the two controller
+        # options can be compared without rerunning the stage.
+        "static_final_loss": (
+            None if result["static_loss_history"] is None else float(result["static_loss_history"][-1])
+        ),
+        "static_final_validation_loss": (
+            None
+            if result["static_validation_loss_history"] is None
+            else float(result["static_validation_loss_history"][-1])
         ),
     }
     schedule_params = result.get("schedule_params")
@@ -867,6 +893,16 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
             validation_loss_component_history=result["validation_loss_component_history"],
             out_prefix="ctrl_tuning",
         )
+        # The static run is independent, so it gets its own curve instead of
+        # being prepended to the parametrized one.
+        if result["static_loss_history"] is not None:
+            plot_loss_history(
+                loss_history=result["static_loss_history"],
+                validation_loss_history=result["static_validation_loss_history"],
+                loss_component_history=result["static_loss_component_history"],
+                validation_loss_component_history=result["static_validation_loss_component_history"],
+                out_prefix="ctrl_tuning_static",
+            )
     return payload
 
 

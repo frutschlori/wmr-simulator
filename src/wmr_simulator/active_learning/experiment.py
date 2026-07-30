@@ -9,7 +9,7 @@ An experiment lives in its own directory and holds one folder per iteration:
         ROBOTCFG.CFG                firmware export of robot_config.yaml (copy to SD card)
         GAINMLP.JSN                 firmware export of the error-MLP gain schedule,
                                     when enabled (copy to SD card next to ROBOTCFG.CFG)
-        robot_config_static_gains.yaml  same params with the static-pretune gains
+        robot_config_static_gains.yaml  same params with the static-tune gains
         ROBOTCFG_static.CFG         firmware export of it, for benchmarking the
                                     static gains against the gain MLP on the robot
                                     (rename to ROBOTCFG.CFG on the SD card, and
@@ -149,18 +149,21 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         "k_max_stab": 40.0,
         "k_max_rest": 20.0,
         "gain_parametrization": None,  # None -> follow problem yaml
-        # Two-stage tuning: run the full static routine first (LHS + multistart
-        # Adam with the parametrization frozen), then continue each Adam start
-        # with the parametrization unfrozen. No-op when the parametrization is
-        # disabled. The static stage uses its own step count / learning rate.
-        "static_pretune": True,
-        "static_pretune_steps": 500,
-        "static_pretune_learning_rate": 1e-4,
-        # Refining across iterations: narrow the static LHS presearch to a +/-
-        # band around the previous iteration's gains, and warm-start the gain MLP
-        # from the previous iteration's trained schedule instead of the identity
-        # mapping. Both no-op on iteration 1 (full presearch / identity schedule)
-        # since there is no prior result to refine from.
+        # Tune a static controller independently of the parametrized one (its
+        # own LHS presearch + multistart Adam, no parametrization), so the two
+        # are separate options that can be benchmarked against each other. It
+        # starts from the previous iteration's *static* gains
+        # (robot_config_static_gains.yaml) and uses its own step count /
+        # learning rate. No-op when the parametrization is disabled.
+        "static_tune": True,
+        "static_tune_steps": 500,
+        "static_tune_learning_rate": 1e-4,
+        # Refining across iterations: narrow each run's LHS presearch to a +/-
+        # band around its init gains, and warm-start the gain MLP from the
+        # previous iteration's trained schedule (already active during the
+        # parametrized run's presearch) instead of the identity mapping. Both
+        # no-op on iteration 1 (full presearch / identity schedule) since there
+        # is no prior result to refine from.
         "presearch_relative_range": 0.3,
         "warm_start_schedule": True,
     },

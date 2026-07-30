@@ -104,11 +104,12 @@ def _candidate_optimizer_values(
 ):
     """Build candidate vectors of width (5 + num_w). LHS searches the gain part.
 
-    ``init_gain_values`` may hold several rows (e.g. the per-start results of a
-    static pretune stage); each becomes its own candidate. When
-    ``presearch_relative_range`` > 0 the LHS samples a +/- band around the (first)
-    init gains instead of the full [k_min_stab, k_max_stab] range. The
-    parametrization part starts at ``w_init`` (identity when None).
+    ``init_gain_values`` may hold several rows; each becomes its own candidate.
+    When ``presearch_relative_range`` > 0 the LHS samples a +/- band around the
+    (first) init gains instead of the full [k_min_stab, k_max_stab] range. The
+    parametrization part is the same for every candidate: ``w_init`` (identity
+    when None), so the presearch scores the gains with the parametrization it
+    will be optimized with.
     """
     init_gain_values = jnp.atleast_2d(init_gain_values)
     if num_lhs_points <= 0:
@@ -323,9 +324,10 @@ def optimize_controller_gains(
     """Single-stage joint optimization of base gains and the gain schedule.
 
     The trainable vector is ``[gain_values(5), parametrization_flat(num_w)]``. LHS
-    presearch and multistart operate on the gain part with zero parametrization
-    parameters (so the presearch is exactly the old static-gain search). Adam then
-    refines base gains and the parametrization jointly.
+    presearch and multistart operate on the gain part, with the parametrization
+    held at its start value (the warm-started template, else the identity
+    mapping) so the candidates are scored under the controller that Adam then
+    refines jointly.
     When ``schedule_enabled`` is False, ``num_w = 0`` and the parametrization is
     fixed at its identity mapping, reproducing the static controller.
 
@@ -334,8 +336,7 @@ def optimize_controller_gains(
 
     Returns a dict with the best start's gains/parametrization plus the raw
     per-start loss histories and selection metadata (``best_start_index``,
-    ``start_candidate_indices``, ``final_gains_per_start``) so callers can
-    chain stages and report lineage-consistent histories; use
+    ``start_candidate_indices``, ``final_gains_per_start``); use
     :func:`histories_for_start` to extract one start's history lists.
     """
     if k_min_stab <= 0.0:

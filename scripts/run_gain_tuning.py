@@ -50,6 +50,14 @@ def save_tuning_result(out_path: str, problem_path: str, result: dict) -> None:
             if result["validation_loss_history"] is not None
             else None
         ),
+        "static_final_loss": (
+            None if result["static_loss_history"] is None else float(result["static_loss_history"][-1])
+        ),
+        "static_final_validation_loss": (
+            None
+            if result["static_validation_loss_history"] is None
+            else float(result["static_validation_loss_history"][-1])
+        ),
     }
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as file:
@@ -87,16 +95,16 @@ def main():
     # Gain schedule: jointly tune base gains + outer-gain schedule (W), default follows problem yaml, --no-gain-schedule forces W=0 (static)
     parser.add_argument("--gain-schedule", action=argparse.BooleanOptionalAction, default=GAIN_TUNING_DEFAULTS["gain_parametrization"])
     parser.add_argument("--gain-delta-weight", type=float, default=GAIN_TUNING_DEFAULTS["gain_delta_weight"])
-    # Two-stage tuning: run the full static routine (LHS + multistart Adam on the
-    # base gains only) first, then train the parametrization on top of its optimum.
-    # The static stage takes its own step count / learning rate (defaults to
-    # --steps / --learning-rate); the parametrization stage uses --steps and
-    # --learning-rate, which typically wants a lower rate than the static search.
-    parser.add_argument("--static-pretune", action=argparse.BooleanOptionalAction, default=GAIN_TUNING_DEFAULTS["static_pretune"])
-    parser.add_argument("--static-pretune-steps", type=int, default=GAIN_TUNING_DEFAULTS["static_pretune_steps"])
-    parser.add_argument("--static-pretune-learning-rate", type=float, default=GAIN_TUNING_DEFAULTS["static_pretune_learning_rate"])
-    # Refine from a prior result: narrow the static LHS presearch to a +/- band
-    # around the problem's gains, and/or warm-start the parametrization from the
+    # Also run the static routine (LHS + multistart Adam on the base gains only)
+    # as an independent controller option next to the parametrized one; it takes
+    # its own step count / learning rate (defaults to --steps / --learning-rate),
+    # while the parametrized run uses --steps and --learning-rate, which
+    # typically wants a lower rate than the static search.
+    parser.add_argument("--static-tune", action=argparse.BooleanOptionalAction, default=GAIN_TUNING_DEFAULTS["static_tune"])
+    parser.add_argument("--static-tune-steps", type=int, default=GAIN_TUNING_DEFAULTS["static_tune_steps"])
+    parser.add_argument("--static-tune-learning-rate", type=float, default=GAIN_TUNING_DEFAULTS["static_tune_learning_rate"])
+    # Refine from a prior result: narrow each run's LHS presearch to a +/- band
+    # around its init gains, and/or warm-start the parametrization from the
     # problem's gain_parametrization (theta) instead of the identity mapping.
     parser.add_argument("--presearch-relative-range", type=float, default=GAIN_TUNING_DEFAULTS["presearch_relative_range"])
     parser.add_argument("--warm-start-schedule", action=argparse.BooleanOptionalAction, default=GAIN_TUNING_DEFAULTS["warm_start_schedule"])
@@ -139,9 +147,9 @@ def main():
         schedule_enabled=args.gain_schedule,
         gain_delta_weight=args.gain_delta_weight,
         residual_model=residual_model,
-        static_pretune=args.static_pretune,
-        static_pretune_steps=args.static_pretune_steps,
-        static_pretune_learning_rate=args.static_pretune_learning_rate,
+        static_tune=args.static_tune,
+        static_tune_steps=args.static_tune_steps,
+        static_tune_learning_rate=args.static_tune_learning_rate,
         presearch_relative_range=args.presearch_relative_range,
         warm_start_schedule=args.warm_start_schedule,
     )
@@ -149,7 +157,7 @@ def main():
     print_physical_params("Robot parameters used for gain tuning:", robot_params)
     print_controller_gains("Initial gains:", pipeline.gains)
     if result["static_gains"] is not None:
-        print_controller_gains("Static pretune gains:", result["static_gains"])
+        print_controller_gains("Static tune gains:", result["static_gains"])
     print_controller_gains("Optimized gains:", result["optimized_gains"])
     print(f"Velocity tracking weight: {args.velocity_tracking_weight:.8g}")
     print(f"Input regularization weight: {args.input_weight:.8g}")
@@ -231,6 +239,14 @@ def main():
         validation_loss_component_history=result["validation_loss_component_history"],
         out_prefix="ctrl_tuning",
     )
+    if result["static_loss_history"] is not None:
+        plot_loss_history(
+            loss_history=result["static_loss_history"],
+            validation_loss_history=result["static_validation_loss_history"],
+            loss_component_history=result["static_loss_component_history"],
+            validation_loss_component_history=result["static_validation_loss_component_history"],
+            out_prefix="ctrl_tuning_static",
+        )
 
 
 if __name__ == "__main__":
