@@ -4,6 +4,10 @@ gains:
 - 11.922242164611816
 - 13.678927421569824
 - 0.0
+- 10.0
+- 5.0
+- 12.0
+- 7.0
 schedule_enabled: true
 schedule:
   kind: error_mlp

@@ -13,11 +13,11 @@ planner:
     - [1.0,0.5, 1.57]
   time: 5.0 # seconds
 controller:
+  type: kanayama # kanayama (Kanayama tracking law) | dynamic_feedback (dynamic feedback linearization)
   # Motor gains are dimensionless here, but in duty / (rad/s) in pololu firmware -> divide gains by motor gain for conversion
-  # gains: [4.5, 6.0, 12.0, 2.5, 5.0] # [kx, ky, kth, kpmotor, kimotor]
-  # gains: [5.0, 5.0, 3.5, 2.0, 5.0] # [kx, ky, kth, kpmotor, kimotor]
-  gains: [5.0, 5.0, 3.0, 0.4, 0.2] # [kx, ky, kth, kpmotor, kimotor]
-  # gains: [5.0, 5.0, 3.0, 0.1, 5.0] # [kx, ky, kth, kpmotor, kimotor]
+  geometric_gains: [5.0, 5.0, 3.0] # [kx, ky, kth]
+  motor_gains: [0.4, 0.2] # [kpmotor, kimotor]
+  dynamic_feedback_gains: [10.0, 5.0, 12.0, 7.0] # [kp_x, kd_x, kp_y, kd_y], controller.type: dynamic_feedback only
 noise_enabled: true # false zeroes the estimator measurement noise everywhere (sim, gain tuning, traj-opt FIM)
 robot:
   type: differential_drive

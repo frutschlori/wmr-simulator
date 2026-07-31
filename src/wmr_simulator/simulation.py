@@ -6,7 +6,7 @@ import jax.numpy as jnp
 import numpy as np
 import yaml
 
-from wmr_simulator.controller import Controller
+from wmr_simulator.controller import Controller, controller_type_from_cfg, gains_from_cfg
 from wmr_simulator.estimator import DiffDriveEstimator
 from wmr_simulator.gain_parametrization import apply as apply_gain_parametrization
 from wmr_simulator.gain_parametrization import params_from_cfg as gain_parametrization_params_from_cfg
@@ -101,9 +101,11 @@ class SimulationPipeline:
         self.estimator = DiffDriveEstimator(estimator_cfg=self.estimator_cfg, dt=self.wheel_dt)
         self.controller = Controller(
             robot_param=self.robot_cfg,
-            gains=self.controller_cfg["gains"],
+            gains=gains_from_cfg(self.controller_cfg),
             duty_limits=[-1.0, 1.0],
             dt=self.wheel_dt,
+            geometry_dt=self.geometry_dt,
+            controller_type=controller_type_from_cfg(self.controller_cfg),
         )
         self.initial_estimator_covariance = self.estimator.get_init_state(
             key=jax.random.PRNGKey(1),
@@ -117,7 +119,7 @@ class SimulationPipeline:
             time_constant=jnp.asarray(self.robot_cfg["time_constant"], dtype=jnp.float32),
             a_slip_max=jnp.asarray(self.robot_cfg.get("a_slip_max", 0.0), dtype=jnp.float32),
         )
-        self.gains = jnp.asarray(self.controller_cfg["gains"], dtype=jnp.float32)
+        self.gains = jnp.asarray(gains_from_cfg(self.controller_cfg), dtype=jnp.float32)
 
         gain_parametrization_cfg = self.controller_cfg.get(
             "gain_parametrization", self.controller_cfg.get("gain_schedule")
@@ -207,7 +209,8 @@ class SimulationPipeline:
         estimator_state = self.estimator.get_init_state(key=estimator_key, start_pose=pose0)
         controller_state = jnp.zeros(2, dtype=jnp.float32)
         delayed_wheel_ref = jnp.zeros(2, dtype=jnp.float32)
-        return robot_state, estimator_state, controller_state, delayed_wheel_ref
+        geometry_state = self.controller.initial_geometry_state()
+        return robot_state, estimator_state, controller_state, delayed_wheel_ref, geometry_state
 
     @staticmethod
     def pose_mse(predicted_poses, target_poses):
@@ -254,7 +257,7 @@ class SimulationPipeline:
         nominal_gains = self.gains if controller_gains is None else controller_gains
 
         def geometry_step(carry, ref_state):
-            robot_state, estimator_state, controller_state, delayed_wheel_ref = carry
+            robot_state, estimator_state, controller_state, delayed_wheel_ref, geometry_state = carry
             pose_est = self.estimator.get_est_pose(estimator_state)
             # Parametrized gains are computed once per geometry step (from the
             # reference and the same estimates the controller sees) and reused
@@ -274,9 +277,10 @@ class SimulationPipeline:
                     nominal_gains, schedule_params, ref_state, pose_est=pose_est, twist_est=twist_est
                 )
                 log_gains = step_gains
-            wheel_ref = self.controller.compute_wheel_reference(
+            wheel_ref, next_geometry_state = self.controller.compute_wheel_reference(
                 ref_state,
                 pose_est,
+                geometry_state=geometry_state,
                 gains=step_gains,
                 wheel_radius=robot_params.wheel_radius,
                 base_diameter=robot_params.base_diameter,
@@ -341,7 +345,13 @@ class SimulationPipeline:
                 (robot_state, estimator_state, controller_state),
                 jnp.arange(self.inner_steps_per_geometry_step),
             )
-            next_carry = (next_robot_state, next_estimator_state, next_controller_state, wheel_ref)
+            next_carry = (
+                next_robot_state,
+                next_estimator_state,
+                next_controller_state,
+                wheel_ref,
+                next_geometry_state,
+            )
             return next_carry, (
                 wheel_ref,
                 wheel_outputs[0],

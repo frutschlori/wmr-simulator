@@ -68,7 +68,7 @@ def test_golden_payload_consistent_with_reference_forward():
     cfg = {"kind": "error_mlp", "hidden_sizes": [16], "scheduled_indices": [0, 1, 2],
            "bound": 5.0, "spectral_norm_cap": 1.0}
     params = _random_params(cfg)
-    base_gains = firmware_base_gains([4.5, 6.0, 12.0, 2.5, 5.0], 240.0)
+    base_gains = firmware_base_gains([4.5, 6.0, 12.0, 2.5, 5.0, 10.0, 5.0, 12.0, 7.0], 240.0)
     payload = golden_payload(params, base_gains, num_cases=8, seed=1)
 
     assert len(payload["cases"]) == 8

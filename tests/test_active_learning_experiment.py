@@ -4,6 +4,7 @@ import numpy as np
 import yaml
 
 from wmr_simulator.active_learning.experiment import Experiment, load_yaml
+from wmr_simulator.controller import gains_from_cfg
 from wmr_simulator.active_learning.stages import iteration_status, stage_finalize, stage_init
 from wmr_simulator.pololu.gain_mlp_exporter import reference_forward
 from wmr_simulator.pololu.robot_config import load_robot_config_file
@@ -28,7 +29,9 @@ def test_init_creates_iteration_scaffolding(tmp_path):
     problem_cfg = load_yaml(PROBLEM)
     robot_config = load_yaml(paths.robot_config)
     assert robot_config["robot"]["wheel_radius"] == problem_cfg["robot"]["wheel_radius"]
-    assert robot_config["controller"]["gains"] == problem_cfg["controller"]["gains"]
+    assert gains_from_cfg(robot_config["controller"]) == gains_from_cfg(
+        problem_cfg["controller"]
+    )
 
     # Generated problem carries the current robot params and estimator geometry.
     iteration_problem = load_yaml(paths.problem)
@@ -38,8 +41,9 @@ def test_init_creates_iteration_scaffolding(tmp_path):
     # Firmware export reflects params and gain conversion.
     firmware = load_robot_config_file(paths.robotcfg_cfg)
     assert firmware["wheel_radius"] == problem_cfg["robot"]["wheel_radius"]
-    assert firmware["kx_traj"] == problem_cfg["controller"]["gains"][0]
-    expected_kp_inner = problem_cfg["controller"]["gains"][3] / problem_cfg["robot"]["max_wheel_speed"]
+    problem_gains = gains_from_cfg(problem_cfg["controller"])
+    assert firmware["kx_traj"] == problem_gains[0]
+    expected_kp_inner = problem_gains[3] / problem_cfg["robot"]["max_wheel_speed"]
     assert abs(firmware["kp_inner"] - expected_kp_inner) < 1e-9
 
     # The base problem enables the error-MLP schedule, so its firmware network
@@ -66,8 +70,8 @@ def test_finalize_rolls_results_into_next_iteration(tmp_path):
         },
     }
     gains = {
-        "gains": [9.1, 8.2, 6.3, 7.0, 11.0],
-        "static_gains": [4.1, 3.2, 2.3, 5.0, 9.0],
+        "gains": [9.1, 8.2, 6.3, 7.0, 11.0, 1.5, 2.5, 3.5, 4.5],
+        "static_gains": [4.1, 3.2, 2.3, 5.0, 9.0, 6.5, 7.5, 8.5, 9.5],
         "schedule_enabled": True,
         "schedule": {"scheduled_indices": [0, 1, 2], "rho": [0.5, 0.5, 0.5], "W": [[0.1, 0.0]] * 3},
     }
@@ -81,13 +85,13 @@ def test_finalize_rolls_results_into_next_iteration(tmp_path):
 
     next_robot_config = load_yaml(next_paths.robot_config)
     assert next_robot_config["robot"]["wheel_radius"] == 0.0171
-    assert next_robot_config["controller"]["gains"] == gains["gains"]
+    assert gains_from_cfg(next_robot_config["controller"]) == gains["gains"]
     assert next_robot_config["controller"]["gain_parametrization"]["W"] == [[0.1, 0.0]] * 3
 
     next_problem = load_yaml(next_paths.problem)
     assert next_problem["robot"]["base_diameter"] == 0.0912
     assert next_problem["estimator"]["base_diameter"] == 0.0912
-    assert next_problem["controller"]["gains"] == gains["gains"]
+    assert gains_from_cfg(next_problem["controller"]) == gains["gains"]
 
     firmware = load_robot_config_file(next_paths.robotcfg_cfg)
     assert firmware["wheel_base"] == 0.0912
@@ -103,8 +107,8 @@ def test_finalize_writes_static_gain_baseline(tmp_path):
 
     identification = {"estimated_params": {"max_wheel_speed": 240.0}}
     gains = {
-        "gains": [9.1, 8.2, 6.3, 7.0, 11.0],
-        "static_gains": [4.1, 3.2, 2.3, 5.0, 9.0],
+        "gains": [9.1, 8.2, 6.3, 7.0, 11.0, 1.5, 2.5, 3.5, 4.5],
+        "static_gains": [4.1, 3.2, 2.3, 5.0, 9.0, 6.5, 7.5, 8.5, 9.5],
         "schedule_enabled": True,
         "schedule": {"scheduled_indices": [0, 1, 2], "rho": [0.5, 0.5, 0.5], "W": [[0.1, 0.0]] * 3},
     }
@@ -119,9 +123,9 @@ def test_finalize_writes_static_gain_baseline(tmp_path):
     static_config = load_yaml(next_paths.robot_config_static)
     tuned_config = load_yaml(next_paths.robot_config)
     assert static_config["robot"] == tuned_config["robot"]
-    assert static_config["controller"]["gains"] == gains["static_gains"]
+    assert gains_from_cfg(static_config["controller"]) == gains["static_gains"]
     assert "gain_parametrization" not in static_config["controller"]
-    assert tuned_config["controller"]["gains"] == gains["gains"]
+    assert gains_from_cfg(tuned_config["controller"]) == gains["gains"]
 
     static_firmware = load_robot_config_file(next_paths.robotcfg_static_cfg)
     assert static_firmware["kx_traj"] == 4.1
@@ -136,7 +140,7 @@ def test_finalize_without_static_gains_writes_no_baseline(tmp_path):
     with paths.identification_result.open("w") as file:
         yaml.safe_dump({"estimated_params": {}}, file)
     with paths.gains_result.open("w") as file:
-        yaml.safe_dump({"gains": [9.1, 8.2, 6.3, 7.0, 11.0], "schedule_enabled": False}, file)
+        yaml.safe_dump({"gains": [9.1, 8.2, 6.3, 7.0, 11.0, 1.5, 2.5, 3.5, 4.5], "schedule_enabled": False}, file)
 
     next_paths = stage_finalize(experiment, 1)
     assert not next_paths.robot_config_static.exists()

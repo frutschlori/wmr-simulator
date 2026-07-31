@@ -5,12 +5,19 @@ robot:
   time_constant: 0.16138367354869843
   a_slip_max: 2.4718759059906006
 controller:
-  gains:
+  type: kanayama
+  geometric_gains:
   - 0.0017844928661361337
   - 8.52562427520752
   - 13.375515937805176
+  motor_gains:
   - 10.111238479614258
   - 0.0
+  dynamic_feedback_gains:
+  - 10.0
+  - 5.0
+  - 12.0
+  - 7.0
   gain_parametrization:
     kind: error_mlp
     hidden_sizes:

@@ -44,11 +44,13 @@ def apply_reference_window(
     clipped_reference_states = full_reference_states[window_start:window_end]
     start_pose = clipped_reference_states[0, :3]
 
-    def init_states_for_window(self, robot_key, estimator_key):
+    def init_states_for_window(self, robot_key, estimator_key, reference_states=None, start_pose=None):
         robot_state0 = self.robot.get_init_state(key=robot_key, init_pose=start_pose)
         est_state0 = self.estimator.get_init_state(key=estimator_key, start_pose=start_pose)
         ctrl_state0 = jnp.zeros(2, dtype=jnp.float32)
-        return robot_state0, est_state0, ctrl_state0
+        delayed_wheel_ref0 = jnp.zeros(2, dtype=jnp.float32)
+        geometry_state0 = self.controller.initial_geometry_state()
+        return robot_state0, est_state0, ctrl_state0, delayed_wheel_ref0, geometry_state0
 
     pipeline.full_reference_states = full_reference_states
     pipeline.reference_states = clipped_reference_states

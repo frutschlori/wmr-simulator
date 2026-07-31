@@ -15,18 +15,18 @@ part of this set.
 from __future__ import annotations
 
 GAIN_TUNING_DEFAULTS: dict = {
-    "steps": 500,
-    "learning_rate": 1e-4,
+    "steps": 300,
+    "learning_rate": 5e-4,
     "num_realizations": 1,
-    "num_lhs_points": 500,
-    "num_adam_optimizations": 3,
+    "num_lhs_points": 750,
+    "num_adam_optimizations": 20,
     "validation_split": 0.2,
-    "velocity_tracking_weight": 0.2,
+    "velocity_tracking_weight": 1.5,
     "input_weight": 0.0,
     "input_delta_weight": 1.0,
     # Penalty on step-to-step change in the robot yaw rate (normalized by
     # omega_max); discourages gains that oscillate omega. 0 disables.
-    "omega_delta_weight": 0.0,
+    "omega_delta_weight": 0.5,
     "gain_delta_weight": 0.0,
     "k_min_stab": 1e-3,
     "k_max_stab": 50.0,

@@ -11,7 +11,10 @@ planner:
   waypoints: []
   time: 4.0 # seconds
 controller:
-  gains: [5.0, 5.0, 3.0, 0.4, 0.2] # [kx, ky, kth, kpmotor, kimotor]
+  type: kanayama # kanayama (Kanayama tracking law) | dynamic_feedback (dynamic feedback linearization)
+  geometric_gains: [5.0, 5.0, 3.0] # [kx, ky, kth]
+  motor_gains: [0.4, 0.2] # [kpmotor, kimotor]
+  dynamic_feedback_gains: [10.0, 5.0, 12.0, 7.0] # [kp_x, kd_x, kp_y, kd_y], controller.type: dynamic_feedback only
 noise_enabled: true # false zeroes the estimator measurement noise everywhere (sim, gain tuning, traj-opt FIM)
 robot: 
   type: differential_drive

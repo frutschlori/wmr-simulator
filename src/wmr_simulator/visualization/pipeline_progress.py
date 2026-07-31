@@ -2,7 +2,7 @@
 
 One figure, three panels:
 
-- a grouped bar chart with five gain groups (kx, ky, kth, kpmotor, kimotor),
+- a grouped bar chart with one group per controller gain (controller.GAIN_NAMES),
   one bar per iteration at each group; gains are the controller gains deployed
   to record each iteration (see ``evaluate_pipeline_progress``);
 - two loss panels laid out exactly like the gain-tuning loss-history plot,
@@ -26,7 +26,7 @@ matplotlib.use("Agg", force=False)
 import matplotlib.pyplot as plt
 import numpy as np
 
-from wmr_simulator.gain_tuning.optimizers import _GAIN_NAMES
+from wmr_simulator.controller import GAIN_NAMES
 
 
 def _plot_metric_pair(ax, right_ax, records, left_key, right_key, left_color, right_color, left_label, right_label):
@@ -84,7 +84,7 @@ def plot_pipeline_progress(records, experiment_root, out_path=None, out_prefix="
             offset = (row - (n_iter - 1) / 2.0) * bar_width
             ax_gains.bar(group_x + offset, gains[row], width=bar_width, color=color, label=f"it {index:02d}")
         ax_gains.set_xticks(group_x)
-        ax_gains.set_xticklabels(list(_GAIN_NAMES))
+        ax_gains.set_xticklabels(list(GAIN_NAMES))
         ax_gains.set_ylabel("gain value [-]")
         ax_gains.set_title("Controller gains over iterations")
         ax_gains.legend(loc="upper left", bbox_to_anchor=(1.01, 1.0), borderaxespad=0.0, fontsize="small", title="iteration")

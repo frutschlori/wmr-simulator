@@ -283,7 +283,7 @@ def test_static_tune_independent_budget_and_init_gains():
         static_tune=True,
         static_tune_steps=2,
         static_tune_learning_rate=1e-3,
-        static_init_gains=[0.5, 0.5, 0.5, 1.0, 0.0],
+        static_init_gains=[0.5, 0.5, 0.5, 1.0, 0.0, 10.0, 5.0, 12.0, 7.0],
     )
     # Each run keeps its own budget: static initial eval + 2 steps, parametrized
     # initial eval + 1 step.

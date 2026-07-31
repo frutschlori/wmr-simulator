@@ -1,5 +1,5 @@
 import os
-os.environ["JAX_PLATFORMS"] = "cpu"
+# os.environ["JAX_PLATFORMS"] = "cpu"
 
 import argparse
 from wmr_simulator.gain_tuning.defaults import GAIN_TUNING_DEFAULTS

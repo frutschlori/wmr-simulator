@@ -40,6 +40,8 @@ from pathlib import Path
 
 import yaml
 
+from wmr_simulator.controller import controller_type_from_cfg, gains_from_cfg, set_gains
+
 ITERATION_PREFIX = "iteration_"
 
 DEFAULT_EXPERIMENT_CONFIG: dict = {
@@ -344,9 +346,10 @@ def robot_config_from_problem(problem_cfg: dict) -> dict:
             )
         },
         "controller": {
-            "gains": [float(gain) for gain in problem_cfg["controller"]["gains"]],
+            "type": controller_type_from_cfg(problem_cfg["controller"]),
         },
     }
+    set_gains(payload["controller"], gains_from_cfg(problem_cfg["controller"]))
     payload["robot"]["a_slip_max"] = float(robot_cfg.get("a_slip_max", 0.0))
     gain_parametrization = problem_cfg["controller"].get(
         "gain_parametrization", problem_cfg["controller"].get("gain_schedule")
@@ -380,9 +383,9 @@ def write_iteration_problem(
         start.append(math.atan2(goal[1] - start[1], goal[0] - start[0]))
         problem_cfg["start"] = start
     problem_cfg["robot"].update({key: float(value) for key, value in robot_config["robot"].items()})
-    problem_cfg.setdefault("controller", {})["gains"] = [
-        float(gain) for gain in robot_config["controller"]["gains"]
-    ]
+    controller_cfg = problem_cfg.setdefault("controller", {})
+    controller_cfg["type"] = controller_type_from_cfg(robot_config["controller"])
+    set_gains(controller_cfg, gains_from_cfg(robot_config["controller"]))
     gain_parametrization = robot_config["controller"].get(
         "gain_parametrization", robot_config["controller"].get("gain_schedule")
     )

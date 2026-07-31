@@ -28,6 +28,7 @@ from wmr_simulator.active_learning.experiment import (
     save_yaml,
     write_iteration_problem,
 )
+from wmr_simulator.controller import set_gains, gains_from_cfg
 
 REQUIRED_STAGE_OUTPUTS: tuple[tuple[str, str], ...] = (
     ("plan-id-trajectory", "identification trajectory (.pkl + .JSN)"),
@@ -68,7 +69,7 @@ def stage_finalize(experiment: Experiment, iteration: int) -> IterationPaths:
     gains_result = load_yaml(paths.gains_result)
     robot_config = load_yaml(paths.robot_config)
     robot_config["robot"].update(identification["estimated_params"])
-    robot_config["controller"]["gains"] = [float(gain) for gain in gains_result["gains"]]
+    set_gains(robot_config["controller"], gains_result["gains"])
     if gains_result.get("schedule") is not None:
         robot_config["controller"].pop("gain_schedule", None)
         robot_config["controller"]["gain_parametrization"] = {
@@ -108,7 +109,7 @@ def _initialize_iteration(
     export_robot_config(
         paths.robotcfg_cfg,
         physical_params=physical_params,
-        controller_gains=robot_config["controller"]["gains"],
+        controller_gains=gains_from_cfg(robot_config["controller"]),
         template_path=experiment.config.get("robotcfg_template"),
     )
     gainmlp_path = _export_gain_mlp_if_configured(paths.problem, paths.gainmlp_jsn)
@@ -137,14 +138,14 @@ def _write_static_gain_config(
     from wmr_simulator.pololu.robot_config import export_robot_config
 
     static_config = copy.deepcopy(robot_config)
-    static_config["controller"]["gains"] = [float(gain) for gain in static_gains]
+    set_gains(static_config["controller"], static_gains)
     static_config["controller"].pop("gain_parametrization", None)
     static_config["controller"].pop("gain_schedule", None)
     save_yaml(paths.robot_config_static, static_config)
     export_robot_config(
         paths.robotcfg_static_cfg,
         physical_params=physical_params,
-        controller_gains=static_config["controller"]["gains"],
+        controller_gains=gains_from_cfg(static_config["controller"]),
         template_path=experiment.config.get("robotcfg_template"),
     )
 
@@ -389,7 +390,7 @@ def _log_gain_parametrization(paths: IterationPaths):
     logs (``None`` params when no parametrization is enabled)."""
     problem_cfg = load_yaml(paths.problem)
     controller = problem_cfg["controller"]
-    base_gains = [float(gain) for gain in controller["gains"]]
+    base_gains = gains_from_cfg(controller)
     cfg = controller.get("gain_parametrization", controller.get("gain_schedule"))
     if cfg is None or not cfg.get("enabled", False):
         return base_gains, None
@@ -772,9 +773,7 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
     # are what the iteration problem carries.
     static_init_gains = None
     if paths.robot_config_static.is_file():
-        static_init_gains = [
-            float(gain) for gain in load_yaml(paths.robot_config_static)["controller"]["gains"]
-        ]
+        static_init_gains = gains_from_cfg(load_yaml(paths.robot_config_static)["controller"])
         print(f"Static run starts from the previous iteration's static gains: {static_init_gains}")
     result = run_gain_tuning_experiment(
         problem_path=str(problem_path),

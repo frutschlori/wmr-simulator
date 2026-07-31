@@ -4,6 +4,13 @@ import numpy as np
 import optax
 from jax_tqdm import scan_tqdm
 
+from wmr_simulator.controller import (
+    ACTIVE_GAIN_INDICES,
+    GAIN_NAMES,
+    NUM_GAINS,
+    ZERO_ALLOWED_GAIN_INDICES,
+    active_gain_mask,
+)
 from wmr_simulator.gain_parametrization import flat_params as gain_parametrization_flat_params
 from wmr_simulator.gain_parametrization import num_params as gain_parametrization_num_params
 from wmr_simulator.gain_parametrization import with_flat_params, zero_params
@@ -12,40 +19,47 @@ from wmr_simulator.gain_tuning.objectives import (
     scheduled_closed_loop_objective_terms,
 )
 
-_NUM_GAINS = 5
-_NUM_STABLE_GAINS = 4
-_GAIN_NAMES = ("kx", "ky", "kth", "kpmotor", "kimotor")
+_NUM_GAINS = NUM_GAINS
+_GAIN_NAMES = GAIN_NAMES
 _LOSS_COMPONENT_NAMES = ("tracking", "velocity_tracking", "input", "input_delta", "omega_delta", "gain_delta")
+
+# Per-gain search space. A gain that must stay strictly positive for the closed
+# loop to be stable is searched in log space: scale-free resolution across the
+# decades between k_min_stab and k_max_stab, and it can never reach 0. The
+# integral gain is the one gain that is allowed to be exactly 0 (integral action
+# off), which log space cannot express, so it is searched in sqrt space over
+# [0, k_max_rest] instead — that also puts most of the resolution near 0, where
+# the useful values are.
+_LOG_SPACE_GAIN_MASK = jnp.asarray(
+    [index not in ZERO_ALLOWED_GAIN_INDICES for index in range(NUM_GAINS)], dtype=bool
+)
 
 
 # ---------------------------------------------------------------------------
 # Optimizer-value <-> controller-gain reparametrization (base gains only)
 #
-# The trainable vector is [gain_values(5), parametrization_flat(num_w)]. The first five entries
-# are the base 5-gain vector in a bounded reparam space (log-space for the four
-# "stable" gains, sqrt-space for the motor I gain); they are clipped to [0, 1].
-# The trailing parametrization entries are linear (can be negative) and are not
-# clipped here; each parametrization is responsible for bounding its own effect.
+# The trainable vector is [gain_values(NUM_GAINS), parametrization_flat(num_w)].
+# The leading entries are the base gain vector in a bounded reparam space (see
+# _LOG_SPACE_GAIN_MASK); they are clipped to [0, 1]. The trailing
+# parametrization entries are linear (can be negative) and are not clipped here;
+# each parametrization is responsible for bounding its own effect.
 # ---------------------------------------------------------------------------
 
 
 def _controller_gains_to_optimizer_values(gains, k_min_stab, k_max_stab, k_max_rest):
     gains = clip_controller_gains(jnp.asarray(gains, dtype=jnp.float32))
     log_ratio = jnp.log(k_max_stab / k_min_stab)
-    stable = jnp.clip(gains[..., :_NUM_STABLE_GAINS], min=k_min_stab, max=k_max_stab)
-    stable_values = jnp.log(stable / k_min_stab) / log_ratio
-    rest = jnp.clip(gains[..., _NUM_STABLE_GAINS:] / k_max_rest, min=0.0, max=1.0)
-    rest_values = jnp.sqrt(rest)
-    return jnp.clip(jnp.concatenate([stable_values, rest_values], axis=-1), min=0.0, max=1.0)
+    log_values = jnp.log(jnp.clip(gains, min=k_min_stab, max=k_max_stab) / k_min_stab) / log_ratio
+    sqrt_values = jnp.sqrt(jnp.clip(gains / k_max_rest, min=0.0, max=1.0))
+    values = jnp.where(_LOG_SPACE_GAIN_MASK, log_values, sqrt_values)
+    return jnp.clip(values, min=0.0, max=1.0)
 
 
 def _controller_gains_from_optimizer_values(values, k_min_stab, k_max_stab, k_max_rest):
     values = jnp.clip(jnp.asarray(values, dtype=jnp.float32), min=0.0, max=1.0)
-    stable_values = values[..., :_NUM_STABLE_GAINS]
-    rest_values = values[..., _NUM_STABLE_GAINS:]
-    stable = k_min_stab * (k_max_stab / k_min_stab) ** stable_values
-    rest = k_max_rest * rest_values**2
-    return jnp.concatenate([stable, rest], axis=-1)
+    log_gains = k_min_stab * (k_max_stab / k_min_stab) ** values
+    sqrt_gains = k_max_rest * values**2
+    return jnp.where(_LOG_SPACE_GAIN_MASK, log_gains, sqrt_gains)
 
 
 def _clip_optimizer_values(values):
@@ -66,9 +80,10 @@ def _latin_hypercube_samples(key: jax.Array, num_points: int, num_dims: int) -> 
 
 
 def _with_motor_zero_variants(values: jax.Array) -> jax.Array:
+    """Duplicate every candidate with the integral gain(s) switched off."""
     if values.shape[0] == 0:
         return values
-    zero_i = values.at[:, 4].set(0.0)
+    zero_i = values.at[:, jnp.asarray(ZERO_ALLOWED_GAIN_INDICES)].set(0.0)
     return jnp.concatenate([values, zero_i], axis=0)
 
 
@@ -101,8 +116,9 @@ def _candidate_optimizer_values(
     k_max_stab=20.0,
     k_max_rest=20.0,
     w_init=None,
+    trainable_gain_mask=None,
 ):
-    """Build candidate vectors of width (5 + num_w). LHS searches the gain part.
+    """Build candidate vectors of width (NUM_GAINS + num_w). LHS searches the gain part.
 
     ``init_gain_values`` may hold several rows; each becomes its own candidate.
     When ``presearch_relative_range`` > 0 the LHS samples a +/- band around the
@@ -110,6 +126,9 @@ def _candidate_optimizer_values(
     parametrization part is the same for every candidate: ``w_init`` (identity
     when None), so the presearch scores the gains with the parametrization it
     will be optimized with.
+
+    Gains outside ``trainable_gain_mask`` (the ones the active control law never
+    reads) are held at their init value rather than wasting LHS dimensions.
     """
     init_gain_values = jnp.atleast_2d(init_gain_values)
     if num_lhs_points <= 0:
@@ -123,6 +142,8 @@ def _candidate_optimizer_values(
             )
         else:
             lhs_values = lhs_unit
+        if trainable_gain_mask is not None:
+            lhs_values = jnp.where(trainable_gain_mask, lhs_values, init_gain_values[0])
         base_values = jnp.concatenate([init_gain_values, lhs_values], axis=0)
         gain_candidates = _with_motor_zero_variants(base_values)
     if w_init is None:
@@ -228,6 +249,7 @@ def _run_adam_optimizer(
     validation_loss_terms_for_optimizer_values,
     num_steps,
     learning_rate,
+    trainable_mask=None,
 ):
     initial_loss_terms = np.asarray(jax.vmap(loss_terms_for_optimizer_values)(initial_values), dtype=float)
     initial_validation_losses = None
@@ -255,6 +277,10 @@ def _run_adam_optimizer(
     def train_step(carry, _):
         values, opt_state = carry
         (loss_values, loss_terms), grads = jax.vmap(jax.value_and_grad(loss_with_terms, has_aux=True))(values)
+        if trainable_mask is not None:
+            # Freeze the entries the active control law never reads: zero their
+            # gradient so Adam's moments stay at 0 and the values never move.
+            grads = jnp.where(trainable_mask, grads, 0.0)
         validation_values = (
             jnp.full_like(loss_values, jnp.nan)
             if validation_loss_for_optimizer_values is None
@@ -323,16 +349,22 @@ def optimize_controller_gains(
 ):
     """Single-stage joint optimization of base gains and the gain schedule.
 
-    The trainable vector is ``[gain_values(5), parametrization_flat(num_w)]``. LHS
-    presearch and multistart operate on the gain part, with the parametrization
-    held at its start value (the warm-started template, else the identity
-    mapping) so the candidates are scored under the controller that Adam then
-    refines jointly.
+    The trainable vector is ``[gain_values(NUM_GAINS), parametrization_flat(num_w)]``.
+    LHS presearch and multistart operate on the gain part, with the
+    parametrization held at its start value (the warm-started template, else the
+    identity mapping) so the candidates are scored under the controller that
+    Adam then refines jointly.
     When ``schedule_enabled`` is False, ``num_w = 0`` and the parametrization is
     fixed at its identity mapping, reproducing the static controller.
 
-    ``init_gains`` may be a single 5-gain vector or a batch ``(N, 5)`` of them
-    (each becomes its own candidate/start).
+    Which gains move depends on ``pipeline``'s controller type
+    (``controller.ACTIVE_GAIN_INDICES``): the Kanayama law tunes
+    [kx, ky, kth, kpmotor, kimotor], the dynamic-feedback law tunes
+    [kpmotor, kimotor, kp_x, kd_x, kp_y, kd_y]. The others are held at their
+    init value.
+
+    ``init_gains`` may be a single gain vector or a batch ``(N, NUM_GAINS)`` of
+    them (each becomes its own candidate/start).
 
     Returns a dict with the best start's gains/parametrization plus the raw
     per-start loss histories and selection metadata (``best_start_index``,
@@ -351,6 +383,20 @@ def optimize_controller_gains(
         raise ValueError("num_adam_optimizations must be positive.")
 
     num_w = gain_parametrization_num_params(schedule_template) if schedule_enabled else 0
+
+    # Only the gains the pipeline's control law actually reads are searched; the
+    # rest keep their init value (they have no effect on the rollout, so leaving
+    # them free would spend LHS dimensions and write meaningless numbers into
+    # the result).
+    controller_type = pipeline.controller.controller_type
+    trainable_gain_mask = jnp.asarray(active_gain_mask(controller_type), dtype=bool)
+    trainable_mask = jnp.concatenate([trainable_gain_mask, jnp.ones(num_w, dtype=bool)])
+    frozen = [name for name, active in zip(_GAIN_NAMES, active_gain_mask(controller_type)) if not active]
+    print(
+        f"Tuning the '{controller_type}' controller: "
+        f"{', '.join(name for name, active in zip(_GAIN_NAMES, active_gain_mask(controller_type)) if active)}"
+        + (f" (held fixed: {', '.join(frozen)})" if frozen else "")
+    )
 
     replay_robot_keys = jax.random.split(pipeline.robot_key, num_realizations)
     replay_estimator_keys = jax.random.split(pipeline.estimator_key, num_realizations)
@@ -401,6 +447,7 @@ def optimize_controller_gains(
         k_max_stab=k_max_stab,
         k_max_rest=k_max_rest,
         w_init=w_init,
+        trainable_gain_mask=trainable_gain_mask,
     )
     if w_init is not None:
         print("Warm-starting the gain parametrization from the template (previous result).")
@@ -435,12 +482,20 @@ def optimize_controller_gains(
         validation_loss_terms_for_optimizer_values=validation_loss_terms_for_optimizer_values,
         num_steps=num_steps,
         learning_rate=learning_rate,
+        trainable_mask=trainable_mask,
     )
     final_losses = loss_history[-1]
     best_index = int(np.argmin(final_losses))
     best_values = final_values[best_index]
     final_gains_per_start = _controller_gains_from_optimizer_values(
         final_values[:, :_NUM_GAINS], k_min_stab=k_min_stab, k_max_stab=k_max_stab, k_max_rest=k_max_rest
+    )
+    # Report the frozen gains exactly as configured. They never moved, but the
+    # round trip through the bounded reparametrization is only float32-accurate
+    # (10.0 -> 10.00001), and that error would otherwise accumulate over the
+    # iterations of the active-learning loop.
+    final_gains_per_start = jnp.where(
+        trainable_gain_mask, final_gains_per_start, jnp.atleast_2d(jnp.asarray(init_gains, dtype=jnp.float32))[0]
     )
     best_gains = final_gains_per_start[best_index]
     if schedule_enabled:

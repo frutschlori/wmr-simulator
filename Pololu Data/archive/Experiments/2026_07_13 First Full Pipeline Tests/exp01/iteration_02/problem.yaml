@@ -26,12 +26,19 @@ planner:
     - 1.57
   time: 5.0
 controller:
-  gains:
+  type: kanayama
+  geometric_gains:
   - 4.618495464324951
   - 3.478989601135254
   - 2.6406686305999756
+  motor_gains:
   - 3.9767699241638184
   - 0.0
+  dynamic_feedback_gains:
+  - 10.0
+  - 5.0
+  - 12.0
+  - 7.0
   gain_parametrization:
     enabled: false
     scheduled_indices:

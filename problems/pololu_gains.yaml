@@ -13,14 +13,15 @@ planner:
     - [1.0,0.5, 1.57]
   time: 5.0 # seconds
 controller:
+  type: dynamic_feedback # kanayama (Kanayama tracking law) | dynamic_feedback (dynamic feedback linearization)
   # Motor gains are dimensionless here, but in duty / (rad/s) in pololu firmware -> divide gains by motor gain for conversion
-  # gains: [5.0, 5.0, 3.5, 5.0, 0.0] # [kx, ky, kth, kpmotor, kimotor]
-  gains: [4.5, 6.0, 12.0, 2.5, 5.0] # stock pololu firmware gains
-  # gains: [5.0, 5.0, 3.0, 0.4, 0.2] # stock wmr simulator gains
+  geometric_gains: [4.5, 6.0, 12.0] # [kx, ky, kth] stock pololu firmware gains
+  motor_gains: [2.5, 5.0] # [kpmotor, kimotor] stock pololu firmware gains
+  dynamic_feedback_gains: [10.0, 5.0, 12.0, 7.0] # [kp_x, kd_x, kp_y, kd_y], controller.type: dynamic_feedback only
 
   # Bounded multiplicative gain schedule for the outer tracking gains:
   #   gain_i = base_i * (1 + rho_i * clip(W_i . z, -1, 1)),  z = [v_d/v_max, |omega_d|/omega_max]
-  # base_i are controller.gains[0:3]; W is trained jointly with the gains. W = 0
+  # base_i are controller.geometric_gains; W is trained jointly with the gains. W = 0
   # reproduces the static controller exactly. feature_scale is auto-derived from the
   # robot velocity limits (v_max, omega_max). --no-gain-schedule forces W = 0.
 #  gain_parametrization:
@@ -41,10 +42,10 @@ controller:
   # network's Lipschitz constant so the factors stay smooth on noisy/unseen inputs.
   gain_parametrization:
     kind: error_mlp
-    enabled: true
+    enabled: false
     hidden_sizes: [16]
     seed: 0
-    scheduled_indices: [0, 1, 2, 3, 4] # kx, ky, kth; motor PI gains stay static ([0,1,2,3,4] schedules all)
+    scheduled_indices: [0, 1, 2, 3, 4] # kx, ky, kth, kpmotor, kimotor; must stay in [0, 5) (the firmware MLP knows no other gains)
     bound: 5.0             # upper factor bound, clipped to >= 1 when applied
     learn_bound: false     # true adds the bound to the trainable vector
     spectral_norm_cap: 2 # per-matrix spectral norm cap, 0 disables

@@ -46,7 +46,7 @@ class PoseLog(NamedTuple):
     # simulated logs.
     clean_time_s: jax.Array | None = None
     clean_states: jax.Array | None = None
-    # Controller gains [kx, ky, kth, kpmotor, kimotor] applied at each geometry
+    # Controller gains (controller.GAIN_NAMES order) applied at each geometry
     # step (command_time_s); time-varying under a gain parametrization. None for
     # replayed/real logs.
     gains: jax.Array | None = None
@@ -91,12 +91,11 @@ def physical_params_from_array(values: jax.Array) -> PhysicalParams:
 
 
 def print_controller_gains(label: str, gains: jax.Array):
+    from wmr_simulator.controller import GAIN_NAMES
+
     print(label)
-    print(f"  kx={float(gains[0]):.7f}")
-    print(f"  ky={float(gains[1]):.7f}")
-    print(f"  kth={float(gains[2]):.7f}")
-    print(f"  kpmotor={float(gains[3]):.7f}")
-    print(f"  kimotor={float(gains[4]):.7f}")
+    for name, value in zip(GAIN_NAMES, gains):
+        print(f"  {name}={float(value):.7f}")
 
 
 def clip_physical_params(params: PhysicalParams) -> PhysicalParams:

@@ -113,10 +113,13 @@ def robot_config_values(
 
     ``physical_params`` is a PhysicalParams (or anything with wheel_radius,
     base_diameter and max_wheel_speed attributes); ``controller_gains`` is the
-    simulator gain vector [kx, ky, kth, kpmotor, kimotor]. Inner motor gains are
-    converted to firmware duty/(rad/s) units by dividing by max_wheel_speed, so
-    exporting gains requires physical_params too. The firmware ``kd_inner`` slot
-    has no simulator counterpart and is forced to 0.
+    full simulator gain vector (``controller.GAIN_NAMES``), of which only the
+    firmware-known prefix [kx, ky, kth, kpmotor, kimotor] is exported — the
+    firmware implements the Kanayama law only, so the dynamic-feedback gains
+    have no slot. Inner motor gains are converted to firmware duty/(rad/s) units
+    by dividing by max_wheel_speed, so exporting gains requires physical_params
+    too. The firmware ``kd_inner`` slot has no simulator counterpart and is
+    forced to 0.
     """
     values = dict(DEFAULT_ROBOT_CONFIG if template is None else template)
     if physical_params is not None:
@@ -125,9 +128,11 @@ def robot_config_values(
     if controller_gains is not None:
         if physical_params is None:
             raise ValueError("Exporting controller gains requires physical_params for the motor-gain conversion.")
+        from wmr_simulator.controller import GAIN_NAMES, NUM_GAINS
+
         gains = [float(gain) for gain in controller_gains]
-        if len(gains) != 5:
-            raise ValueError(f"Expected 5 controller gains [kx, ky, kth, kp, ki], got {len(gains)}.")
+        if len(gains) != NUM_GAINS:
+            raise ValueError(f"Expected {NUM_GAINS} controller gains {GAIN_NAMES}, got {len(gains)}.")
         motor_gain = float(physical_params.max_wheel_speed)
         if motor_gain <= 0.0:
             raise ValueError("max_wheel_speed must be positive for the inner-gain conversion.")
@@ -199,7 +204,9 @@ def main(argv: list[str] | None = None) -> int:
             base_diameter=robot_cfg["base_diameter"],
             max_wheel_speed=robot_cfg["max_wheel_speed"],
         )
-        controller_gains = problem_cfg["controller"]["gains"]
+        from wmr_simulator.controller import gains_from_cfg
+
+        controller_gains = gains_from_cfg(problem_cfg["controller"])
 
     overrides = {}
     for item in args.overrides:

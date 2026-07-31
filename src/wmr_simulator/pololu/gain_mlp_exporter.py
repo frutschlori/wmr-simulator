@@ -37,6 +37,8 @@ from pathlib import Path
 
 import numpy as np
 
+from wmr_simulator.controller import FIRMWARE_GAIN_SLICE
+from wmr_simulator.controller import NUM_GAINS as SIMULATOR_NUM_GAINS
 from wmr_simulator.gain_parametrization import error_mlp
 from wmr_simulator.gain_parametrization.error_mlp import (
     NUM_FEATURES,
@@ -80,10 +82,16 @@ def gain_mlp_payload(params: ErrorMlpParams) -> dict:
 
 
 def firmware_base_gains(controller_gains, max_wheel_speed: float) -> list:
-    """Simulator gain vector -> firmware units (inner motor gains / motor gain)."""
+    """Simulator gain vector -> firmware units (inner motor gains / motor gain).
+
+    Takes the full simulator gain vector and keeps the firmware-known prefix
+    (the firmware implements the Kanayama law only, so the dynamic-feedback
+    gains have no firmware counterpart).
+    """
     gains = [float(gain) for gain in controller_gains]
-    if len(gains) != NUM_GAINS:
-        raise ValueError(f"Expected {NUM_GAINS} controller gains, got {len(gains)}.")
+    if len(gains) != SIMULATOR_NUM_GAINS:
+        raise ValueError(f"Expected {SIMULATOR_NUM_GAINS} controller gains, got {len(gains)}.")
+    gains = gains[FIRMWARE_GAIN_SLICE]
     motor_gain = float(max_wheel_speed)
     if motor_gain <= 0.0:
         raise ValueError("max_wheel_speed must be positive for the inner-gain conversion.")
@@ -231,13 +239,14 @@ def main(argv: list | None = None) -> int:
 
     import yaml
 
+    from wmr_simulator.controller import gains_from_cfg
     from wmr_simulator.gain_parametrization import params_from_cfg, parametrization_kind
 
     with open(args.problem, "r", encoding="utf-8") as file:
         problem_cfg = yaml.safe_load(file)
     robot_cfg = problem_cfg["robot"]
     feature_scale = [robot_cfg["v_max"], robot_cfg["omega_max"]]
-    gains = problem_cfg["controller"]["gains"]
+    gains = gains_from_cfg(problem_cfg["controller"])
     parametrization_cfg = problem_cfg["controller"].get("gain_parametrization")
 
     if args.tuned is not None:

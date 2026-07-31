@@ -32,7 +32,8 @@ def test_robot_id_is_fixed_int_directly_above_joystick_control():
 
 
 def test_gain_conversion_divides_inner_gains_by_motor_gain():
-    gains = [9.5, 7.5, 6.0, 7.15, 11.9]
+    # The trailing dynamic-feedback gains have no firmware slot and are dropped.
+    gains = [9.5, 7.5, 6.0, 7.15, 11.9, 10.0, 5.0, 12.0, 7.0]
     values = robot_config_values(physical_params=FakeParams(), controller_gains=gains)
     assert values["wheel_radius"] == pytest.approx(0.017)
     assert values["wheel_base"] == pytest.approx(0.09)
@@ -48,7 +49,7 @@ def test_gain_conversion_divides_inner_gains_by_motor_gain():
 
 def test_gains_require_physical_params():
     with pytest.raises(ValueError, match="physical_params"):
-        robot_config_values(controller_gains=[1, 2, 3, 4, 5])
+        robot_config_values(controller_gains=[1, 2, 3, 4, 5, 6, 7, 8, 9])
 
 
 def test_export_with_template_and_overrides(tmp_path):
@@ -57,7 +58,7 @@ def test_export_with_template_and_overrides(tmp_path):
     output = export_robot_config(
         tmp_path / "out" / "ROBOTCFG.CFG",
         physical_params=FakeParams(),
-        controller_gains=[1, 2, 3, 4, 5],
+        controller_gains=[1, 2, 3, 4, 5, 6, 7, 8, 9],
         template_path=template,
         overrides={"max_speed": 2.0},
     )

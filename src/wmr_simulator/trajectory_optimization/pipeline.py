@@ -8,7 +8,7 @@ import jax.numpy as jnp
 import numpy as np
 import yaml
 
-from wmr_simulator.controller import Controller
+from wmr_simulator.controller import Controller, controller_type_from_cfg, gains_from_cfg
 from wmr_simulator.estimator import DiffDriveEstimator
 from wmr_simulator.robot import DiffDrive
 from wmr_simulator.simulation import (
@@ -82,9 +82,11 @@ class ProblemDefinition:
     def build_controller(self) -> Controller:
         return Controller(
             robot_param=self.robot_cfg,
-            gains=self.controller_cfg["gains"],
+            gains=gains_from_cfg(self.controller_cfg),
             duty_limits=[-1.0, 1.0],
             dt=self.geometry_dt,
+            geometry_dt=self.geometry_dt,
+            controller_type=controller_type_from_cfg(self.controller_cfg),
         )
 
     def planner_time_grid(self) -> np.ndarray:
