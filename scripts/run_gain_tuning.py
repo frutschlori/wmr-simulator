@@ -76,7 +76,9 @@ def main():
     parser.add_argument("--steps", type=int, default=GAIN_TUNING_DEFAULTS["steps"])                 # adam steps
     parser.add_argument("--learning-rate", type=float, default=GAIN_TUNING_DEFAULTS["learning_rate"])      # adam learning rate
     parser.add_argument("--num-realizations", type=int, default=GAIN_TUNING_DEFAULTS["num_realizations"]) # noise realizations over 1 trajectory
-    parser.add_argument("--seed", type=int, default=2)
+    # Matches the active-learning experiment default so the standalone script and
+    # the tune-gains stage produce the same result on the same inputs.
+    parser.add_argument("--seed", type=int, default=0)
     # Loss weights
     parser.add_argument("--velocity-tracking-weight", type=float, default=GAIN_TUNING_DEFAULTS["velocity_tracking_weight"])
     parser.add_argument("--input-weight", type=float, default=GAIN_TUNING_DEFAULTS["input_weight"])
@@ -110,8 +112,8 @@ def main():
     parser.add_argument("--warm-start-schedule", action=argparse.BooleanOptionalAction, default=GAIN_TUNING_DEFAULTS["warm_start_schedule"])
     # Learned residual dynamics checkpoint (scripts/train_residual_model.py); tuning
     # then rolls out the residual-augmented dynamics (model params stay fixed).
-    parser.add_argument("--residual-model", type=str, default="models/residual_pololu.pkl")
-    # parser.add_argument("--residual-model", type=str, default=None)
+    # parser.add_argument("--residual-model", type=str, default="models/residual_pololu.pkl")
+    parser.add_argument("--residual-model", type=str, default=None)
     # Tuning result (gains + trained gain parametrization) is saved here as YAML;
     # the parametrization block drops into the problem yaml's controller section.
     parser.add_argument("--out", type=str, default="models/tuned_gains.yaml")

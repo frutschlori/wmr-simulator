@@ -436,8 +436,14 @@ def optimize_controller_gains(
         num_steps=num_steps,
         learning_rate=learning_rate,
     )
+    # Pick the winning start on the validation trajectories when there are any.
+    # Selecting on the training loss rewards the start that fit its own noise
+    # draw / trajectory split best: measured over seeds 0-3, the lowest-training-
+    # loss run was also the worst-generalizing one. Falls back to the training
+    # loss when validation_split leaves no validation trajectories.
     final_losses = loss_history[-1]
-    best_index = int(np.argmin(final_losses))
+    selection_losses = final_losses if validation_loss_history is None else validation_loss_history[-1]
+    best_index = int(np.argmin(selection_losses))
     best_values = final_values[best_index]
     final_gains_per_start = _controller_gains_from_optimizer_values(
         final_values[:, :_NUM_GAINS], k_min_stab=k_min_stab, k_max_stab=k_max_stab, k_max_rest=k_max_rest

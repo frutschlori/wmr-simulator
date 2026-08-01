@@ -17,11 +17,16 @@ from __future__ import annotations
 GAIN_TUNING_DEFAULTS: dict = {
     "steps": 500,
     "learning_rate": 1e-4,
-    "num_realizations": 1,
+    # Noise realizations averaged into every objective evaluation. With 1 the
+    # optimizer fits a single measurement-noise draw: measured over seeds 0-3 on
+    # the same 16 training trajectories, the per-draw ranking noise (~15% of the
+    # loss) exceeds the spread between candidate gain vectors (~7%), and the
+    # winning gains swing by orders of magnitude with the seed alone.
+    "num_realizations": 8,
     "num_lhs_points": 500,
     "num_adam_optimizations": 3,
     "validation_split": 0.2,
-    "velocity_tracking_weight": 0.2,
+    "velocity_tracking_weight": 3.0,
     "input_weight": 0.0,
     "input_delta_weight": 1.0,
     # Penalty on step-to-step change in the robot yaw rate (normalized by
