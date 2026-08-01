@@ -1125,7 +1125,7 @@ def train_main(argv=None):
         "--log-dir",
         type=str,
         nargs="+",
-        default=["Pololu Data/Experiments/exp04", "Pololu Data/Experiments/exp05"],
+        default=["Pololu Data/archive/Experiments/2026_07_27 Full Pipeline (with Residual and Gain MLP)/exp01"],
     )
     parser.add_argument("--out", type=str, default="models/residual_pololu.pkl")
     parser.add_argument("--num-experts", type=int, default=DEFAULT_NUM_EXPERTS)

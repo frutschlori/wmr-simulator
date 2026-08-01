@@ -136,17 +136,17 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
     "gain_tuning": {
         "steps": 500,
         "learning_rate": 1e-4,
-        "num_realizations": 1,
+        "num_realizations": 8,
         "num_lhs_points": 500,
         "num_adam_optimizations": 3,
         "validation_split": 0.2,
-        "velocity_tracking_weight": 0.2,
+        "velocity_tracking_weight": 3.0,
         "input_weight": 0.0,
         "input_delta_weight": 1.0,
         "omega_delta_weight": 0.0,
         "gain_delta_weight": 0.0,
         "k_min_stab": 1e-3,
-        "k_max_stab": 40.0,
+        "k_max_stab": 50.0,
         "k_max_rest": 20.0,
         "gain_parametrization": None,  # None -> follow problem yaml
         # Tune a static controller independently of the parametrized one (its
