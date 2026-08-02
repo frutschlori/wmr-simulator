@@ -37,3 +37,37 @@ def time_scaling_derivatives(
     if selected_time_scaling == "linear":
         return t / total_time, jnp.ones_like(t) / total_time, jnp.zeros_like(t)
     return sigma(t, total_time), sigma_dot(t, total_time), sigma_ddot(t, total_time)
+
+
+def _reference_from_derivatives(
+    position: jnp.ndarray,
+    dpos_ds: jnp.ndarray,
+    d2pos_ds2: jnp.ndarray,
+    s_dot: jnp.ndarray,
+    s_ddot: jnp.ndarray,
+) -> jnp.ndarray:
+    """Assemble the [T, 8] reference-state matrix from curve derivatives.
+    Shared by every curve parametrization (bezier, quintic_spline, ...) --
+    keep this bit-identical across curve kinds."""
+    velocity = dpos_ds * s_dot[:, None]
+    acceleration = dpos_ds * s_ddot[:, None] + d2pos_ds2 * (s_dot[:, None] ** 2)
+    theta = jnp.arctan2(dpos_ds[:, 1], dpos_ds[:, 0])
+
+    tangent_norm_sq = jnp.sum(dpos_ds**2, axis=1)
+    dtheta_ds = (
+        dpos_ds[:, 0] * d2pos_ds2[:, 1] - dpos_ds[:, 1] * d2pos_ds2[:, 0]
+    ) / (tangent_norm_sq + 1e-8)
+    omega = dtheta_ds * s_dot
+
+    return jnp.column_stack(
+        [
+            position[:, 0],
+            position[:, 1],
+            theta,
+            velocity[:, 0],
+            velocity[:, 1],
+            omega,
+            acceleration[:, 0],
+            acceleration[:, 1],
+        ]
+    )

@@ -9,6 +9,7 @@ from wmr_simulator.gain_parametrization import num_params as gain_parametrizatio
 from wmr_simulator.gain_parametrization import with_flat_params, zero_params
 from wmr_simulator.gain_tuning.objectives import (
     clip_controller_gains,
+    sample_initial_pose_offsets,
     scheduled_closed_loop_objective_terms,
 )
 
@@ -150,6 +151,7 @@ def _make_terms_for_values(
     k_max_stab,
     k_max_rest,
     reference_trajectories,
+    initial_pose_offsets,
 ):
     reference_trajectories = (
         None if reference_trajectories is None else jnp.asarray(reference_trajectories, dtype=jnp.float32)
@@ -176,6 +178,7 @@ def _make_terms_for_values(
                 omega_delta_weight=omega_delta_weight,
                 gain_delta_weight=gain_delta_weight,
                 reference_states=reference_states,
+                initial_pose_offsets=initial_pose_offsets,
             )
 
         if reference_trajectories is None:
@@ -242,7 +245,17 @@ def _run_adam_optimizer(
     if num_steps <= 0:
         validation_history = None if initial_validation_losses is None else initial_validation_losses[None, :]
         validation_terms_history = None if initial_validation_terms is None else initial_validation_terms[None, :, :]
-        return initial_values, initial_losses[None, :], validation_history, initial_loss_terms[None, :, :], validation_terms_history
+        selection_scores = (
+            initial_losses if initial_validation_losses is None else initial_validation_losses
+        )
+        return (
+            initial_values,
+            np.asarray(selection_scores, dtype=float),
+            initial_losses[None, :],
+            validation_history,
+            initial_loss_terms[None, :, :],
+            validation_terms_history,
+        )
 
     optimizer = optax.adam(learning_rate)
     current_opt_state = optimizer.init(initial_values)
@@ -251,9 +264,14 @@ def _run_adam_optimizer(
         terms = loss_terms_for_optimizer_values(values)
         return jnp.sum(terms), terms
 
+    # Score used to keep the best iterate: the validation loss when there is a
+    # validation set, else the training loss.
+    def score_of(loss_values, validation_values):
+        return loss_values if validation_loss_for_optimizer_values is None else validation_values
+
     @scan_tqdm(num_steps, desc=f"Adam optimization ({initial_values.shape[0]} starts)")
     def train_step(carry, _):
-        values, opt_state = carry
+        values, opt_state, best_values, best_score = carry
         (loss_values, loss_terms), grads = jax.vmap(jax.value_and_grad(loss_with_terms, has_aux=True))(values)
         validation_values = (
             jnp.full_like(loss_values, jnp.nan)
@@ -265,15 +283,49 @@ def _run_adam_optimizer(
             if validation_loss_terms_for_optimizer_values is None
             else jax.vmap(validation_loss_terms_for_optimizer_values)(values)
         )
+        # Track the best iterate *seen*, per start. A fixed step size on this
+        # objective can sit on a cliff edge (large kx blows the rollout up), so
+        # the last iterate is not reliably the best one -- it can be an order of
+        # magnitude worse than a point the run already passed through.
+        score = score_of(loss_values, validation_values)
+        improved = score < best_score
+        next_best_score = jnp.where(improved, score, best_score)
+        next_best_values = jnp.where(improved[:, None], values, best_values)
         updates, next_opt_state = optimizer.update(grads, opt_state, values)
         next_values = _clip_optimizer_values(optax.apply_updates(values, updates))
-        return (next_values, next_opt_state), (loss_values, validation_values, loss_terms, validation_terms)
+        return (
+            (next_values, next_opt_state, next_best_values, next_best_score),
+            (loss_values, validation_values, loss_terms, validation_terms),
+        )
 
-    (final_values, _), (adam_loss_history, adam_validation_history, adam_terms_history, adam_validation_terms_history) = jax.lax.scan(
+    initial_score = score_of(
+        jnp.asarray(initial_losses, dtype=jnp.float32),
+        jnp.full((initial_values.shape[0],), jnp.inf, dtype=jnp.float32)
+        if initial_validation_losses is None
+        else jnp.asarray(initial_validation_losses, dtype=jnp.float32),
+    )
+    (final_values, _, best_values, best_score), (
+        adam_loss_history,
+        adam_validation_history,
+        adam_terms_history,
+        adam_validation_terms_history,
+    ) = jax.lax.scan(
         train_step,
-        (initial_values, current_opt_state),
+        (initial_values, current_opt_state, initial_values, initial_score),
         jnp.arange(num_steps),
     )
+    # The scan scores each iterate before its update, so the final iterate has
+    # not been scored yet; fold it in so a run that improved to the very end
+    # keeps its last step.
+    final_score = score_of(
+        jax.vmap(lambda v: jnp.sum(loss_terms_for_optimizer_values(v)))(final_values),
+        jnp.full((final_values.shape[0],), jnp.inf, dtype=jnp.float32)
+        if validation_loss_for_optimizer_values is None
+        else jax.vmap(validation_loss_for_optimizer_values)(final_values),
+    )
+    improved = final_score < best_score
+    best_values = jnp.where(improved[:, None], final_values, best_values)
+    best_score = jnp.where(improved, final_score, best_score)
     loss_history = jnp.concatenate([jnp.asarray(initial_losses, dtype=jnp.float32)[None, :], adam_loss_history], axis=0)
     loss_terms_history = jnp.concatenate(
         [jnp.asarray(initial_loss_terms, dtype=jnp.float32)[None, :, :], adam_terms_history], axis=0
@@ -290,7 +342,8 @@ def _run_adam_optimizer(
         )
         validation_terms_history = np.asarray(validation_terms_history, dtype=float)
     return (
-        final_values,
+        best_values,
+        np.asarray(best_score, dtype=float),
         np.asarray(loss_history, dtype=float),
         validation_history,
         np.asarray(loss_terms_history, dtype=float),
@@ -318,6 +371,8 @@ def optimize_controller_gains(
     num_adam_optimizations: int = 1,
     presearch_relative_range: float = 0.0,
     warm_start_schedule: bool = False,
+    init_offset_radius: float = 0.0,
+    init_offset_angle: float = 0.0,
     training_reference_trajectories: jax.Array | None = None,
     validation_reference_trajectories: jax.Array | None = None,
 ):
@@ -354,6 +409,21 @@ def optimize_controller_gains(
 
     replay_robot_keys = jax.random.split(pipeline.robot_key, num_realizations)
     replay_estimator_keys = jax.random.split(pipeline.estimator_key, num_realizations)
+    # One start-pose offset per realization, drawn once and held fixed for the
+    # whole run (like the noise keys) so the objective stays a deterministic
+    # function of the gains. Folded off the robot key with its own tag so the
+    # offsets do not correlate with the measurement-noise draws.
+    initial_pose_offsets = sample_initial_pose_offsets(
+        jax.random.fold_in(pipeline.robot_key, 5813),
+        num_realizations,
+        init_offset_radius,
+        init_offset_angle,
+    )
+    if init_offset_radius > 0.0 or init_offset_angle > 0.0:
+        print(
+            f"Randomized start poses: {num_realizations} offsets within "
+            f"{init_offset_radius:.4g} m / {np.rad2deg(init_offset_angle):.3g} deg of the reference start."
+        )
 
     def make_terms(reference_trajectories):
         return _make_terms_for_values(
@@ -372,6 +442,7 @@ def optimize_controller_gains(
             k_max_stab=k_max_stab,
             k_max_rest=k_max_rest,
             reference_trajectories=reference_trajectories,
+            initial_pose_offsets=initial_pose_offsets,
         )
 
     loss_terms_for_optimizer_values = make_terms(training_reference_trajectories)
@@ -427,7 +498,14 @@ def optimize_controller_gains(
         k_max_rest=k_max_rest,
         lhs_enabled=num_lhs_points > 0,
     )
-    final_values, loss_history, validation_loss_history, loss_terms_history, validation_terms_history = _run_adam_optimizer(
+    (
+        final_values,
+        selection_scores,
+        loss_history,
+        validation_loss_history,
+        loss_terms_history,
+        validation_terms_history,
+    ) = _run_adam_optimizer(
         initial_values=initial_values,
         initial_losses=initial_losses,
         loss_terms_for_optimizer_values=loss_terms_for_optimizer_values,
@@ -439,16 +517,29 @@ def optimize_controller_gains(
     # Pick the winning start on the validation trajectories when there are any.
     # Selecting on the training loss rewards the start that fit its own noise
     # draw / trajectory split best: measured over seeds 0-3, the lowest-training-
-    # loss run was also the worst-generalizing one. Falls back to the training
-    # loss when validation_split leaves no validation trajectories.
-    final_losses = loss_history[-1]
-    selection_losses = final_losses if validation_loss_history is None else validation_loss_history[-1]
-    best_index = int(np.argmin(selection_losses))
+    # loss run was also the worst-generalizing one. `selection_scores` already
+    # falls back to the training loss when there is no validation set, and it is
+    # the score of each start's *best* iterate, not of its last one.
+    best_index = int(np.argmin(selection_scores))
     best_values = final_values[best_index]
     final_gains_per_start = _controller_gains_from_optimizer_values(
         final_values[:, :_NUM_GAINS], k_min_stab=k_min_stab, k_max_stab=k_max_stab, k_max_rest=k_max_rest
     )
     best_gains = final_gains_per_start[best_index]
+    # Losses *of the returned point*. The loss histories are the raw per-step
+    # traces, so their last entry belongs to the last iterate, which is not the
+    # one returned; reporting it would advertise a number the exported gains do
+    # not achieve.
+    best_training_loss = float(loss_for_optimizer_values(best_values))
+    best_validation_loss = (
+        None
+        if validation_loss_for_optimizer_values is None
+        else float(validation_loss_for_optimizer_values(best_values))
+    )
+    print(
+        f"Best start {best_index}: training loss {best_training_loss:.8f}"
+        + ("" if best_validation_loss is None else f", validation loss {best_validation_loss:.8f}")
+    )
     if schedule_enabled:
         best_schedule_params = with_flat_params(best_values[_NUM_GAINS:], schedule_template)
     else:
@@ -459,6 +550,8 @@ def optimize_controller_gains(
         "schedule_params": best_schedule_params,
         "final_gains_per_start": final_gains_per_start,
         "best_start_index": best_index,
+        "best_training_loss": best_training_loss,
+        "best_validation_loss": best_validation_loss,
         "start_candidate_indices": np.asarray(start_candidate_indices, dtype=int),
         "loss_history_per_start": loss_history,
         "validation_loss_history_per_start": validation_loss_history,

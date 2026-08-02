@@ -44,19 +44,17 @@ def save_tuning_result(out_path: str, problem_path: str, result: dict) -> None:
         ),
         "schedule_enabled": bool(result["schedule_enabled"]),
         "schedule": None if schedule_params is None else to_cfg(schedule_params),
-        "final_loss": float(result["loss_history"][-1]),
+        "final_loss": float(result["final_loss"]),
         "final_validation_loss": (
-            float(result["validation_loss_history"][-1])
-            if result["validation_loss_history"] is not None
-            else None
+            None if result["final_validation_loss"] is None else float(result["final_validation_loss"])
         ),
         "static_final_loss": (
-            None if result["static_loss_history"] is None else float(result["static_loss_history"][-1])
+            None if result["static_final_loss"] is None else float(result["static_final_loss"])
         ),
         "static_final_validation_loss": (
             None
-            if result["static_validation_loss_history"] is None
-            else float(result["static_validation_loss_history"][-1])
+            if result["static_final_validation_loss"] is None
+            else float(result["static_final_validation_loss"])
         ),
     }
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
@@ -76,6 +74,10 @@ def main():
     parser.add_argument("--steps", type=int, default=GAIN_TUNING_DEFAULTS["steps"])                 # adam steps
     parser.add_argument("--learning-rate", type=float, default=GAIN_TUNING_DEFAULTS["learning_rate"])      # adam learning rate
     parser.add_argument("--num-realizations", type=int, default=GAIN_TUNING_DEFAULTS["num_realizations"]) # noise realizations over 1 trajectory
+    # Randomized start pose per realization (0 disables): the robot is placed off
+    # the reference start, so the tracking gains have real error to act on.
+    parser.add_argument("--init-offset-radius", type=float, default=GAIN_TUNING_DEFAULTS["init_offset_radius"])
+    parser.add_argument("--init-offset-angle", type=float, default=GAIN_TUNING_DEFAULTS["init_offset_angle"])
     # Matches the active-learning experiment default so the standalone script and
     # the tune-gains stage produce the same result on the same inputs.
     parser.add_argument("--seed", type=int, default=0)
@@ -154,6 +156,8 @@ def main():
         static_tune_learning_rate=args.static_tune_learning_rate,
         presearch_relative_range=args.presearch_relative_range,
         warm_start_schedule=args.warm_start_schedule,
+        init_offset_radius=args.init_offset_radius,
+        init_offset_angle=args.init_offset_angle,
     )
     pipeline = result["pipeline"]
     print_physical_params("Robot parameters used for gain tuning:", robot_params)
@@ -171,10 +175,10 @@ def main():
     print(f"I/D motor gain search max: {args.k_max_rest:.8g}")
     print(f"LHS points: {args.num_lhs_points}")
     print(f"Adam starts: {args.num_adam_optimizations}")
-    print(f"Final loss: {result['loss_history'][-1]:.8f}")
+    print(f"Final loss: {result['final_loss']:.8f}")
     print_loss_breakdown("Final training loss components:", result["loss_component_history"])
-    if result["validation_loss_history"] is not None:
-        print(f"Final validation loss: {result['validation_loss_history'][-1]:.8f}")
+    if result["final_validation_loss"] is not None:
+        print(f"Final validation loss: {result['final_validation_loss']:.8f}")
         print_loss_breakdown("Final validation loss components:", result["validation_loss_component_history"])
 
     print(f"Gain schedule enabled: {result['schedule_enabled']}")

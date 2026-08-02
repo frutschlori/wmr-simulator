@@ -12,7 +12,7 @@ def _plot_trajectory_axes(
     ax,
     pipeline,
     reference_states,
-    bezier_control_points,
+    control_points,
     closed_loop_log,
     replay_actual,
     replay_estimates,
@@ -31,9 +31,9 @@ def _plot_trajectory_axes(
         window_start_indices = np.arange(0, num_replay_intervals, resolved_window_length)
     if axis_limits is not None:
         x_limits, y_limits = axis_limits
-    elif bezier_control_points is not None:
-        x_points = np.asarray(bezier_control_points[:, 0], dtype=float)
-        y_points = np.asarray(bezier_control_points[:, 1], dtype=float)
+    elif control_points is not None:
+        x_points = np.asarray(control_points[:, 0], dtype=float)
+        y_points = np.asarray(control_points[:, 1], dtype=float)
         x_min = x_points.min()
         x_max = x_points.max()
         y_min = y_points.min()
@@ -60,17 +60,17 @@ def _plot_trajectory_axes(
         linewidth=1.2,
         label="Reference",
     )
-    if bezier_control_points is not None:
+    if control_points is not None:
         ax.plot(
-            bezier_control_points[:, 0],
-            bezier_control_points[:, 1],
+            control_points[:, 0],
+            control_points[:, 1],
             color="black",
             linestyle="--",
             linewidth=0.9,
         )
         ax.scatter(
-            bezier_control_points[:, 0],
-            bezier_control_points[:, 1],
+            control_points[:, 0],
+            control_points[:, 1],
             marker="o",
             s=36,
             facecolors="none",
@@ -146,7 +146,7 @@ def plot_trajectory(
     out_prefix="trajectory_plot",
     out_path=None,
     reference_states=None,
-    bezier_control_points=None,
+    control_points=None,
     closed_loop_log=None,
     axis_limits=None,
     title="Trajectory Plot",
@@ -158,10 +158,10 @@ def plot_trajectory(
         reference_states = np.asarray(pipeline.reference_states)
     else:
         reference_states = np.asarray(reference_states)
-    if bezier_control_points is None:
-        bezier_control_points = pipeline.current_bezier_control_points()
+    if control_points is None:
+        control_points = pipeline.current_control_points()
     else:
-        bezier_control_points = np.asarray(bezier_control_points)
+        control_points = np.asarray(control_points)
     if closed_loop_log is None:
         closed_loop_log = pipeline.closed_loop_log
 
@@ -181,7 +181,7 @@ def plot_trajectory(
         ax,
         pipeline,
         reference_states,
-        bezier_control_points,
+        control_points,
         closed_loop_log,
         replay_actual,
         replay_estimates,
@@ -276,7 +276,7 @@ def save_optimization_trace(
             window_length=window_length,
             out_path=frame_path,
             reference_states=snapshot.reference_states,
-            bezier_control_points=snapshot.control_points,
+            control_points=snapshot.control_points,
             closed_loop_log=snapshot.closed_loop_log,
             axis_limits=axis_limits,
             title=f"Trajectory Plot - Iteration {snapshot.step}",

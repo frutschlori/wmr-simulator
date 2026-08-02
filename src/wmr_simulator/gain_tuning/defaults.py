@@ -23,6 +23,15 @@ GAIN_TUNING_DEFAULTS: dict = {
     # loss) exceeds the spread between candidate gain vectors (~7%), and the
     # winning gains swing by orders of magnitude with the seed alone.
     "num_realizations": 8,
+    # Randomized rollout start pose, one draw per noise realization: uniform in a
+    # disk of init_offset_radius [m] and uniform over +/-init_offset_angle [rad].
+    # Starting exactly on the reference leaves ~1 cm of tracking error, so the
+    # loss is nearly flat in kx/ky (measured: kx has negative curvature at the
+    # optimum, ky's whole range moves the loss by ~5%, one noise sigma). The
+    # defaults match how the robot is actually placed by hand across the
+    # exp04/exp05 logs: 31-100 mm and up to 9.5 deg. Both 0 disables.
+    "init_offset_radius": 0.3,
+    "init_offset_angle": 0.2,
     "num_lhs_points": 500,
     "num_adam_optimizations": 3,
     "validation_split": 0.2,

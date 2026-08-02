@@ -40,6 +40,8 @@ from pathlib import Path
 
 import yaml
 
+from wmr_simulator.gain_tuning.defaults import GAIN_TUNING_DEFAULTS
+
 ITERATION_PREFIX = "iteration_"
 
 DEFAULT_EXPERIMENT_CONFIG: dict = {
@@ -64,7 +66,10 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
     "identification_trajectory": {
         "opt_steps": 1000,
         "learning_rate": 1e-2,
-        "bezier_order": 10,
+        "num_segments": 10,
+        # Pin the heading at every interior waypoint (its theta becomes a
+        # decision variable). The start heading is always pinned.
+        "constrain_headings": False,
         "time_scaling": "s-curve",
         "window_length": 50,
         # Include a_slip_max in the FIM design parameters. Disable when its low
@@ -128,44 +133,24 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         "num_trajectories": 20,
         "opt_steps": 500,
         "learning_rate": 1e-2,
-        "bezier_order": 10,
+        "num_segments": 10,
+        # Pin the heading at every interior waypoint (its theta becomes a
+        # decision variable). The start heading is always pinned.
+        "constrain_headings": False,
         "time_scaling": "s-curve",
         "constraint_weight_jitter": 0.3,
         "window_length": 50,
     },
+    # Gain-tuning hyperparameters come from the standalone script's defaults
+    # (gain_tuning.defaults.GAIN_TUNING_DEFAULTS), so there is a single place to
+    # edit them and the two entry points cannot drift apart. Only the
+    # cross-iteration refinement policy differs: the standalone script has no
+    # prior result to refine from, the active-learning loop does, so it narrows
+    # each run's LHS presearch to a +/- band around its init gains. (It still
+    # no-ops on iteration 1, which does a full presearch.)
     "gain_tuning": {
-        "steps": 500,
-        "learning_rate": 1e-4,
-        "num_realizations": 8,
-        "num_lhs_points": 500,
-        "num_adam_optimizations": 3,
-        "validation_split": 0.2,
-        "velocity_tracking_weight": 3.0,
-        "input_weight": 0.0,
-        "input_delta_weight": 1.0,
-        "omega_delta_weight": 0.0,
-        "gain_delta_weight": 0.0,
-        "k_min_stab": 1e-3,
-        "k_max_stab": 50.0,
-        "k_max_rest": 20.0,
-        "gain_parametrization": None,  # None -> follow problem yaml
-        # Tune a static controller independently of the parametrized one (its
-        # own LHS presearch + multistart Adam, no parametrization), so the two
-        # are separate options that can be benchmarked against each other. It
-        # starts from the previous iteration's *static* gains
-        # (robot_config_static_gains.yaml) and uses its own step count /
-        # learning rate. No-op when the parametrization is disabled.
-        "static_tune": True,
-        "static_tune_steps": 500,
-        "static_tune_learning_rate": 1e-4,
-        # Refining across iterations: narrow each run's LHS presearch to a +/-
-        # band around its init gains, and warm-start the gain MLP from the
-        # previous iteration's trained schedule (already active during the
-        # parametrized run's presearch) instead of the identity mapping. Both
-        # no-op on iteration 1 (full presearch / identity schedule) since there
-        # is no prior result to refine from.
+        **GAIN_TUNING_DEFAULTS,
         "presearch_relative_range": 0.3,
-        "warm_start_schedule": True,
     },
 }
 

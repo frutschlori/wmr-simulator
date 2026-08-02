@@ -47,7 +47,11 @@ def main():
     parser.add_argument("--vectorize-trajectories", action="store_true", default=True)
     # Path settings
     parser.add_argument("--time-scaling", choices=["s-curve", "linear"], default="s-curve")
-    parser.add_argument("--bezier-order", type=int, default=10)
+    parser.add_argument("--num-segments", type=int, default=10)
+    # Pin the heading at every interior waypoint (its theta becomes a decision
+    # variable alongside x/y). The start heading is always pinned, from the
+    # problem's start pose, regardless of this flag.
+    parser.add_argument("--constrain-headings", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--trajectory-seed", type=int, default=0)
     # Constraints
     parser.add_argument("--constraint-weight", type=float, default=1.0)
@@ -56,7 +60,6 @@ def main():
     parser.add_argument("--constraint-lateral-weight", type=float, default=1.0)
     parser.add_argument("--constraint-omega-weight", type=float, default=1.0)
     parser.add_argument("--constraint-alpha-weight", type=float, default=1.0)
-    parser.add_argument("--tangent-floor-weight", type=float, default=1.0) # penalize 0 linear velocity to avoid num instability
     parser.add_argument("--constraint-smooth-max-beta", type=float, default=20.0) # barrier constant
     # Visualization settings
     parser.add_argument("--save-opt-GIF", action="store_true", default=False)
@@ -70,24 +73,25 @@ def main():
         raise ValueError("--num-trajectories must be positive.")
     if args.num_trajectories > 1 and args.save_opt_GIF:
         raise ValueError("--save-opt-GIF is only supported for single-trajectory optimization.")
-    if args.bezier_order < 2:
-        raise ValueError("--bezier-order must be >= 2.")
+    if args.num_segments < 2:
+        raise ValueError("--num-segments must be >= 2.")
 
     pipeline = TrajectoryOptimizationPipeline(
         args.problem,
         time_scaling=args.time_scaling,
         objective_mode=args.objective_mode,
         fim_a_slip_max=args.fim_a_slip_max,
+        constrain_headings=args.constrain_headings,
     )
 
     print(f"Loaded problem: {pipeline.problem.path}")
     print(f"Robot: {type(pipeline.robot).__name__}")
-    print("Trajectory generator: Bezier")
+    print(f"Heading constraints: {'all waypoints' if pipeline.constrain_headings else 'start only'}")
     print(f"Time scaling: {pipeline.time_scaling}")
     print(f"Objective mode: {pipeline.objective_mode}")
     print(f"Optimized trajectories: {args.num_trajectories}")
     if args.num_trajectories > 1:
-        print(f"Bezier order: {args.bezier_order}")
+        print(f"Spline segments: {args.num_segments}")
         print(f"Constraint weight jitter: +/-{100.0 * args.constraint_weight_jitter:.1f}%")
     print(f"Reference samples: {len(pipeline.reference_states)} at dt={pipeline.problem.geometry_dt}")
     print(f"Closed-loop pose samples: {len(pipeline.closed_loop_log.pose.states)} at dt={pipeline.problem.wheel_dt}")
@@ -104,8 +108,8 @@ def main():
         print("FIM:")
         print(pipeline.compute_fim_matrix(window_length=args.window_length))
 
-    initial_control_points = pipeline.initial_bezier_control_points(args.bezier_order)
-    pipeline.set_bezier_control_points(initial_control_points)
+    initial_control_points = pipeline.initial_control_points(args.num_segments)
+    pipeline.set_control_points(initial_control_points)
 
     pipeline.plot_trajectory(
         window_length=args.window_length,
@@ -123,8 +127,8 @@ def main():
             "alpha": args.constraint_alpha_weight,
         }
         if args.num_trajectories == 1:
-            optimized_control_points, loss_history = pipeline.optimize_bezier_trajectory(
-                order=args.bezier_order,
+            optimized_control_points, loss_history = pipeline.optimize_trajectory(
+                num_segments=args.num_segments,
                 num_steps=args.opt_steps,
                 learning_rate=args.learning_rate,
                 window_length=args.window_length,
@@ -133,11 +137,10 @@ def main():
                 constraint_weight=args.constraint_weight,
                 constraint_component_weights=constraint_component_weights,
                 constraint_smooth_max_beta=args.constraint_smooth_max_beta,
-                tangent_floor_weight=args.tangent_floor_weight,
             )
         else:
-            optimized_control_point_batch, loss_history = pipeline.optimize_bezier_trajectories(
-                order=args.bezier_order,
+            optimized_control_point_batch, loss_history = pipeline.optimize_trajectories(
+                num_segments=args.num_segments,
                 num_steps=args.opt_steps,
                 learning_rate=args.learning_rate,
                 num_trajectories=args.num_trajectories,
@@ -148,7 +151,6 @@ def main():
                 constraint_weight=args.constraint_weight,
                 constraint_component_weights=constraint_component_weights,
                 constraint_smooth_max_beta=args.constraint_smooth_max_beta,
-                tangent_floor_weight=args.tangent_floor_weight,
                 verbose=False,
             )
             final_losses = np.asarray(pipeline.batch_final_losses, dtype=float)
@@ -171,7 +173,6 @@ def main():
                 constraint_weight=selected_constraint_weight,
                 constraint_component_weights=constraint_component_weights,
                 constraint_smooth_max_beta=args.constraint_smooth_max_beta,
-                tangent_floor_weight=args.tangent_floor_weight,
             )
             constraint_components = pipeline.constraint_components_from_control_points(
                 optimized_control_points,
@@ -184,7 +185,6 @@ def main():
             print("Final objective terms:")
             print(f"  FIM:         {float(objective_terms['fim']):.8e}")
             print(f"  Constraints: {float(objective_terms['constraints']):.8e}")
-            print(f"  Tangent:     {float(objective_terms['tangent_floor']):.8e}")
             print("  Constraint components:")
             for name in ("v", "a", "lateral", "omega", "alpha"):
                 print(f"    {name:<7}: {float(constraint_components[name]):.8e}")
@@ -202,12 +202,12 @@ def main():
             plot_dir = os.path.join("visualize", f"{run_stem}_trajectories_{run_timestamp}")
             os.makedirs(plot_dir, exist_ok=True)
             for index, control_points in enumerate(optimized_control_point_batch):
-                pipeline.set_bezier_control_points(control_points)
+                pipeline.set_control_points(control_points)
                 pipeline.plot_trajectory(
                     window_length=args.window_length,
                     out_path=os.path.join(plot_dir, f"trajectory_{index:02d}.pdf"),
                 )
-            pipeline.set_bezier_control_points(optimized_control_points)
+            pipeline.set_control_points(optimized_control_points)
             print("Saved trajectory plots:")
             print(plot_dir)
         pipeline.plot_loss_history(out_prefix="traj_opt_loss_history" if output_stem is None else f"{output_stem}_loss_history")
@@ -265,14 +265,14 @@ def main():
             export_dir = os.path.join("trajectory_exports", f"{filename_prefix}_{run_timestamp}")
             os.makedirs(export_dir, exist_ok=True)
             for index, control_points in enumerate(optimized_control_point_batch):
-                pipeline.set_bezier_control_points(control_points)
+                pipeline.set_control_points(control_points)
                 saved_paths.append(
                     pipeline.save_reference_states_pickle(
                         out_dir=export_dir,
                         filename_prefix=f"{filename_prefix}_{index:02d}",
                     )
                 )
-            pipeline.set_bezier_control_points(optimized_control_points)
+            pipeline.set_control_points(optimized_control_points)
             print("Saved trajectory pickles:")
             print(export_dir)
             for saved_path in saved_paths:
