@@ -7,6 +7,8 @@ import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 import numpy as np
 
+from wmr_simulator.visualization.trajectories import decimate_path
+
 
 def plot_gain_tuning_summary(
     pipeline,
@@ -243,34 +245,52 @@ def plot_trajectory_set_summary(
     # "tuned (static)" and the main line is relabeled "tuned (param)".
     tuned_label = "tuned (param)" if static_gains is not None else "Tuned"
 
-    fig, ax = plt.subplots(figsize=(8, 8))
-    for index, reference_states in enumerate(reference_trajectories[:num_trajectories]):
-        color = colors[index % len(colors)]
-        init_log = pipeline.run_closed_loop(
+    # All rollouts for the figure run as one vmapped, jitted batch per gain set
+    # -- eager per-trajectory calls pay a fresh XLA compile each.
+    plotted_references = reference_trajectories[:num_trajectories]
+    init_poses = np.asarray(
+        pipeline.run_closed_loop_batch(
             robot_params,
+            plotted_references,
             use_hidden_robot=True,
-            reference_states=reference_states,
-        )
-        tuned_log = pipeline.run_closed_loop(
+        ).pose.true_states,
+        dtype=float,
+    )
+    tuned_poses = np.asarray(
+        pipeline.run_closed_loop_batch(
             robot_params,
+            plotted_references,
             use_hidden_robot=True,
             controller_gains=tuned_gains,
             schedule_params=schedule_params,
-            reference_states=reference_states,
-        )
-        init_pose = np.asarray(init_log.pose.true_states, dtype=float)
-        tuned_pose = np.asarray(tuned_log.pose.true_states, dtype=float)
-
-        ax.plot(reference_states[:, 0], reference_states[:, 1], color=color, linestyle="--", linewidth=0.8)
-        ax.plot(init_pose[:, 0], init_pose[:, 1], color=color, linestyle=":", linewidth=0.7)
-        if static_gains is not None:
-            static_log = pipeline.run_closed_loop(
+        ).pose.true_states,
+        dtype=float,
+    )
+    static_poses = (
+        None
+        if static_gains is None
+        else np.asarray(
+            pipeline.run_closed_loop_batch(
                 robot_params,
+                plotted_references,
                 use_hidden_robot=True,
                 controller_gains=static_gains,
-                reference_states=reference_states,
-            )
-            static_pose = np.asarray(static_log.pose.true_states, dtype=float)
+            ).pose.true_states,
+            dtype=float,
+        )
+    )
+
+    fig, ax = plt.subplots(figsize=(8, 8))
+    for index, reference_states in enumerate(plotted_references):
+        color = colors[index % len(colors)]
+        reference_path = decimate_path(reference_states[:, :2])
+        init_pose = decimate_path(init_poses[index])
+        tuned_pose = decimate_path(tuned_poses[index])
+
+        ax.plot(reference_path[:, 0], reference_path[:, 1], color=color, linestyle="--", linewidth=0.8)
+        ax.plot(init_pose[:, 0], init_pose[:, 1], color=color, linestyle=":", linewidth=0.7)
+        if static_poses is not None:
+            static_pose = decimate_path(static_poses[index])
             ax.plot(static_pose[:, 0], static_pose[:, 1], color=color, linestyle="-.", linewidth=0.9)
         ax.plot(tuned_pose[:, 0], tuned_pose[:, 1], color=color, linestyle="-", linewidth=0.9)
 

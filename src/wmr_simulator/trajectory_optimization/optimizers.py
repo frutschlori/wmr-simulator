@@ -21,7 +21,7 @@ def print_progress(step: int, total_steps: int, loss_value: float, bar_width: in
 
 def optimize_control_points(
     pipeline,
-    num_segments: int,
+    num_control_points: int,
     num_steps: int,
     learning_rate: float,
     initial_control_points: jax.Array | None = None,
@@ -37,7 +37,7 @@ def optimize_control_points(
     from wmr_simulator.trajectory_optimization.pipeline import OptimizationSnapshot
 
     if initial_control_points is None:
-        initial_control_points = pipeline.initial_control_points(num_segments)
+        initial_control_points = pipeline.initial_control_points(num_control_points)
     else:
         initial_control_points = pipeline.clamp_control_points(initial_control_points)
     initial_decision_variables = pipeline.decision_variables_from_control_points(initial_control_points)
@@ -184,8 +184,8 @@ def optimize_control_points_batch(
         train_step = scan_tqdm(
             num_steps,
             desc=(
-                f"Bezier optimization "
-                f"({initial_control_points.shape[1] - 1} segments, {initial_control_points.shape[0]} trajectories)"
+                f"B-spline optimization "
+                f"({initial_control_points.shape[1]} control points, {initial_control_points.shape[0]} trajectories)"
             ),
         )(train_step)
 

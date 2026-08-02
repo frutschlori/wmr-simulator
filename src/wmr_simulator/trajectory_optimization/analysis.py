@@ -137,7 +137,7 @@ def run_trajectory_optimization_trace(
     problem_path: str,
     window_length: int | None = 50,
     time_scaling: str | None = None,
-    num_segments: int = 7,
+    num_control_points: int = 7,
     num_steps: int = 2000,
     learning_rate: float = 1e-2,
     trace_stride: int = 50,
@@ -166,10 +166,10 @@ def run_trajectory_optimization_trace(
         time_scaling=time_scaling,
     )
 
-    initial_control_points = pipeline.initial_control_points(num_segments)
+    initial_control_points = pipeline.initial_control_points(num_control_points)
     pipeline.set_control_points(initial_control_points)
     optimized_control_points, loss_history = pipeline.optimize_trajectory(
-        num_segments=num_segments,
+        num_control_points=num_control_points,
         num_steps=num_steps,
         learning_rate=learning_rate,
         window_length=window_length,

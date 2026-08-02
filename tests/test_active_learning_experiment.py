@@ -42,11 +42,15 @@ def test_init_creates_iteration_scaffolding(tmp_path):
     expected_kp_inner = problem_cfg["controller"]["gains"][3] / problem_cfg["robot"]["max_wheel_speed"]
     assert abs(firmware["kp_inner"] - expected_kp_inner) < 1e-9
 
-    # The base problem enables the error-MLP schedule, so its firmware network
-    # is exported next to ROBOTCFG.CFG (identity network before any tuning).
-    assert paths.gainmlp_jsn.is_file()
-    network = json.loads(paths.gainmlp_jsn.read_text())
-    assert network["kind"] == "error_mlp"
+    # The firmware network is exported next to ROBOTCFG.CFG (identity network
+    # before any tuning) exactly when the base problem enables a gain
+    # parametrization -- init follows the yaml, it does not force one on.
+    parametrization = problem_cfg["controller"].get("gain_parametrization") or {}
+    if parametrization.get("enabled", False):
+        network = json.loads(paths.gainmlp_jsn.read_text())
+        assert network["kind"] == parametrization["kind"]
+    else:
+        assert not paths.gainmlp_jsn.exists()
 
     status = iteration_status(experiment, 1)
     assert not status["identify"]

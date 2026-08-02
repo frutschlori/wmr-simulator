@@ -53,7 +53,7 @@ def _assemble_reference(
 ) -> np.ndarray:
     """Assemble the [T, 8] reference-state matrix from path derivatives.
 
-    Mirrors bezier._reference_from_derivatives: heading comes from the path
+    Mirrors bspline._reference_from_derivatives: heading comes from the path
     tangent (well-defined even where the speed is zero at the endpoints).
     """
     velocity = dpos_du * u_dot[:, None]

@@ -8,7 +8,8 @@ from wmr_simulator.visualization.simulation import visualize
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--problem", type=str, default="problems/pololu_gains.yaml")
-    parser.add_argument("--reference-trajectories-dir", type=str, default="trajectory_exports")
+    #parser.add_argument("--reference-trajectories-dir", type=str, default="trajectory_exports")
+    parser.add_argument("--reference-trajectories-dir", type=str, default=None)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output", type=str, default="simulation")
     parser.add_argument("--skip-pdf", action="store_true")
@@ -20,7 +21,8 @@ def main():
     # Tuning result from run_gain_tuning.py (--out): the closed loop then runs
     # its gains + gain parametrization, and the summary plot shows the applied
     # gains over time.
-    parser.add_argument("--tuned-gains", type=str, default="models/tuned_gains.yaml")
+    # parser.add_argument("--tuned-gains", type=str, default="models/tuned_gains.yaml")
+    parser.add_argument("--tuned-gains", type=str, default=None)
     args = parser.parse_args()
 
     residual_model = None
