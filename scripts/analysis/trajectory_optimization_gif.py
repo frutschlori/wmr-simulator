@@ -11,7 +11,7 @@ def main():
     parser.add_argument("problem", nargs="?", default="problems/problem_hidden.yaml")
     parser.add_argument("--window-length", type=int, default=50)
     parser.add_argument("--time-scaling", choices=["s-curve", "linear"], default="linear")
-    parser.add_argument("--bezier-order", type=int, default=10)
+    parser.add_argument("--num-segments", type=int, default=10)
     parser.add_argument("--opt-steps", type=int, default=4000)
     parser.add_argument("--learning-rate", type=float, default=5e-3)
     parser.add_argument("--trace-stride", type=int, default=1000)
@@ -49,7 +49,7 @@ def main():
         problem_path=args.problem,
         window_length=args.window_length,
         time_scaling=args.time_scaling,
-        bezier_order=args.bezier_order,
+        num_segments=args.num_segments,
         num_steps=args.opt_steps,
         learning_rate=args.learning_rate,
         trace_stride=args.trace_stride,

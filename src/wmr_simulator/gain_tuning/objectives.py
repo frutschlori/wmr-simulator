@@ -8,6 +8,43 @@ def clip_controller_gains(gains: jax.Array):
     return jnp.clip(gains, min=0)
 
 
+def sample_initial_pose_offsets(
+    key: jax.Array,
+    num_realizations: int,
+    offset_radius: float,
+    offset_angle: float,
+) -> jax.Array:
+    """Draw one start-pose offset ``[dx, dy, dtheta]`` per noise realization.
+
+    Starting every rollout exactly on the reference leaves only the error the
+    plant fails to track (~1 cm), which is why the tuning loss is nearly flat in
+    kx and ky: those gains act on tracking error, and there is almost none to
+    act on. Placing the robot off the reference start injects the transient that
+    makes them observable -- and matches deployment, where the robot is placed
+    by hand (31-100 mm and up to 9.5 deg across the exp04/exp05 logs).
+
+    Positions are uniform over the disk of ``offset_radius`` (the sqrt keeps
+    them uniform by area rather than clustered at the center); headings are
+    uniform over +/-``offset_angle``. Both 0 returns zeros, i.e. the reference
+    start, exactly as before.
+    """
+    if offset_radius <= 0.0 and offset_angle <= 0.0:
+        return jnp.zeros((num_realizations, 3), dtype=jnp.float32)
+    radius_key, bearing_key, heading_key = jax.random.split(key, 3)
+    radius = offset_radius * jnp.sqrt(jax.random.uniform(radius_key, (num_realizations,)))
+    bearing = jax.random.uniform(bearing_key, (num_realizations,), minval=-jnp.pi, maxval=jnp.pi)
+    heading = jax.random.uniform(heading_key, (num_realizations,), minval=-offset_angle, maxval=offset_angle)
+    return jnp.stack(
+        [radius * jnp.cos(bearing), radius * jnp.sin(bearing), heading], axis=1
+    ).astype(jnp.float32)
+
+
+def _resolve_initial_pose_offsets(initial_pose_offsets, num_realizations: int) -> jax.Array:
+    if initial_pose_offsets is None:
+        return jnp.zeros((num_realizations, 3), dtype=jnp.float32)
+    return jnp.asarray(initial_pose_offsets, dtype=jnp.float32)
+
+
 def _reference_targets(pipeline, reference_states: jax.Array):
     reference_poses = reference_states[1:, :3]
     reference_theta = reference_states[1:, 2]
@@ -85,6 +122,7 @@ def closed_loop_objective(
     input_delta_weight: float = 0.0,
     omega_delta_weight: float = 0.0,
     reference_states: jax.Array | None = None,
+    initial_pose_offsets: jax.Array | None = None,
 ):
     return jnp.sum(
         closed_loop_objective_terms(
@@ -97,6 +135,7 @@ def closed_loop_objective(
             input_delta_weight=input_delta_weight,
             omega_delta_weight=omega_delta_weight,
             reference_states=reference_states,
+            initial_pose_offsets=initial_pose_offsets,
         )
     )
 
@@ -111,17 +150,21 @@ def closed_loop_objective_terms(
     input_delta_weight: float = 0.0,
     omega_delta_weight: float = 0.0,
     reference_states: jax.Array | None = None,
+    initial_pose_offsets: jax.Array | None = None,
 ):
     reference_states = pipeline.reference_states if reference_states is None else reference_states
     reference_poses, reference_velocity, reference_pose_indices = _reference_targets(pipeline, reference_states)
+    offsets = _resolve_initial_pose_offsets(initial_pose_offsets, replay_robot_keys.shape[0])
+    reference_start = pipeline.initial_reference_pose(reference_states)
 
-    def realization_loss(robot_key, estimator_key):
+    def realization_loss(robot_key, estimator_key, offset):
         predicted_log = pipeline.run_closed_loop(
             pipeline.robot_params,
             controller_gains=gains,
             robot_key=robot_key,
             estimator_key=estimator_key,
             reference_states=reference_states,
+            initial_pose=reference_start + offset,
         )
         return _base_loss_terms(
             pipeline,
@@ -135,7 +178,7 @@ def closed_loop_objective_terms(
             omega_delta_weight,
         )
 
-    terms = jax.vmap(realization_loss)(replay_robot_keys, replay_estimator_keys)
+    terms = jax.vmap(realization_loss)(replay_robot_keys, replay_estimator_keys, offsets)
     return jnp.mean(terms, axis=0)
 
 
@@ -151,6 +194,7 @@ def scheduled_closed_loop_objective(
     omega_delta_weight: float = 0.0,
     gain_delta_weight: float = 0.0,
     reference_states: jax.Array | None = None,
+    initial_pose_offsets: jax.Array | None = None,
 ):
     return jnp.sum(
         scheduled_closed_loop_objective_terms(
@@ -165,6 +209,7 @@ def scheduled_closed_loop_objective(
             omega_delta_weight=omega_delta_weight,
             gain_delta_weight=gain_delta_weight,
             reference_states=reference_states,
+            initial_pose_offsets=initial_pose_offsets,
         )
     )
 
@@ -181,6 +226,7 @@ def scheduled_closed_loop_objective_terms(
     omega_delta_weight: float = 0.0,
     gain_delta_weight: float = 0.0,
     reference_states: jax.Array | None = None,
+    initial_pose_offsets: jax.Array | None = None,
 ):
     """Loss terms for the scheduled controller.
 
@@ -193,8 +239,10 @@ def scheduled_closed_loop_objective_terms(
     """
     reference_states = pipeline.reference_states if reference_states is None else reference_states
     reference_poses, reference_velocity, reference_pose_indices = _reference_targets(pipeline, reference_states)
+    offsets = _resolve_initial_pose_offsets(initial_pose_offsets, replay_robot_keys.shape[0])
+    reference_start = pipeline.initial_reference_pose(reference_states)
 
-    def realization_loss(robot_key, estimator_key):
+    def realization_loss(robot_key, estimator_key, offset):
         predicted_log = pipeline.run_closed_loop(
             pipeline.robot_params,
             controller_gains=nominal_gains,
@@ -202,6 +250,7 @@ def scheduled_closed_loop_objective_terms(
             robot_key=robot_key,
             estimator_key=estimator_key,
             reference_states=reference_states,
+            initial_pose=reference_start + offset,
         )
         return _base_loss_terms(
             pipeline,
@@ -215,7 +264,9 @@ def scheduled_closed_loop_objective_terms(
             omega_delta_weight,
         )
 
-    base_terms = jnp.mean(jax.vmap(realization_loss)(replay_robot_keys, replay_estimator_keys), axis=0)
+    base_terms = jnp.mean(
+        jax.vmap(realization_loss)(replay_robot_keys, replay_estimator_keys, offsets), axis=0
+    )
 
     outer_gains = outer_gains_over_refs(nominal_gains, schedule_params, reference_states)
     gain_rate = jnp.diff(outer_gains, axis=0) / pipeline.geometry_dt

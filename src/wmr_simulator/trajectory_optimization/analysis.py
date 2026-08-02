@@ -137,14 +137,13 @@ def run_trajectory_optimization_trace(
     problem_path: str,
     window_length: int | None = 50,
     time_scaling: str | None = None,
-    bezier_order: int = 7,
+    num_segments: int = 7,
     num_steps: int = 2000,
     learning_rate: float = 1e-2,
     trace_stride: int = 50,
     constraint_weight: float = 1.0,
     constraint_component_weights: dict | None = None,
     constraint_smooth_max_beta: float = 20.0,
-    tangent_floor_weight: float = 1.0,
     out_prefix: str = "traj_opt",
     frame_duration: float = 0.2,
     export_reference_states: bool = False,
@@ -167,10 +166,10 @@ def run_trajectory_optimization_trace(
         time_scaling=time_scaling,
     )
 
-    initial_control_points = pipeline.initial_bezier_control_points(bezier_order)
-    pipeline.set_bezier_control_points(initial_control_points)
-    optimized_control_points, loss_history = pipeline.optimize_bezier_trajectory(
-        order=bezier_order,
+    initial_control_points = pipeline.initial_control_points(num_segments)
+    pipeline.set_control_points(initial_control_points)
+    optimized_control_points, loss_history = pipeline.optimize_trajectory(
+        num_segments=num_segments,
         num_steps=num_steps,
         learning_rate=learning_rate,
         window_length=window_length,
@@ -179,7 +178,6 @@ def run_trajectory_optimization_trace(
         constraint_weight=constraint_weight,
         constraint_component_weights=constraint_component_weights,
         constraint_smooth_max_beta=constraint_smooth_max_beta,
-        tangent_floor_weight=tangent_floor_weight,
     )
     objective_terms = pipeline.objective_terms_from_control_points(
         optimized_control_points,
@@ -187,7 +185,6 @@ def run_trajectory_optimization_trace(
         constraint_weight=constraint_weight,
         constraint_component_weights=constraint_component_weights,
         constraint_smooth_max_beta=constraint_smooth_max_beta,
-        tangent_floor_weight=tangent_floor_weight,
     )
     pipeline.plot_trajectory(
         window_length=window_length,

@@ -29,15 +29,6 @@ from wmr_simulator.active_learning.experiment import (
     write_iteration_problem,
 )
 
-REQUIRED_STAGE_OUTPUTS: tuple[tuple[str, str], ...] = (
-    ("plan-id-trajectory", "identification trajectory (.pkl + .JSN)"),
-    ("decode-logs", "decoded logs (.csv) in data/"),
-    ("identify", "results/identification.yaml"),
-    ("train-residual", "results/residual_model.pkl"),
-    ("plan-tuning-trajectories", "tuning_trajectories/*.pkl"),
-    ("tune-gains", "results/gains.yaml"),
-)
-
 
 # ---------------------------------------------------------------------------
 # init / finalize: iteration scaffolding
@@ -203,11 +194,13 @@ def stage_plan_identification_trajectory(experiment: Experiment, iteration: int)
             time_scaling=config["time_scaling"],
             objective_mode="identification",
             fim_a_slip_max=bool(config["fim_a_slip_max"]),
+            constrain_headings=bool(config["constrain_headings"]),
         )
-        pipeline.set_bezier_control_points(pipeline.initial_bezier_control_points(config["bezier_order"]))
+        num_segments = int(config["num_segments"])
+        pipeline.set_control_points(pipeline.initial_control_points(num_segments))
         with collect_plots(identification_plot_dir):
-            _, loss_history = pipeline.optimize_bezier_trajectory(
-                order=config["bezier_order"],
+            _, loss_history = pipeline.optimize_trajectory(
+                num_segments=num_segments,
                 num_steps=config["opt_steps"],
                 learning_rate=config["learning_rate"],
                 window_length=config["window_length"],
@@ -277,21 +270,23 @@ def stage_plan_tuning_trajectories(experiment: Experiment, iteration: int) -> li
         str(problem_path),
         time_scaling=config["time_scaling"],
         objective_mode="gain-tuning",
+        constrain_headings=bool(config["constrain_headings"]),
     )
-    pipeline.set_bezier_control_points(pipeline.initial_bezier_control_points(config["bezier_order"]))
+    num_segments = int(config["num_segments"])
+    pipeline.set_control_points(pipeline.initial_control_points(num_segments))
     num_trajectories = int(config["num_trajectories"])
     if num_trajectories == 1:
         control_point_batch = None
-        optimized_control_points, _ = pipeline.optimize_bezier_trajectory(
-            order=config["bezier_order"],
+        optimized_control_points, _ = pipeline.optimize_trajectory(
+            num_segments=num_segments,
             num_steps=config["opt_steps"],
             learning_rate=config["learning_rate"],
             window_length=config["window_length"],
         )
         control_point_batch = [optimized_control_points]
     else:
-        control_point_batch, _ = pipeline.optimize_bezier_trajectories(
-            order=config["bezier_order"],
+        control_point_batch, _ = pipeline.optimize_trajectories(
+            num_segments=num_segments,
             num_steps=config["opt_steps"],
             learning_rate=config["learning_rate"],
             num_trajectories=num_trajectories,
@@ -307,7 +302,7 @@ def stage_plan_tuning_trajectories(experiment: Experiment, iteration: int) -> li
 
     saved = []
     for index, control_points in enumerate(control_point_batch):
-        pipeline.set_bezier_control_points(control_points)
+        pipeline.set_control_points(control_points)
         saved.append(
             Path(
                 pipeline.save_reference_states_pickle(
@@ -809,13 +804,15 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
         # presearch range instead of a band around the base gains.
         presearch_relative_range=0.0 if iteration <= 1 else float(refine["presearch_relative_range"]),
         warm_start_schedule=bool(refine["warm_start_schedule"]),
+        init_offset_radius=float(config["init_offset_radius"]),
+        init_offset_angle=float(config["init_offset_angle"]),
         residual_model=residual_model,
     )
     pipeline = result["pipeline"]
     print_controller_gains("Optimized gains:", result["optimized_gains"])
     if result["static_gains"] is not None:
         print_controller_gains("Static-tune gains (benchmark baseline):", result["static_gains"])
-    print(f"Final tuning loss: {float(result['loss_history'][-1]):.8f}")
+    print(f"Final tuning loss: {float(result['final_loss']):.8f}")
 
     payload = {
         "gains": [float(gain) for gain in result["optimized_gains"]],
@@ -830,21 +827,19 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
         "schedule_enabled": bool(result["schedule_enabled"]),
         "schedule": None,
         "used_residual_model": residual_model is not None,
-        "final_loss": float(result["loss_history"][-1]),
+        "final_loss": float(result["final_loss"]),
         "final_validation_loss": (
-            float(result["validation_loss_history"][-1])
-            if result["validation_loss_history"] is not None
-            else None
+            None if result["final_validation_loss"] is None else float(result["final_validation_loss"])
         ),
         # Same losses for the independent static run, so the two controller
         # options can be compared without rerunning the stage.
         "static_final_loss": (
-            None if result["static_loss_history"] is None else float(result["static_loss_history"][-1])
+            None if result["static_final_loss"] is None else float(result["static_final_loss"])
         ),
         "static_final_validation_loss": (
             None
-            if result["static_validation_loss_history"] is None
-            else float(result["static_validation_loss_history"][-1])
+            if result["static_final_validation_loss"] is None
+            else float(result["static_final_validation_loss"])
         ),
     }
     schedule_params = result.get("schedule_params")

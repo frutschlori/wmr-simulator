@@ -139,6 +139,8 @@ class ControllerTuningPipeline(SimulationPipeline):
         num_adam_optimizations: int = 1,
         presearch_relative_range: float = 0.0,
         warm_start_schedule: bool = False,
+        init_offset_radius: float = 0.0,
+        init_offset_angle: float = 0.0,
     ):
         return optimize_controller_gains(
             pipeline=self,
@@ -160,6 +162,8 @@ class ControllerTuningPipeline(SimulationPipeline):
             num_adam_optimizations=num_adam_optimizations,
             presearch_relative_range=presearch_relative_range,
             warm_start_schedule=warm_start_schedule,
+            init_offset_radius=init_offset_radius,
+            init_offset_angle=init_offset_angle,
             training_reference_trajectories=self.training_reference_trajectories,
             validation_reference_trajectories=self.validation_reference_trajectories,
         )
@@ -213,8 +217,16 @@ def run_gain_tuning_experiment(
     seed_parametrization_from_static: bool = False,
     presearch_relative_range: float = 0.0,
     warm_start_schedule: bool = False,
+    init_offset_radius: float = 0.0,
+    init_offset_angle: float = 0.0,
 ):
     """Tune controller gains (optionally jointly with a gain parametrization).
+
+    ``init_offset_radius`` / ``init_offset_angle`` randomize the rollout start
+    pose around the reference start, one draw per noise realization, so the
+    tracking gains see real error to act on (see
+    :func:`gain_tuning.objectives.sample_initial_pose_offsets`). Both 0 starts
+    every rollout exactly on the reference.
 
     ``presearch_relative_range`` (> 0) narrows an LHS presearch to a +/- band
     around its run's init gains instead of the full [k_min_stab, k_max_stab]
@@ -279,6 +291,8 @@ def run_gain_tuning_experiment(
             num_adam_optimizations=num_adam_optimizations,
             presearch_relative_range=presearch_relative_range,
             warm_start_schedule=warm_start_schedule,
+            init_offset_radius=init_offset_radius,
+            init_offset_angle=init_offset_angle,
         )
 
     static_tune = static_tune and schedule_enabled
@@ -334,8 +348,8 @@ def run_gain_tuning_experiment(
             static_loss_component_history,
             static_validation_loss_component_history,
         ) = histories_for_start(static_optimization, static_optimization["best_start_index"])
-        static_final_loss = float(static_loss_history[-1])
-        scheduled_final_loss = float(loss_history[-1])
+        static_final_loss = float(static_optimization["best_training_loss"])
+        scheduled_final_loss = float(optimization["best_training_loss"])
         print(f"Static tune best final loss:    {static_final_loss:.8f}")
         print(f"Scheduled tune best final loss: {scheduled_final_loss:.8f}")
         if static_final_loss > 0.0:
@@ -372,6 +386,17 @@ def run_gain_tuning_experiment(
         "static_hidden_log": static_hidden_log,
         "schedule_enabled": schedule_enabled,
         "schedule_params": schedule_params,
+        # Losses of the *returned* gains. The histories below are raw per-step
+        # traces whose last entry belongs to the last iterate, not to the best
+        # one that is actually returned -- use these for reporting/export.
+        "final_loss": float(optimization["best_training_loss"]),
+        "final_validation_loss": optimization["best_validation_loss"],
+        "static_final_loss": (
+            None if static_optimization is None else float(static_optimization["best_training_loss"])
+        ),
+        "static_final_validation_loss": (
+            None if static_optimization is None else static_optimization["best_validation_loss"]
+        ),
         "loss_history": loss_history,
         "validation_loss_history": validation_loss_history,
         "loss_component_history": loss_component_history,
