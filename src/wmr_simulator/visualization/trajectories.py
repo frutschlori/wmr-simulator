@@ -4,8 +4,28 @@ import matplotlib
 
 matplotlib.use("Agg", force=False)
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 import numpy as np
 from PIL import Image
+
+
+# Pose logs run at the wheel dt, so a single rollout carries tens of thousands
+# of samples; drawing them all is the slow part of a trajectory figure and is
+# invisible at print resolution.
+PLOT_PATH_MAX_POINTS = 1500
+
+
+def decimate_path(points, max_points: int | None = PLOT_PATH_MAX_POINTS):
+    """Stride a densely sampled path down to at most ``max_points`` rows,
+    always keeping the final sample so the drawn path ends where it should."""
+    points = np.asarray(points)
+    if max_points is None or len(points) <= max_points:
+        return points
+    stride = int(np.ceil(len(points) / max_points))
+    decimated = points[::stride]
+    if not np.array_equal(decimated[-1], points[-1]):
+        decimated = np.concatenate([decimated, points[-1:]], axis=0)
+    return decimated
 
 
 def _plot_trajectory_axes(
@@ -77,17 +97,19 @@ def _plot_trajectory_axes(
             edgecolors="black",
             linewidth=1.0,
         )
+    actual_path = decimate_path(closed_loop_actual)
+    estimate_path = decimate_path(closed_loop_estimates)
     ax.plot(
-        closed_loop_actual[:, 0],
-        closed_loop_actual[:, 1],
+        actual_path[:, 0],
+        actual_path[:, 1],
         color="blue",
         linestyle="-",
         linewidth=0.9,
         label="Closed-Loop Actual",
     )
     ax.scatter(
-        closed_loop_estimates[:, 0],
-        closed_loop_estimates[:, 1],
+        estimate_path[:, 0],
+        estimate_path[:, 1],
         color="blue",
         marker=".",
         s=3,
@@ -102,6 +124,7 @@ def _plot_trajectory_axes(
             label = "Windowed Replay Actual" if window_idx == 0 else None
             window_start = closed_loop_estimates[start_idx : start_idx + 1]
             window_actual = np.concatenate([window_start, replay_actual[start_idx + 1 : end_idx + 1]], axis=0)
+            window_actual = decimate_path(window_actual)
             ax.plot(
                 window_actual[:, 0],
                 window_actual[:, 1],
@@ -110,9 +133,10 @@ def _plot_trajectory_axes(
                 linewidth=0.9,
                 label=label,
             )
+        replay_estimate_path = decimate_path(replay_estimates)
         ax.scatter(
-            replay_estimates[:, 0],
-            replay_estimates[:, 1],
+            replay_estimate_path[:, 0],
+            replay_estimate_path[:, 1],
             color="orange",
             s=3,
             marker=".",
@@ -194,6 +218,77 @@ def plot_trajectory(
     plt.close(fig)
 
     print(f"Trajectory PDF saved at: {output_filename}")
+
+
+def plot_trajectory_set(
+    reference_trajectories,
+    closed_loop_poses,
+    control_point_batch=None,
+    out_prefix="trajectory_set",
+    out_path=None,
+    title="Optimized Trajectories",
+):
+    """Draw a whole batch of optimized trajectories in one figure: each
+    trajectory gets a color, its reference dashed and its closed-loop pose
+    solid. Replaces one PDF per trajectory, which is tedious to page through."""
+    os.makedirs("visualize", exist_ok=True)
+    output_filename = out_path if out_path is not None else os.path.join("visualize", f"{out_prefix}.pdf")
+
+    reference_trajectories = np.asarray(reference_trajectories, dtype=float)
+    closed_loop_poses = np.asarray(closed_loop_poses, dtype=float)
+    if control_point_batch is not None:
+        control_point_batch = np.asarray(control_point_batch, dtype=float)
+    num_trajectories = reference_trajectories.shape[0]
+    colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+
+    fig, ax = plt.subplots(figsize=(8, 8))
+    for index in range(num_trajectories):
+        color = colors[index % len(colors)]
+        reference_path = decimate_path(reference_trajectories[index][:, :2])
+        actual_path = decimate_path(closed_loop_poses[index][:, :2])
+        ax.plot(reference_path[:, 0], reference_path[:, 1], color=color, linestyle="--", linewidth=0.8)
+        ax.plot(actual_path[:, 0], actual_path[:, 1], color=color, linestyle="-", linewidth=0.9)
+        if control_point_batch is not None:
+            control_points = control_point_batch[index]
+            ax.scatter(
+                control_points[:, 0],
+                control_points[:, 1],
+                marker="o",
+                s=18,
+                facecolors="none",
+                edgecolors=color,
+                linewidth=0.8,
+            )
+
+    legend_handles = [
+        Line2D([0], [0], color="black", linestyle="--", linewidth=0.8, label="Reference"),
+        Line2D([0], [0], color="black", linestyle="-", linewidth=0.9, label="Closed-Loop Actual"),
+    ]
+    if control_point_batch is not None:
+        legend_handles.append(
+            Line2D(
+                [0],
+                [0],
+                color="black",
+                linestyle="none",
+                marker="o",
+                markerfacecolor="none",
+                markersize=5,
+                label="Waypoints",
+            )
+        )
+    ax.legend(handles=legend_handles, loc="best")
+    ax.set_xlabel("x [m]")
+    ax.set_ylabel("y [m]")
+    ax.set_title(f"{title} ({num_trajectories} shown)")
+    ax.set_aspect("equal", adjustable="box")
+    ax.grid(True)
+    fig.tight_layout()
+    fig.savefig(output_filename, bbox_inches="tight", transparent=False, facecolor="white")
+    plt.close(fig)
+
+    print(f"Trajectory set PDF saved at: {output_filename}")
+    return output_filename
 
 
 def plot_loss_history(

@@ -194,13 +194,12 @@ def stage_plan_identification_trajectory(experiment: Experiment, iteration: int)
             time_scaling=config["time_scaling"],
             objective_mode="identification",
             fim_a_slip_max=bool(config["fim_a_slip_max"]),
-            constrain_headings=bool(config["constrain_headings"]),
         )
-        num_segments = int(config["num_segments"])
-        pipeline.set_control_points(pipeline.initial_control_points(num_segments))
+        num_control_points = int(config["num_control_points"])
+        pipeline.set_control_points(pipeline.initial_control_points(num_control_points))
         with collect_plots(identification_plot_dir):
             _, loss_history = pipeline.optimize_trajectory(
-                num_segments=num_segments,
+                num_control_points=num_control_points,
                 num_steps=config["opt_steps"],
                 learning_rate=config["learning_rate"],
                 window_length=config["window_length"],
@@ -270,15 +269,14 @@ def stage_plan_tuning_trajectories(experiment: Experiment, iteration: int) -> li
         str(problem_path),
         time_scaling=config["time_scaling"],
         objective_mode="gain-tuning",
-        constrain_headings=bool(config["constrain_headings"]),
     )
-    num_segments = int(config["num_segments"])
-    pipeline.set_control_points(pipeline.initial_control_points(num_segments))
+    num_control_points = int(config["num_control_points"])
+    pipeline.set_control_points(pipeline.initial_control_points(num_control_points))
     num_trajectories = int(config["num_trajectories"])
     if num_trajectories == 1:
         control_point_batch = None
         optimized_control_points, _ = pipeline.optimize_trajectory(
-            num_segments=num_segments,
+            num_control_points=num_control_points,
             num_steps=config["opt_steps"],
             learning_rate=config["learning_rate"],
             window_length=config["window_length"],
@@ -286,7 +284,7 @@ def stage_plan_tuning_trajectories(experiment: Experiment, iteration: int) -> li
         control_point_batch = [optimized_control_points]
     else:
         control_point_batch, _ = pipeline.optimize_trajectories(
-            num_segments=num_segments,
+            num_control_points=num_control_points,
             num_steps=config["opt_steps"],
             learning_rate=config["learning_rate"],
             num_trajectories=num_trajectories,
@@ -302,12 +300,14 @@ def stage_plan_tuning_trajectories(experiment: Experiment, iteration: int) -> li
 
     saved = []
     for index, control_points in enumerate(control_point_batch):
-        pipeline.set_control_points(control_points)
         saved.append(
             Path(
                 pipeline.save_reference_states_pickle(
                     out_dir=str(paths.tuning_trajectories_dir),
                     filename_prefix=f"tuning_trajectory_{index:02d}",
+                    reference_states=pipeline.reference_states_from_control_points(
+                        pipeline.clamp_control_points(control_points)
+                    ),
                 )
             )
         )

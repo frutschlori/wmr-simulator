@@ -10,8 +10,8 @@ from wmr_simulator.controller import Controller
 from wmr_simulator.estimator import DiffDriveEstimator
 from wmr_simulator.gain_parametrization import apply as apply_gain_parametrization
 from wmr_simulator.gain_parametrization import params_from_cfg as gain_parametrization_params_from_cfg
-from wmr_simulator.planner import compute_reference_trajectory
 from wmr_simulator.robot import DiffDrive, DiffDriveState
+from wmr_simulator.planner import compute_reference_trajectory
 from wmr_simulator.types import PhysicalParams, PoseLog, ReferenceLog, SimulationLog, WheelLog
 
 # Stochastic model entries zeroed by `noise_enabled: false` in the problem yaml.
@@ -141,6 +141,10 @@ class SimulationPipeline:
         )
         self.gain_schedule_feature_scale = self.gain_parametrization_feature_scale
         self.gain_schedule_params = self.gain_parametrization_params
+
+        # Compiled batch rollouts, keyed by the options that are static to the
+        # traced function (see run_closed_loop_batch).
+        self._batch_rollout_cache: dict[tuple, object] = {}
 
         master_key = jax.random.PRNGKey(seed)
         target_key, replay_key = jax.random.split(master_key, 2)
@@ -395,6 +399,62 @@ class SimulationPipeline:
                 wheel_cmd=wheel_cmds,
                 gains=applied_gains,
             ),
+        )
+
+    def run_closed_loop_batch(
+        self,
+        robot_params: PhysicalParams,
+        reference_trajectories,
+        use_hidden_robot: bool = False,
+        controller_gains=None,
+        schedule_params=None,
+        wheel_speed_log_source: str = "estimated",
+        residual_model=None,
+        est_params: PhysicalParams | None = None,
+    ) -> SimulationLog:
+        """Roll out one closed loop per reference trajectory in a single call.
+
+        The returned :class:`SimulationLog` has a leading trajectory axis on
+        every field. Eager ``run_closed_loop`` calls each cost a fresh XLA
+        compile of the rollout scan (~0.2 s), which dominates plotting a set of
+        trajectories; vmapping under one jit makes it a single compile that is
+        then cached for later calls with the same batch shape.
+        """
+        cache = self._batch_rollout_cache
+        key = (
+            bool(use_hidden_robot),
+            wheel_speed_log_source,
+            controller_gains is None,
+            schedule_params is None,
+            est_params is None,
+            id(residual_model),
+        )
+        rollout = cache.get(key)
+        if rollout is None:
+
+            def rollout(params, estimator_params, gains, schedule, references):
+                def single(reference_states):
+                    return self.run_closed_loop(
+                        params,
+                        est_params=estimator_params,
+                        use_hidden_robot=use_hidden_robot,
+                        controller_gains=gains,
+                        schedule_params=schedule,
+                        wheel_speed_log_source=wheel_speed_log_source,
+                        residual_model=residual_model,
+                        reference_states=reference_states,
+                    )
+
+                return jax.vmap(single)(references)
+
+            rollout = jax.jit(rollout)
+            cache[key] = rollout
+        return rollout(
+            robot_params,
+            est_params,
+            controller_gains,
+            schedule_params,
+            jnp.asarray(reference_trajectories, dtype=jnp.float32),
         )
 
     def simulate(self, *args, **kwargs):

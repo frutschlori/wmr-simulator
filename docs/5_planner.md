@@ -8,9 +8,17 @@ $$
 
 It performs:
 
-1. Quintic spline fitting in space
+1. Piecewise-quintic spline fitting in space (`compute_reference_trajectory`),
+   minimizing the integrated squared jerk subject to waypoint
+   interpolation, C2 continuity, zero end curvature, and the tangent
+   constraints below
 2. Time-scaling to match total duration
 3. Trajectory sampling
+
+The same spline machinery backs the FIM trajectory optimizer
+(`trajectory_optimization/`, which imports from here), where the waypoints
+become decision variables; the fixed-waypoint entry point here is just that
+machinery with the waypoints read from the yaml.
 
 ## YAML fields
 
@@ -105,24 +113,23 @@ $$
 
 To debug waypoints without running the simulator:
 
-```bash
-python3 planner.py
-```
-
-Modify the `__main__` block inside `planner.py`:
-
 ```python
-intermediate_waypoints = [
-    [x1, y1],           # no θ constraint
-    [x2, y2, theta2],   # θ constrained
-]
+from wmr_simulator.planner import (
+    compute_reference_trajectory,
+)
+
+reference_states = compute_reference_trajectory(
+    start=[0.0, 0.0, 0.0],
+    goal=[2.0, 1.0, 1.57],
+    intermediate_waypoints=[
+        [x1, y1],           # no θ constraint
+        [x2, y2, theta2],   # θ constrained
+    ],
+    time=np.linspace(0.0, 5.0, 501),
+)
 ```
 
-Running the module plots:
-
-- spline path
-- heading
-- curvature
-- velocities
+`reference_states` is the `[N, 8]` matrix above, ready to plot or to hand to
+`SimulationPipeline`.
 
 ---

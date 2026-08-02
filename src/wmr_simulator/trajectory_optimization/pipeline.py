@@ -24,23 +24,24 @@ from wmr_simulator.trajectory_optimization.constraints import (
     motion_limits_from_robot_config,
 )
 from wmr_simulator.trajectory_optimization.fim import (
-    compute_fim_matrix,
+    compute_fim_factor,
     default_measurement_variances,
+    fim_from_factor,
 )
 from wmr_simulator.trajectory_optimization.objectives import fim_loss, trajectory_objective
 from wmr_simulator.trajectory_optimization.optimizers import optimize_control_points
-from wmr_simulator.trajectory_optimization.parametrization import normalize_time_scaling
-from wmr_simulator.trajectory_optimization.quintic_spline import (
-    QuinticSplinePlan,
-    clamp_waypoints,
-    compute_quintic_reference,
-    initial_quintic_waypoints,
-    quintic_num_segments,
+from wmr_simulator.trajectory_optimization.bspline import (
+    BSplinePlan,
+    clamp_control_points,
+    compute_bspline_reference,
+    initial_line_control_points,
 )
+from wmr_simulator.trajectory_optimization.parametrization import normalize_time_scaling
 from wmr_simulator.types import PhysicalParams, SimulationLog
 from wmr_simulator.visualization.trajectories import (
     plot_loss_history as plot_loss_history_figure,
     plot_trajectory as plot_trajectory_figure,
+    plot_trajectory_set as plot_trajectory_set_figure,
 )
 
 
@@ -112,6 +113,10 @@ class OptimizationSnapshot(NamedTuple):
 
 OBJECTIVE_MODE_IDENTIFICATION = "identification"
 OBJECTIVE_MODE_GAIN_TUNING = "gain-tuning"
+# Control points for the pipeline's placeholder curve, before a caller sets its
+# own. The count is the parametrization's stiffness knob (see bspline.py); the
+# scripts pass their own.
+DEFAULT_NUM_CONTROL_POINTS = 8
 # Lower bound on the relative FIM scale of a controller gain, matching the
 # default k_min_stab of the gain search (gain_tuning.defaults).
 GAIN_FIM_SCALING_FLOOR = 1e-3
@@ -144,7 +149,6 @@ class TrajectoryOptimizationPipeline:
         time_scaling: str | None = None,
         objective_mode: str = OBJECTIVE_MODE_IDENTIFICATION,
         fim_a_slip_max: bool = True,
-        constrain_headings: bool = False,
     ):
         self.problem = ProblemDefinition(problem_path)
         self.simulation = SimulationPipeline(problem_path=problem_path, seed=0, reference_trajectories_dir=None)
@@ -159,20 +163,15 @@ class TrajectoryOptimizationPipeline:
         self.estimator.wheel_lp_tau = 0.0
         self.time_scaling = normalize_time_scaling(time_scaling)
         self.objective_mode = normalize_objective_mode(objective_mode)
-        # Pin the heading at every interior waypoint (its theta column becomes a
-        # decision variable), not just at the start. The start heading is always
-        # pinned -- it is how the robot is physically placed for a run.
-        self.constrain_headings = bool(constrain_headings)
-        # QuinticSplinePlan instances (KKT solve + constant evaluation
-        # matrices) are constant given (num_segments, time_scaling) for this
-        # pipeline's (problem, objective_mode); cache so repeated eager calls
-        # (plotting, tests) don't re-solve the KKT system.
-        self._quintic_plan_cache: dict[tuple[int, str], QuinticSplinePlan] = {}
+        # A BSplinePlan is just the basis sampled on this pipeline's time grid,
+        # constant given (num_control_points, time_scaling); cache so repeated
+        # eager calls (plotting, tests) don't resample it.
+        self._spline_plan_cache: dict[tuple[int, str], BSplinePlan] = {}
         # a_slip_max sometimes has near-zero sensitivity, which makes the FIM
         # objective stiff; excluding it keeps the burnout model in the rollout
         # at its nominal value but drops it from the design parameters.
         self.fim_a_slip_max = bool(fim_a_slip_max) and self.robot.a_slip_max > 0.0
-        self.control_points = self.initial_control_points(num_segments=2)
+        self.control_points = self.initial_control_points(DEFAULT_NUM_CONTROL_POINTS)
         self.reference_states = self.reference_states_from_control_points(self.control_points)
         self._set_closed_loop_log(self.run_closed_loop_deployment(reference_states=self.reference_states))
         self.loss_history = None
@@ -226,33 +225,41 @@ class TrajectoryOptimizationPipeline:
     def constraint_weights(self, scale: float = 1.0, component_weights: dict | None = None) -> dict[str, jnp.ndarray]:
         return constraint_weights(scale=scale, component_weights=component_weights)
 
-    def heading_knots(self, num_segments: int) -> tuple[int, ...]:
-        """Knots whose tangent direction is pinned. Knot 0 always is, in
-        identification mode, because the problem fixes the start pose; with
-        ``constrain_headings`` every other knot joins it."""
-        if self.objective_mode == OBJECTIVE_MODE_GAIN_TUNING:
-            return tuple(range(1, num_segments)) if self.constrain_headings else ()
-        if self.constrain_headings:
-            return tuple(range(0, num_segments))
-        return (0,)
+    def pinned_positions(self, num_control_points: int) -> dict[int, np.ndarray]:
+        """Control points whose position is boundary data rather than a decision
+        variable, mapped to that position.
 
-    def _quintic_plan(self, num_segments: int, time_scaling: str) -> QuinticSplinePlan:
-        heading_knots = self.heading_knots(num_segments)
-        key = (num_segments, time_scaling, heading_knots)
-        plan = self._quintic_plan_cache.get(key)
+        An identification trajectory must run from the pose the robot is
+        physically placed in to the specified goal. The spline is clamped, so
+        the curve begins at the first control point and ends at the last, and
+        pinning those two is the whole of it. A gain-tuning trajectory has no
+        meaningful start or goal -- it only has to excite the gains somewhere
+        inside the environment box -- so every control point is free.
+        """
+        if self.objective_mode == OBJECTIVE_MODE_GAIN_TUNING:
+            return {}
+        return {0: self.problem.start[:2], num_control_points - 1: self.problem.goal[:2]}
+
+    def pin_start_heading(self) -> bool:
+        """Whether the second control point is held on the start-heading ray.
+
+        Only meaningful when the start itself is pinned: the heading there is
+        how the robot is physically placed for a run, not a design choice.
+        """
+        return self.objective_mode != OBJECTIVE_MODE_GAIN_TUNING
+
+    def _spline_plan(self, num_control_points: int, time_scaling: str) -> BSplinePlan:
+        key = (num_control_points, time_scaling)
+        plan = self._spline_plan_cache.get(key)
         if plan is None:
-            plan = QuinticSplinePlan(
-                self.problem, num_segments, self.objective_mode, time_scaling,
-                heading_knots=heading_knots,
-            )
-            self._quintic_plan_cache[key] = plan
+            plan = BSplinePlan(self.problem, num_control_points, time_scaling)
+            self._spline_plan_cache[key] = plan
         return plan
 
     def reference_states_from_control_points(self, control_points: jnp.ndarray) -> jnp.ndarray:
-        num_segments = quintic_num_segments(control_points.shape[0], self.objective_mode)
-        plan = self._quintic_plan(num_segments, self.time_scaling)
-        return compute_quintic_reference(
-            self.problem, plan, control_points, self.objective_mode, time_scaling=self.time_scaling
+        plan = self._spline_plan(control_points.shape[0], self.time_scaling)
+        return compute_bspline_reference(
+            self.problem, plan, control_points, time_scaling=self.time_scaling
         )
 
     def current_control_points(self):
@@ -406,15 +413,18 @@ class TrajectoryOptimizationPipeline:
             )
         return measurements.reshape(-1)
 
-    def compute_fim_matrix(self, measurement_variances=None,
+    def compute_fim_factor(self, measurement_variances=None,
         window_length=None, closed_loop_log=None, reference_states=None) -> jnp.ndarray:
-        """ Computes weighted Fisher matrix using relative parameter sensitivities. """
+        """Weighted relative parameter sensitivities ``J~``, with ``FIM = J~^T J~``.
 
+        This is what the design criteria consume; assembling the FIM squares its
+        condition number, which float32 cannot survive here (see ``fim.py``).
+        """
         if measurement_variances is None:
             measurement_variances = self.default_measurement_variances()
         params = self.nominal_parameters()
 
-        return compute_fim_matrix(
+        return compute_fim_factor(
             lambda p: self.measurement_vector(
                 p,
                 window_length=window_length,
@@ -426,29 +436,32 @@ class TrajectoryOptimizationPipeline:
             parameter_scaling=self.fim_parameter_scaling(params),
         )
 
-    def initial_control_points(self, num_segments: int) -> jnp.ndarray:
-        return initial_quintic_waypoints(
-            self.problem, num_segments=num_segments, objective_mode=self.objective_mode
+    def compute_fim_matrix(self, measurement_variances=None,
+        window_length=None, closed_loop_log=None, reference_states=None) -> jnp.ndarray:
+        """The assembled Fisher matrix, for reporting/inspection only."""
+        return fim_from_factor(
+            self.compute_fim_factor(
+                measurement_variances=measurement_variances,
+                window_length=window_length,
+                closed_loop_log=closed_loop_log,
+                reference_states=reference_states,
+            )
         )
 
-    @property
-    def waypoint_columns(self) -> int:
-        """3 ([x, y, theta]) when interior headings are decision variables, else 2."""
-        return 3 if self.constrain_headings else 2
+    def initial_control_points(self, num_control_points: int) -> jnp.ndarray:
+        return initial_line_control_points(self.problem, num_control_points=num_control_points)
 
     def clamp_control_points(self, control_points: jnp.ndarray) -> jnp.ndarray:
-        control_points = jnp.asarray(control_points, dtype=jnp.float32)[:, : self.waypoint_columns]
-        return clamp_waypoints(
+        control_points = jnp.asarray(control_points, dtype=jnp.float32)
+        return clamp_control_points(
             self.problem,
             control_points,
-            pin_start_and_goal=self.objective_mode != OBJECTIVE_MODE_GAIN_TUNING,
+            pinned_positions=self.pinned_positions(control_points.shape[0]),
+            pin_start_heading=self.pin_start_heading(),
         )
 
     def control_points_from_decision_variables(self, decision_variables: jnp.ndarray) -> jnp.ndarray:
-        decision_variables = jnp.ravel(decision_variables)
-        return self.clamp_control_points(
-            jnp.reshape(decision_variables, (-1, self.waypoint_columns))
-        )
+        return self.clamp_control_points(jnp.reshape(jnp.ravel(decision_variables), (-1, 2)))
 
     def decision_variables_from_control_points(self, control_points: jnp.ndarray) -> jnp.ndarray:
         return jnp.ravel(self.clamp_control_points(control_points))
@@ -474,20 +487,20 @@ class TrajectoryOptimizationPipeline:
             # Gain-tuning sensitivities re-run the closed loop from these reference
             # states, so the separate deployment rollout is redundant: pass the
             # reference states straight through instead.
-            fim = self.compute_fim_matrix(
+            fim_factor = self.compute_fim_factor(
                 measurement_variances=measurement_variances,
                 window_length=window_length,
                 reference_states=reference_states,
             )
         else:
             closed_loop_log = self.run_closed_loop_deployment(reference_states=reference_states)
-            fim = self.compute_fim_matrix(
+            fim_factor = self.compute_fim_factor(
                 measurement_variances=measurement_variances,
                 window_length=window_length,
                 closed_loop_log=closed_loop_log,
             )
         return trajectory_objective(
-            fim=fim,
+            fim_factor=fim_factor,
             reference_states=reference_states,
             dt=self.problem.dt,
             limits=self.motion_limits(),
@@ -510,12 +523,12 @@ class TrajectoryOptimizationPipeline:
         control_points = self.clamp_control_points(control_points)
         reference_states = self.reference_states_from_control_points(control_points)
         closed_loop_log = self.run_closed_loop_deployment(reference_states=reference_states)
-        fim = self.compute_fim_matrix(
+        fim_factor = self.compute_fim_factor(
             measurement_variances=measurement_variances,
             window_length=window_length,
             closed_loop_log=closed_loop_log,
         )
-        fim_term = fim_loss(fim)
+        fim_term = fim_loss(fim_factor)
         constraint_term = constraint_loss_from_reference_states(
             reference_states=reference_states,
             dt=self.problem.dt,
@@ -556,7 +569,7 @@ class TrajectoryOptimizationPipeline:
 
     def optimize_trajectory(
         self,
-        num_segments: int,
+        num_control_points: int,
         num_steps: int,
         learning_rate: float,
         window_length: int | None = None,
@@ -570,7 +583,7 @@ class TrajectoryOptimizationPipeline:
     ):
         return optimize_control_points(
             pipeline=self,
-            num_segments=num_segments,
+            num_control_points=num_control_points,
             num_steps=num_steps,
             learning_rate=learning_rate,
             window_length=window_length,
@@ -586,7 +599,7 @@ class TrajectoryOptimizationPipeline:
     def _random_gain_tuning_control_points(
         self,
         rng: np.random.Generator,
-        num_segments: int,
+        num_control_points: int,
     ) -> jnp.ndarray:
         env_min = np.asarray(self.problem.environment_min, dtype=float)
         env_max = np.asarray(self.problem.environment_max, dtype=float)
@@ -594,41 +607,37 @@ class TrajectoryOptimizationPipeline:
             raise ValueError("Random gain-tuning trajectories require finite environment bounds.")
         start = rng.uniform(env_min, env_max)
         goal = rng.uniform(env_min, env_max)
-        line_samples = np.linspace(0.0, 1.0, num_segments + 1)[:, None]
+        line_samples = np.linspace(0.0, 1.0, num_control_points)[:, None]
         positions = start[None, :] + line_samples * (goal[None, :] - start[None, :])
-        if self.waypoint_columns == 2:
-            return jnp.asarray(positions, dtype=jnp.float32)
-        heading = np.arctan2(goal[1] - start[1], goal[0] - start[0])
-        headings = np.full((positions.shape[0], 1), heading)
-        return jnp.asarray(np.concatenate([positions, headings], axis=1), dtype=jnp.float32)
+        return jnp.asarray(positions, dtype=jnp.float32)
 
     def initial_control_point_candidates(
         self,
-        num_segments: int,
+        num_control_points: int,
         num_trajectories: int,
         seed: int = 0,
     ) -> list[jnp.ndarray]:
         if num_trajectories <= 0:
             raise ValueError("num_trajectories must be positive.")
-        if num_segments < 2:
-            raise ValueError("num_segments must be >= 2.")
+        if num_control_points < 2:
+            raise ValueError("num_control_points must be >= 2.")
         rng = np.random.default_rng(seed)
         candidates = []
         for _ in range(num_trajectories):
             if self.objective_mode == OBJECTIVE_MODE_GAIN_TUNING:
-                control_points = self._random_gain_tuning_control_points(rng, num_segments)
+                control_points = self._random_gain_tuning_control_points(rng, num_control_points)
             else:
-                control_points = self.initial_control_points(num_segments)
+                control_points = self.initial_control_points(num_control_points)
             candidates.append(self.clamp_control_points(control_points))
         return candidates
 
-    def initial_control_point_batch(self, num_segments: int, num_trajectories: int) -> jnp.ndarray:
-        candidates = self.initial_control_point_candidates(num_segments=num_segments, num_trajectories=num_trajectories)
+    def initial_control_point_batch(self, num_control_points: int, num_trajectories: int) -> jnp.ndarray:
+        candidates = self.initial_control_point_candidates(num_control_points=num_control_points, num_trajectories=num_trajectories)
         return jnp.stack(candidates, axis=0)
 
     def optimize_trajectories(
         self,
-        num_segments: int,
+        num_control_points: int,
         num_steps: int,
         learning_rate: float,
         num_trajectories: int,
@@ -643,7 +652,7 @@ class TrajectoryOptimizationPipeline:
         verbose: bool = True,
     ):
         initial_control_point_candidates = self.initial_control_point_candidates(
-            num_segments=num_segments,
+            num_control_points=num_control_points,
             num_trajectories=num_trajectories,
             seed=seed,
         )
@@ -712,7 +721,7 @@ class TrajectoryOptimizationPipeline:
             ):
                 optimized_control_points_one, loss_history_one = optimize_control_points(
                     pipeline=self,
-                    num_segments=control_points.shape[0] - 1,
+                    num_control_points=control_points.shape[0],
                     num_steps=num_steps,
                     learning_rate=learning_rate,
                     initial_control_points=control_points,
@@ -765,6 +774,35 @@ class TrajectoryOptimizationPipeline:
             window_length=window_length,
             out_prefix=out_prefix,
             out_path=out_path,
+        )
+
+    def plot_trajectory_batch(
+        self,
+        control_point_batch,
+        out_prefix="trajectory_set",
+        out_path=None,
+        title="Optimized Trajectories",
+    ):
+        """One figure for a whole batch of optimized trajectories. The rollouts
+        run as a single vmapped, jitted batch instead of one eager (and
+        separately compiled) rollout per trajectory."""
+        control_point_batch = jnp.stack(
+            [self.clamp_control_points(control_points) for control_points in control_point_batch]
+        )
+        reference_trajectories = jax.vmap(self.reference_states_from_control_points)(control_point_batch)
+        closed_loop_logs = self.simulation.run_closed_loop_batch(
+            self.nominal_physical_params(),
+            reference_trajectories,
+            controller_gains=self.controller_gains,
+            wheel_speed_log_source="estimated",
+        )
+        return plot_trajectory_set_figure(
+            reference_trajectories,
+            closed_loop_logs.pose.true_states,
+            control_point_batch=control_point_batch,
+            out_prefix=out_prefix,
+            out_path=out_path,
+            title=title,
         )
 
     def plot_loss_history(self, out_prefix="loss_history", out_path=None):
@@ -828,11 +866,21 @@ class TrajectoryOptimizationPipeline:
 
         return export_dir, saved_paths
 
-    def save_reference_states_pickle(self, out_dir="trajectory_exports", filename_prefix="reference_states"):
+    def save_reference_states_pickle(
+        self,
+        out_dir="trajectory_exports",
+        filename_prefix="reference_states",
+        reference_states=None,
+    ):
+        """Export a reference trajectory. Pass ``reference_states`` to export a
+        trajectory other than the pipeline's current one -- exporting a batch
+        via ``set_control_points`` would run (and compile) a closed-loop rollout
+        per trajectory that the pickle does not use."""
         os.makedirs(out_dir, exist_ok=True)
+        reference_states = self.reference_states if reference_states is None else reference_states
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"{filename_prefix}_{timestamp}.pkl"
         out_path = os.path.join(out_dir, filename)
         with open(out_path, "wb") as file:
-            pickle.dump(reference_states_export_payload(self.reference_states, self.problem.dt), file)
+            pickle.dump(reference_states_export_payload(reference_states, self.problem.dt), file)
         return out_path

@@ -42,12 +42,13 @@ def wait_reference_states(pose: np.ndarray, wait_time: float, dt: float) -> np.n
 
 
 def bridge_reference_states(start_pose: np.ndarray, goal_pose: np.ndarray, bridge_time: float, dt: float) -> np.ndarray:
-    return compute_reference_trajectory(
+    reference_states, _ = compute_reference_trajectory(
         start=start_pose[:3],
         goal=goal_pose[:3],
         intermediate_waypoints=[],
         time=time_grid(bridge_time, dt),
-    )[0]
+    )
+    return reference_states
 
 
 def bridged_output_path(input_path: str | Path) -> Path:
