@@ -15,7 +15,7 @@ def plot_logged_summary(
     show_gains: bool = False,
     gains: np.ndarray | None = None,
 ) -> Path:
-    """Six-panel overview of one log; ``imu_gyro_z`` (rad/s, see
+    """Eight-panel overview of one log; ``imu_gyro_z`` (rad/s, see
     pololu.log_loader.load_imu_gyro_z) is overlaid on the mocap omega.
     ``show_gains`` overlays the applied controller gains (``log.pose.gains``,
     simulated logs only) on the wheel-speed and state subplots. ``gains``
@@ -62,7 +62,12 @@ def plot_logged_summary(
         raw_vel_time = raw_vel = None
     raw_style = dict(linewidth=0.4, alpha=0.7)
 
-    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+    reference_speed = np.linalg.norm(reference[:, 3:5], axis=1)
+    reference_velocity = np.column_stack([reference_speed, reference[:, 5]])
+    reference_acc_time, reference_acceleration = _time_derivative(ref_time, reference_velocity)
+    mocap_acc_time, mocap_acceleration = _time_derivative(mocap_vel_time, mocap_vel)
+
+    fig, axes = plt.subplots(2, 4, figsize=(24, 10))
     fig.suptitle(f"Pololu Log Summary ({out_prefix})", fontsize=16)
 
     ax_traj = axes[0, 0]
@@ -79,7 +84,6 @@ def plot_logged_summary(
 
     ax_vel = axes[0, 1]
     ax_vel_omega = ax_vel.twinx()
-    reference_speed = np.linalg.norm(reference[:, 3:5], axis=1)
     line_ref_v = ax_vel.step(ref_time, reference_speed, where="post", color="lightskyblue", linestyle="--", linewidth=0.9, label="ref v")[0]
     velocity_handles_raw = []
     if raw_vel is not None:
@@ -139,6 +143,29 @@ def plot_logged_summary(
     ax_wheels.grid(True)
     wheel_legend_handles = [line_cmd_right, line_meas_right, line_cmd_left, line_meas_left]
 
+    ax_linear_acceleration = axes[0, 3]
+    line_ref_linear_acceleration = ax_linear_acceleration.step(
+        reference_acc_time,
+        reference_acceleration[:, 0],
+        where="post",
+        color="tab:red",
+        linestyle="--",
+        linewidth=0.9,
+        label="Reference",
+    )[0]
+    line_mocap_linear_acceleration = ax_linear_acceleration.plot(
+        mocap_acc_time,
+        mocap_acceleration[:, 0],
+        color="tab:blue",
+        linewidth=0.7,
+        label="Mocap (smoothed)",
+    )[0]
+    ax_linear_acceleration.set_xlabel("time [s]")
+    ax_linear_acceleration.set_ylabel("linear acceleration [m/s²]")
+    ax_linear_acceleration.set_title("Linear Acceleration")
+    ax_linear_acceleration.grid(True)
+    ax_linear_acceleration.legend(handles=[line_ref_linear_acceleration, line_mocap_linear_acceleration])
+
     # Applied controller gains along the run (time-varying under a gain
     # parametrization): motor PI gains here, outer gains on the state subplots.
     if gains is not None:
@@ -166,7 +193,7 @@ def plot_logged_summary(
     labels = ("x [m]", "y [m]", "theta [rad]")
     titles = ("x State", "y State", "theta State")
     gain_labels = (r"$k_x$", r"$k_y$", r"$k_\theta$")
-    for index, ax in enumerate(axes[1, :]):
+    for index, ax in enumerate(axes[1, :3]):
         ax.step(ref_time, reference[:, index], where="post", color="tab:red", linestyle="--", linewidth=0.9, label="Reference")
         if raw_pose is not None:
             ax.plot(raw_time, raw_pose[:, index], color="tab:blue", **raw_style, label="Measured (raw)")
@@ -190,6 +217,29 @@ def plot_logged_summary(
         ax.set_title(titles[index])
         ax.grid(True)
         ax.legend(handles=legend_handles)
+
+    ax_angular_acceleration = axes[1, 3]
+    line_ref_angular_acceleration = ax_angular_acceleration.step(
+        reference_acc_time,
+        reference_acceleration[:, 1],
+        where="post",
+        color="tab:red",
+        linestyle="--",
+        linewidth=0.9,
+        label="Reference",
+    )[0]
+    line_mocap_angular_acceleration = ax_angular_acceleration.plot(
+        mocap_acc_time,
+        mocap_acceleration[:, 1],
+        color="tab:blue",
+        linewidth=0.7,
+        label="Mocap (smoothed)",
+    )[0]
+    ax_angular_acceleration.set_xlabel("time [s]")
+    ax_angular_acceleration.set_ylabel("angular acceleration [rad/s²]")
+    ax_angular_acceleration.set_title("Angular Acceleration")
+    ax_angular_acceleration.grid(True)
+    ax_angular_acceleration.legend(handles=[line_ref_angular_acceleration, line_mocap_angular_acceleration])
 
     fig.tight_layout(rect=[0, 0, 1, 0.96])
     fig.savefig(output_path, bbox_inches="tight", transparent=False, facecolor="white")
@@ -373,6 +423,25 @@ def _mocap_vel_omega(time_s: np.ndarray, pose: np.ndarray) -> tuple[np.ndarray, 
     linear_velocity = (delta_xy[:, 0] * np.cos(heading) + delta_xy[:, 1] * np.sin(heading)) / dt
     angular_velocity = np.diff(theta) / dt
     return time_s[1:], np.column_stack([linear_velocity, angular_velocity])
+
+
+def _time_derivative(time_s: np.ndarray, values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Differentiate a scalar or column-wise signal on a possibly sparse time grid."""
+    time_s = np.asarray(time_s, dtype=float)
+    values = np.asarray(values, dtype=float)
+    if values.ndim == 1:
+        finite = np.isfinite(values)
+    else:
+        finite = np.all(np.isfinite(values), axis=1)
+    finite &= np.isfinite(time_s)
+    if len(time_s) > 1:
+        finite[1:] &= np.diff(time_s) > 0.0
+    time_s = time_s[finite]
+    values = values[finite]
+    if len(time_s) < 2:
+        return time_s, np.zeros_like(values)
+    edge_order = 2 if len(time_s) >= 3 else 1
+    return time_s, np.gradient(values, time_s, axis=0, edge_order=edge_order)
 
 
 def _stair_series(time: np.ndarray, values: np.ndarray, end_time: float | None) -> tuple[np.ndarray, np.ndarray]:

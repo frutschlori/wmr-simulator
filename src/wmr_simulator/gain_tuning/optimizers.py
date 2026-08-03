@@ -9,7 +9,7 @@ from wmr_simulator.gain_parametrization import num_params as gain_parametrizatio
 from wmr_simulator.gain_parametrization import with_flat_params, zero_params
 from wmr_simulator.gain_tuning.objectives import (
     clip_controller_gains,
-    sample_initial_pose_offsets,
+    make_realizations,
     scheduled_closed_loop_objective_terms,
 )
 
@@ -30,7 +30,7 @@ _LOSS_COMPONENT_NAMES = ("tracking", "velocity_tracking", "input", "input_delta"
 # ---------------------------------------------------------------------------
 
 
-def _controller_gains_to_optimizer_values(gains, k_min_stab, k_max_stab, k_max_rest):
+def controller_gains_to_optimizer_values(gains, k_min_stab, k_max_stab, k_max_rest):
     gains = clip_controller_gains(jnp.asarray(gains, dtype=jnp.float32))
     log_ratio = jnp.log(k_max_stab / k_min_stab)
     stable = jnp.clip(gains[..., :_NUM_STABLE_GAINS], min=k_min_stab, max=k_max_stab)
@@ -40,7 +40,7 @@ def _controller_gains_to_optimizer_values(gains, k_min_stab, k_max_stab, k_max_r
     return jnp.clip(jnp.concatenate([stable_values, rest_values], axis=-1), min=0.0, max=1.0)
 
 
-def _controller_gains_from_optimizer_values(values, k_min_stab, k_max_stab, k_max_rest):
+def controller_gains_from_optimizer_values(values, k_min_stab, k_max_stab, k_max_rest):
     values = jnp.clip(jnp.asarray(values, dtype=jnp.float32), min=0.0, max=1.0)
     stable_values = values[..., :_NUM_STABLE_GAINS]
     rest_values = values[..., _NUM_STABLE_GAINS:]
@@ -49,7 +49,7 @@ def _controller_gains_from_optimizer_values(values, k_min_stab, k_max_stab, k_ma
     return jnp.concatenate([stable, rest], axis=-1)
 
 
-def _clip_optimizer_values(values):
+def clip_optimizer_values(values):
     """Clip only the gain part of the (possibly augmented) optimizer vector."""
     gain_part = jnp.clip(values[..., :_NUM_GAINS], min=0.0, max=1.0)
     w_part = values[..., _NUM_GAINS:]
@@ -80,13 +80,13 @@ def _relative_lhs_values(unit_samples, center_values, relative_range, k_min_stab
     The gain transform is monotonic, so the gain-space band maps to a per-dim
     optimizer-space box; a disabled gain (0) keeps a zero-width band.
     """
-    center_gains = _controller_gains_from_optimizer_values(
+    center_gains = controller_gains_from_optimizer_values(
         center_values, k_min_stab=k_min_stab, k_max_stab=k_max_stab, k_max_rest=k_max_rest
     )
-    lo_values = _controller_gains_to_optimizer_values(
+    lo_values = controller_gains_to_optimizer_values(
         center_gains * (1.0 - relative_range), k_min_stab=k_min_stab, k_max_stab=k_max_stab, k_max_rest=k_max_rest
     )
-    hi_values = _controller_gains_to_optimizer_values(
+    hi_values = controller_gains_to_optimizer_values(
         center_gains * (1.0 + relative_range), k_min_stab=k_min_stab, k_max_stab=k_max_stab, k_max_rest=k_max_rest
     )
     return lo_values + unit_samples * (hi_values - lo_values)
@@ -157,7 +157,7 @@ def _make_terms_for_values(
         None if reference_trajectories is None else jnp.asarray(reference_trajectories, dtype=jnp.float32)
     )
     def terms_for_values(values):
-        gains = _controller_gains_from_optimizer_values(
+        gains = controller_gains_from_optimizer_values(
             values[..., :_NUM_GAINS], k_min_stab=k_min_stab, k_max_stab=k_max_stab, k_max_rest=k_max_rest
         )
         if schedule_enabled:
@@ -209,7 +209,7 @@ def _select_initial_optimizer_values(
     top_count = min(3, int(candidate_values.shape[0]))
     top_indices = best_indices[:top_count]
     top_gains = np.asarray(
-        _controller_gains_from_optimizer_values(
+        controller_gains_from_optimizer_values(
             candidate_values[jnp.asarray(top_indices), :_NUM_GAINS],
             k_min_stab=k_min_stab,
             k_max_stab=k_max_stab,
@@ -292,7 +292,7 @@ def _run_adam_optimizer(
         next_best_score = jnp.where(improved, score, best_score)
         next_best_values = jnp.where(improved[:, None], values, best_values)
         updates, next_opt_state = optimizer.update(grads, opt_state, values)
-        next_values = _clip_optimizer_values(optax.apply_updates(values, updates))
+        next_values = clip_optimizer_values(optax.apply_updates(values, updates))
         return (
             (next_values, next_opt_state, next_best_values, next_best_score),
             (loss_values, validation_values, loss_terms, validation_terms),
@@ -375,6 +375,7 @@ def optimize_controller_gains(
     init_offset_angle: float = 0.0,
     training_reference_trajectories: jax.Array | None = None,
     validation_reference_trajectories: jax.Array | None = None,
+    realizations=None,
 ):
     """Single-stage joint optimization of base gains and the gain schedule.
 
@@ -407,18 +408,23 @@ def optimize_controller_gains(
 
     num_w = gain_parametrization_num_params(schedule_template) if schedule_enabled else 0
 
-    replay_robot_keys = jax.random.split(pipeline.robot_key, num_realizations)
-    replay_estimator_keys = jax.random.split(pipeline.estimator_key, num_realizations)
-    # One start-pose offset per realization, drawn once and held fixed for the
-    # whole run (like the noise keys) so the objective stays a deterministic
-    # function of the gains. Folded off the robot key with its own tag so the
-    # offsets do not correlate with the measurement-noise draws.
-    initial_pose_offsets = sample_initial_pose_offsets(
-        jax.random.fold_in(pipeline.robot_key, 5813),
-        num_realizations,
-        init_offset_radius,
-        init_offset_angle,
-    )
+    # Noise keys and one start-pose offset per realization, drawn once and held
+    # fixed for the whole run so the objective stays a deterministic function of
+    # the gains. ``realizations`` injects a bundle shared with the trajectory
+    # designer (joint_tuning) instead; its count then wins over
+    # ``num_realizations``.
+    if realizations is None:
+        realizations = make_realizations(
+            pipeline.robot_key,
+            pipeline.estimator_key,
+            num_realizations,
+            init_offset_radius,
+            init_offset_angle,
+        )
+    num_realizations = int(realizations.robot_keys.shape[0])
+    replay_robot_keys = realizations.robot_keys
+    replay_estimator_keys = realizations.estimator_keys
+    initial_pose_offsets = realizations.start_offsets
     if init_offset_radius > 0.0 or init_offset_angle > 0.0:
         print(
             f"Randomized start poses: {num_realizations} offsets within "
@@ -456,7 +462,7 @@ def optimize_controller_gains(
             lambda values: jnp.sum(validation_loss_terms_for_optimizer_values(values))
         )
 
-    init_gain_values = _controller_gains_to_optimizer_values(
+    init_gain_values = controller_gains_to_optimizer_values(
         init_gains, k_min_stab=k_min_stab, k_max_stab=k_max_stab, k_max_rest=k_max_rest
     )
     # Warm-start the parametrization from the template (e.g. the previous
@@ -522,7 +528,7 @@ def optimize_controller_gains(
     # the score of each start's *best* iterate, not of its last one.
     best_index = int(np.argmin(selection_scores))
     best_values = final_values[best_index]
-    final_gains_per_start = _controller_gains_from_optimizer_values(
+    final_gains_per_start = controller_gains_from_optimizer_values(
         final_values[:, :_NUM_GAINS], k_min_stab=k_min_stab, k_max_stab=k_max_stab, k_max_rest=k_max_rest
     )
     best_gains = final_gains_per_start[best_index]

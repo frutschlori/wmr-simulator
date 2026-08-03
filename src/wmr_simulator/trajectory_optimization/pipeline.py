@@ -28,7 +28,11 @@ from wmr_simulator.trajectory_optimization.fim import (
     default_measurement_variances,
     fim_from_factor,
 )
-from wmr_simulator.trajectory_optimization.objectives import fim_loss, trajectory_objective
+from wmr_simulator.trajectory_optimization.objectives import (
+    DEFAULT_CONSTRAINT_VIOLATION_TOLERANCE,
+    fim_loss,
+    trajectory_objective,
+)
 from wmr_simulator.trajectory_optimization.optimizers import optimize_control_points
 from wmr_simulator.trajectory_optimization.bspline import (
     BSplinePlan,
@@ -37,7 +41,8 @@ from wmr_simulator.trajectory_optimization.bspline import (
     initial_line_control_points,
 )
 from wmr_simulator.trajectory_optimization.parametrization import normalize_time_scaling
-from wmr_simulator.gain_tuning.objectives import sample_initial_pose_offsets
+from wmr_simulator.gain_tuning.defaults import GAIN_TUNING_DEFAULTS
+from wmr_simulator.gain_tuning.objectives import Realizations, make_realizations
 from wmr_simulator.types import PhysicalParams, SimulationLog
 from wmr_simulator.visualization.trajectories import (
     plot_loss_history as plot_loss_history_figure,
@@ -117,14 +122,12 @@ OBJECTIVE_MODE_GAIN_TUNING = "gain-tuning"
 # Control points for the pipeline's placeholder curve, before a caller sets its
 # own. The count is the parametrization's stiffness knob (see bspline.py); the
 # scripts pass their own.
-DEFAULT_NUM_CONTROL_POINTS = 8
-# Start-pose offset distribution the gain-tuning FIM averages over [m, rad], and
-# how many draws the average uses. Matched to the gain tuner's own
-# init_offset_radius / init_offset_angle so the trajectory is designed for the
-# conditions it is used under.
-START_OFFSET_RADIUS = 0.2
-START_OFFSET_ANGLE = 0.2
-NUM_START_OFFSET_SAMPLES = 3
+DEFAULT_NUM_CONTROL_POINTS = 4
+# The gain-tuning FIM is an expectation over the same realizations the gain
+# tuner scores its objective on -- noise keys and start-pose offsets alike --
+# so their count and distribution come from the gain-tuning defaults rather
+# than a private copy here.
+DEFAULT_NUM_REALIZATIONS = int(GAIN_TUNING_DEFAULTS["num_realizations"])
 # Lower bound on the relative FIM scale of a controller gain, matching the
 # default k_min_stab of the gain search (gain_tuning.defaults).
 GAIN_FIM_SCALING_FLOOR = 1e-3
@@ -157,6 +160,8 @@ class TrajectoryOptimizationPipeline:
         time_scaling: str | None = None,
         objective_mode: str = OBJECTIVE_MODE_IDENTIFICATION,
         fim_a_slip_max: bool = True,
+        num_realizations: int = DEFAULT_NUM_REALIZATIONS,
+        realizations: Realizations | None = None,
     ):
         self.problem = ProblemDefinition(problem_path)
         self.simulation = SimulationPipeline(problem_path=problem_path, seed=0, reference_trajectories_dir=None)
@@ -180,14 +185,20 @@ class TrajectoryOptimizationPipeline:
         # at its nominal value but drops it from the design parameters.
         self.fim_a_slip_max = bool(fim_a_slip_max) and self.robot.a_slip_max > 0.0
         # Drawn once and reused at every objective evaluation: the design
-        # criterion is an expectation over start poses, and common random
-        # numbers keep it a deterministic function of the control points, which
-        # the line search needs.
-        self.start_offsets = sample_initial_pose_offsets(
-            jax.random.PRNGKey(0),
-            NUM_START_OFFSET_SAMPLES,
-            START_OFFSET_RADIUS,
-            START_OFFSET_ANGLE,
+        # criterion is an expectation over start poses and rollout noise, and
+        # common random numbers keep it a deterministic function of the control
+        # points. Pass ``realizations`` to score the design on the *same*
+        # conditions the gain tuner uses (joint_tuning does).
+        self.realizations = (
+            make_realizations(
+                self.simulation.robot_key,
+                self.simulation.estimator_key,
+                int(num_realizations),
+                float(GAIN_TUNING_DEFAULTS["init_offset_radius"]),
+                float(GAIN_TUNING_DEFAULTS["init_offset_angle"]),
+            )
+            if realizations is None
+            else realizations
         )
         self.control_points = self.initial_control_points(DEFAULT_NUM_CONTROL_POINTS)
         self.reference_states = self.reference_states_from_control_points(self.control_points)
@@ -390,6 +401,7 @@ class TrajectoryOptimizationPipeline:
         window_length: int | None = None,
         closed_loop_log: SimulationLog | None = None,
         reference_states: jnp.ndarray | None = None,
+        realizations: Realizations | None = None,
     ) -> jnp.ndarray:
         """
         Runs the closed-loop deployment once per start-pose offset and stacks the
@@ -404,10 +416,10 @@ class TrajectoryOptimizationPipeline:
 
         The offsets matter because the Kanayama law multiplies kx and ky by the
         tracking errors: starting on the reference leaves almost no error, so
-        those two gains are nearly invisible to the design. The offsets are drawn
-        once (``self.start_offsets``) and reused at every evaluation -- common
-        random numbers, which keeps the objective deterministic, as the line
-        search requires.
+        those two gains are nearly invisible to the design. The realizations are
+        drawn once (``self.realizations``) and reused at every evaluation --
+        common random numbers, which keeps the objective deterministic, as the
+        line search requires.
 
         ``reference_states`` may be passed directly to avoid an otherwise-redundant
         deployment rollout (the sensitivity rollout re-runs the closed loop anyway).
@@ -421,21 +433,28 @@ class TrajectoryOptimizationPipeline:
             target_log = self.closed_loop_log if closed_loop_log is None else closed_loop_log
             reference_states = target_log.reference.states
 
-        def rollout(start_offset):
+        def rollout(robot_key, estimator_key, start_offset):
             predicted_log = self.simulation.run_closed_loop(
                 self.nominal_physical_params(),
                 controller_gains=gains,
+                robot_key=robot_key,
+                estimator_key=estimator_key,
                 wheel_speed_log_source="estimated",
                 reference_states=reference_states,
                 initial_pose=reference_states[0, :3] + start_offset,
             )
             return predicted_log.pose.states[1:]
 
-        offsets = self.start_offsets
-        measurements = jax.vmap(rollout)(offsets)
+        # ``realizations`` overrides the pipeline's frozen bundle, which is what
+        # makes the start offsets usable as decision variables (joint_tuning):
+        # they then arrive as tracers rather than as a constructor-time draw.
+        realizations = self.realizations if realizations is None else realizations
+        measurements = jax.vmap(rollout)(
+            realizations.robot_keys, realizations.estimator_keys, realizations.start_offsets
+        )
         # Mean rather than sum, so the criterion keeps the scale of a single
         # rollout and stays comparable across sample counts.
-        return measurements.reshape(-1, 3) / jnp.sqrt(float(offsets.shape[0]))
+        return measurements.reshape(-1, 3) / jnp.sqrt(float(realizations.start_offsets.shape[0]))
 
     def measurement_vector(
         self,
@@ -443,6 +462,7 @@ class TrajectoryOptimizationPipeline:
         window_length: int | None = None,
         closed_loop_log: SimulationLog | None = None,
         reference_states: jnp.ndarray | None = None,
+        realizations: Realizations | None = None,
     ) -> jnp.ndarray:
         """ Flattens Nx3 measurement matrix into 3Nx1 vector """
         if self.objective_mode == OBJECTIVE_MODE_GAIN_TUNING:
@@ -451,6 +471,7 @@ class TrajectoryOptimizationPipeline:
                 window_length,
                 closed_loop_log=closed_loop_log,
                 reference_states=reference_states,
+                realizations=realizations,
             )
         else:
             measurements = self.replay_measurement_sequence(
@@ -461,15 +482,24 @@ class TrajectoryOptimizationPipeline:
         return measurements.reshape(-1)
 
     def compute_fim_factor(self, measurement_variances=None, window_length=None,
-        closed_loop_log=None, reference_states=None) -> jnp.ndarray:
+        closed_loop_log=None, reference_states=None, gains=None,
+        realizations: Realizations | None = None) -> jnp.ndarray:
         """Weighted relative parameter sensitivities ``J~``, with ``FIM = J~^T J~``.
 
         This is what the design criteria consume; assembling the FIM squares its
         condition number, which float32 cannot survive here (see ``fim.py``).
+
+        ``gains`` replaces the design point in gain-tuning mode. The pipeline's
+        own ``controller_gains`` are fixed at construction, but an alternating
+        gain/trajectory loop has to evaluate the information content at the
+        gains the tuner has just stepped to, not at the ones the run started
+        from. ``fim_parameter_scaling`` takes the same vector, so the relative
+        scaling follows the moving design point and the criterion stays
+        comparable across rounds.
         """
         if measurement_variances is None:
             measurement_variances = self.default_measurement_variances()
-        params = self.nominal_parameters()
+        params = self.nominal_parameters() if gains is None else jnp.asarray(gains, dtype=jnp.float32)
 
         return compute_fim_factor(
             lambda p: self.measurement_vector(
@@ -477,6 +507,7 @@ class TrajectoryOptimizationPipeline:
                 window_length=window_length,
                 closed_loop_log=closed_loop_log,
                 reference_states=reference_states,
+                realizations=realizations,
             ),
             params=params,
             measurement_variances=measurement_variances,
@@ -539,6 +570,9 @@ class TrajectoryOptimizationPipeline:
         constraint_weight: float = 1.0,
         constraint_component_weights: dict | None = None,
         constraint_smooth_max_beta: float = 20.0,
+        constraint_violation_tolerance: float = DEFAULT_CONSTRAINT_VIOLATION_TOLERANCE,
+        gains: jnp.ndarray | None = None,
+        realizations: Realizations | None = None,
     ) -> jnp.ndarray:
         control_points = self.clamp_control_points(control_points)
         reference_states = self.reference_states_from_control_points(control_points)
@@ -550,6 +584,8 @@ class TrajectoryOptimizationPipeline:
                 measurement_variances=measurement_variances,
                 window_length=window_length,
                 reference_states=reference_states,
+                gains=gains,
+                realizations=realizations,
             )
         else:
             closed_loop_log = self.run_closed_loop_deployment(reference_states=reference_states)
@@ -557,6 +593,7 @@ class TrajectoryOptimizationPipeline:
                 measurement_variances=measurement_variances,
                 window_length=window_length,
                 closed_loop_log=closed_loop_log,
+                gains=gains,
             )
         return trajectory_objective(
             fim_factor=fim_factor,
@@ -568,6 +605,7 @@ class TrajectoryOptimizationPipeline:
                 component_weights=constraint_component_weights,
             ),
             smooth_max_beta=constraint_smooth_max_beta,
+            constraint_violation_tolerance=constraint_violation_tolerance,
         )
 
     def objective_terms_from_control_points(
@@ -578,7 +616,15 @@ class TrajectoryOptimizationPipeline:
         constraint_weight: float = 1.0,
         constraint_component_weights: dict | None = None,
         constraint_smooth_max_beta: float = 20.0,
+        constraint_violation_tolerance: float = DEFAULT_CONSTRAINT_VIOLATION_TOLERANCE,
+        gains: jnp.ndarray | None = None,
     ) -> dict[str, jnp.ndarray]:
+        """The objective's two terms, separately, in the same units it sums them.
+
+        ``fim`` is the raw A-optimality criterion and ``constraints`` the raw
+        weighted penalty; ``log_fim`` and ``constraint_term`` are what
+        :func:`trajectory_objective` actually adds up.
+        """
         control_points = self.clamp_control_points(control_points)
         reference_states = self.reference_states_from_control_points(control_points)
         closed_loop_log = self.run_closed_loop_deployment(reference_states=reference_states)
@@ -586,6 +632,7 @@ class TrajectoryOptimizationPipeline:
             measurement_variances=measurement_variances,
             window_length=window_length,
             closed_loop_log=closed_loop_log,
+            gains=gains,
         )
         fim_term = fim_loss(fim_factor)
         constraint_term = constraint_loss_from_reference_states(
@@ -598,12 +645,14 @@ class TrajectoryOptimizationPipeline:
             ),
             smooth_max_beta=constraint_smooth_max_beta,
         )
-        total = fim_term + constraint_term
+        log_fim_term = jnp.log(fim_term)
+        scaled_constraint_term = constraint_term / constraint_violation_tolerance
         return {
             "fim": fim_term,
+            "log_fim": log_fim_term,
             "constraints": constraint_term,
-            "total": total,
-            "constraint_share": constraint_term / jnp.maximum(total, 1e-12),
+            "constraint_term": scaled_constraint_term,
+            "total": log_fim_term + scaled_constraint_term,
         }
 
     def constraint_components_from_control_points(
@@ -796,9 +845,9 @@ class TrajectoryOptimizationPipeline:
                         constraint_component_weights=constraint_component_weights,
                         constraint_smooth_max_beta=constraint_smooth_max_beta,
                         )
-                # Raw (unnormalized) final loss, comparable across trajectories for
-                # best-candidate selection; the per-trajectory histories stay
-                # normalized and untouched.
+                # Final objective value, comparable across trajectories for
+                # best-candidate selection (they differ only in their constraint
+                # weight jitter).
                 final_losses.append(float(final_loss))
             loss_history = loss_history.tolist()
         else:
@@ -885,18 +934,29 @@ class TrajectoryOptimizationPipeline:
         )
         reference_trajectories = jax.vmap(self.reference_states_from_control_points)(control_point_batch)
         if self.objective_mode == OBJECTIVE_MODE_GAIN_TUNING:
-            def rollout(reference_states, start_offset):
+            def rollout(reference_states, robot_key, estimator_key, start_offset):
                 return self.simulation.run_closed_loop(
                     self.nominal_physical_params(),
                     controller_gains=self.controller_gains,
+                    robot_key=robot_key,
+                    estimator_key=estimator_key,
                     wheel_speed_log_source="estimated",
                     reference_states=reference_states,
                     initial_pose=reference_states[0, :3] + start_offset,
                 ).pose.true_states
 
+            realizations = self.realizations
             closed_loop_poses = jax.jit(
-                jax.vmap(jax.vmap(rollout, in_axes=(None, 0)), in_axes=(0, None))
-            )(reference_trajectories, self.start_offsets)
+                jax.vmap(
+                    jax.vmap(rollout, in_axes=(None, 0, 0, 0)),
+                    in_axes=(0, None, None, None),
+                )
+            )(
+                reference_trajectories,
+                realizations.robot_keys,
+                realizations.estimator_keys,
+                realizations.start_offsets,
+            )
         else:
             closed_loop_poses = self.simulation.run_closed_loop_batch(
                 self.nominal_physical_params(),

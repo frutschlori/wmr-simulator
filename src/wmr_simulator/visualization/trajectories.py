@@ -321,8 +321,8 @@ def plot_loss_history(
     fig, ax = plt.subplots(1, 1, figsize=(8, 4.5))
     ax.plot(steps, loss_history, color="C0", linewidth=1.2)
     ax.set_xlabel("Optimization Step")
-    ax.set_ylabel("Normalized Loss")
-    ax.set_yscale("log")
+    # log(A-optimality) + penalty: legitimately negative, so no log y-scale.
+    ax.set_ylabel("Objective")
     ax.set_title("Loss History")
     ax.grid(True)
     fig.tight_layout()

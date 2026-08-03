@@ -82,9 +82,10 @@ def main():
     print(f"Final loss: {result['loss_history'][-1]:.8f}")
     print("Final objective terms:")
     print(f"  FIM:         {result['objective_terms']['fim']:.8e}")
+    print(f"  log(FIM):    {result['objective_terms']['log_fim']:.8f}")
     print(f"  Constraints: {result['objective_terms']['constraints']:.8e}")
-    print(f"  Total:       {result['objective_terms']['total']:.8e}")
-    print(f"  Constraint share: {100.0 * result['objective_terms']['constraint_share']:.2f}%")
+    print(f"  Constraint term (weighted): {result['objective_terms']['constraint_term']:.8f}")
+    print(f"  Total:       {result['objective_terms']['total']:.8f}")
     print(f"Trajectory-only GIF: {result['trajectory_gif_path']}")
     if result["stacked_gif_path"] is not None:
         print(f"Stacked tracking-surface GIF: {result['stacked_gif_path']}")

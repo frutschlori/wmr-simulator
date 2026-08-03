@@ -27,7 +27,7 @@ CONVERGENCE_REL_TOL = 5e-3
 CONVERGENCE_WINDOW = 50
 
 
-def _relative_improvement(reference_loss, loss):
+def relative_improvement(reference_loss, loss):
     return (reference_loss - loss) / jnp.maximum(jnp.abs(reference_loss), 1e-12)
 
 
@@ -68,7 +68,12 @@ def optimize_control_points(
     optimizer = optax.adam(learning_rate)
     opt_state = optimizer.init(initial_decision_variables)
 
-    def unnormalized_loss_fn(decision_variables):
+    # No round-0 loss rescaling: the objective normalizes itself (the FIM term
+    # is in log units, the penalty in units of a tolerated fractional violation
+    # -- see trajectory_objective). Stacking a 1/initial_loss factor on top
+    # would double-normalize, and on a loss that can legitimately be negative it
+    # is not even well defined.
+    def loss_fn(decision_variables):
         return pipeline.loss_from_decision_variables(
             decision_variables,
             window_length=window_length,
@@ -78,11 +83,7 @@ def optimize_control_points(
             constraint_smooth_max_beta=constraint_smooth_max_beta,
         )
 
-    initial_loss = unnormalized_loss_fn(initial_decision_variables)
-    loss_scale = 1.0 / jnp.maximum(initial_loss, 1e-12)
-
-    def loss_fn(decision_variables):
-        return loss_scale * unnormalized_loss_fn(decision_variables)
+    initial_loss = loss_fn(initial_decision_variables)
 
     @jax.jit
     def train_step(decision_variables, optimizer_state):
@@ -114,8 +115,7 @@ def optimize_control_points(
         )
 
     if verbose:
-        print(f"Initial unnormalized loss: {float(initial_loss):.8f}")
-        print(f"Loss normalization scale: {float(loss_scale):.8f}")
+        print(f"Initial loss: {float(initial_loss):.8f}")
     if num_steps <= 0:
         optimized_control_points = pipeline.control_points_from_decision_variables(decision_variables)
         pipeline.set_control_points(optimized_control_points)
@@ -123,7 +123,7 @@ def optimize_control_points(
         pipeline.optimization_snapshots = snapshots
         return optimized_control_points, loss_history
 
-    window_reference_loss = float(initial_loss * loss_scale)
+    window_reference_loss = float(initial_loss)
     for step in range(num_steps):
         # loss_value is measured at `decision_variables` *before* the update, so
         # that is the point it belongs to.
@@ -136,7 +136,7 @@ def optimize_control_points(
         if verbose:
             print_progress(step + 1, num_steps, float(loss_value))
         if (step + 1) % CONVERGENCE_WINDOW == 0:
-            improvement = float(_relative_improvement(window_reference_loss, float(loss_value)))
+            improvement = float(relative_improvement(window_reference_loss, float(loss_value)))
             window_reference_loss = float(loss_value)
             if improvement <= CONVERGENCE_REL_TOL:
                 if verbose:
@@ -192,7 +192,9 @@ def optimize_control_points_batch(
     ).shape[0]
     optimizer = optax.adam(learning_rate)
 
-    def unnormalized_loss_fn(decision_variables, current_constraint_weight):
+    # The objective normalizes itself (see trajectory_objective); there is no
+    # round-0 loss_scale here either.
+    def loss_fn(decision_variables, current_constraint_weight):
         return pipeline.loss_from_decision_variables(
             decision_variables,
             window_length=window_length,
@@ -202,25 +204,20 @@ def optimize_control_points_batch(
             constraint_smooth_max_beta=constraint_smooth_max_beta,
         )
 
-    def scaled_loss_fn(decision_variables, scale, current_constraint_weight):
-        return scale * unnormalized_loss_fn(decision_variables, current_constraint_weight)
-
     clamp_decision_variables_batch = jax.vmap(pipeline.clamp_decision_variables)
     control_points_from_decision_variables_batch = jax.vmap(pipeline.control_points_from_decision_variables)
-    unnormalized_loss_values_fn = jax.vmap(unnormalized_loss_fn, in_axes=(0, 0))
+    loss_values_fn = jax.vmap(loss_fn, in_axes=(0, 0))
 
-    def step_one(decision_variables, optimizer_state, scale, current_constraint_weight):
-        loss_fn = lambda d: scaled_loss_fn(d, scale, current_constraint_weight)
-        loss_value, grads = jax.value_and_grad(loss_fn)(decision_variables)
+    def step_one(decision_variables, optimizer_state, current_constraint_weight):
+        loss_value, grads = jax.value_and_grad(loss_fn)(decision_variables, current_constraint_weight)
         updates, next_optimizer_state = optimizer.update(grads, optimizer_state, decision_variables)
         return optax.apply_updates(decision_variables, updates), next_optimizer_state, loss_value
 
-    step_batch = jax.vmap(step_one, in_axes=(0, 0, 0, 0))
+    step_batch = jax.vmap(step_one, in_axes=(0, 0, 0))
 
     def optimize_batch(initial_decision_variables, current_constraint_weights):
         initial_decision_variables = clamp_decision_variables_batch(initial_decision_variables)
-        initial_loss = unnormalized_loss_values_fn(initial_decision_variables, current_constraint_weights)
-        loss_scale = 1.0 / jnp.maximum(initial_loss, 1e-12)
+        initial_loss = loss_values_fn(initial_decision_variables, current_constraint_weights)
         initial_opt_state = jax.vmap(optimizer.init)(initial_decision_variables)
 
         def train_step(carry, step_index):
@@ -233,13 +230,13 @@ def optimize_control_points_batch(
 
             def run_step(_):
                 next_decision_variables, next_optimizer_state, loss_values = step_batch(
-                    decision_variables, optimizer_state, loss_scale, current_constraint_weights
+                    decision_variables, optimizer_state, current_constraint_weights
                 )
                 next_decision_variables = clamp_decision_variables_batch(next_decision_variables)
                 # At the end of each window, score the improvement against the
                 # loss a full window ago and start a fresh window here.
                 window_closed = (step_index + 1) % CONVERGENCE_WINDOW == 0
-                improved = _relative_improvement(reference, loss_values) > CONVERGENCE_REL_TOL
+                improved = relative_improvement(reference, loss_values) > CONVERGENCE_REL_TOL
                 # loss_values belongs to `decision_variables` (pre-update), so
                 # that is the point recorded when it is the best seen so far.
                 is_best = loss_values < best_loss_values
@@ -268,29 +265,27 @@ def optimize_control_points_batch(
         if num_steps <= 0:
             return (initial_decision_variables,
                     jnp.empty((0, initial_decision_variables.shape[0]), dtype=jnp.float32),
-                    jnp.zeros((0,), dtype=bool), initial_loss, loss_scale)
+                    jnp.zeros((0,), dtype=bool), initial_loss)
 
-        normalized_initial_loss = initial_loss * loss_scale
         (_, _, _, _, _, best_decision_variables, _), (loss_history, converged) = jax.lax.scan(
             train_step,
             (initial_decision_variables, initial_opt_state,
-             normalized_initial_loss, jnp.ones_like(normalized_initial_loss),
-             normalized_initial_loss,
-             initial_decision_variables, jnp.full_like(normalized_initial_loss, jnp.inf)),
+             initial_loss, jnp.ones_like(initial_loss),
+             initial_loss,
+             initial_decision_variables, jnp.full_like(initial_loss, jnp.inf)),
             jnp.arange(num_steps),
         )
-        return best_decision_variables, loss_history, converged, initial_loss, loss_scale
+        return best_decision_variables, loss_history, converged, initial_loss
 
     optimize_batch = jax.jit(optimize_batch)
-    best_decision_variables, loss_history_by_trajectory, converged, initial_loss, loss_scale = optimize_batch(
+    best_decision_variables, loss_history_by_trajectory, converged, initial_loss = optimize_batch(
         initial_decision_variables,
         constraint_weights,
     )
     optimized_control_points = control_points_from_decision_variables_batch(best_decision_variables)
 
     if verbose:
-        print(f"Initial unnormalized batch loss: {np.asarray(initial_loss, dtype=float)}")
-        print(f"Batch loss normalization scale: {np.asarray(loss_scale, dtype=float)}")
+        print(f"Initial batch loss: {np.asarray(initial_loss, dtype=float)}")
     if num_steps <= 0:
         return optimized_control_points, []
 

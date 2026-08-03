@@ -33,8 +33,8 @@ def main():
     # Optimization Settings
     parser.add_argument("--save-trajectory", action="store_true", default=False)
     parser.add_argument("--window-length", type=int, default=50) # replay window length, only for identification mode
-    parser.add_argument("--learning-rate", type=float, default=1e-3)
-    parser.add_argument("--opt-steps", type=int, default=250)
+    parser.add_argument("--learning-rate", type=float, default=2e-3)
+    parser.add_argument("--opt-steps", type=int, default=500)
     parser.add_argument("--objective-mode", choices=["identification", "gain-tuning"],
                         default="gain-tuning")
     parser.add_argument("--fim-a-slip-max", action=argparse.BooleanOptionalAction, default=True,
@@ -49,7 +49,7 @@ def main():
     # B-spline control points. This is the parametrization's stiffness knob:
     # more of them means finer detail but a curve that reacts harder to each
     # one, so the motion constraints bind sooner (see bspline.py).
-    parser.add_argument("--num-control-points", type=int, default=7)
+    parser.add_argument("--num-control-points", type=int, default=5)
     parser.add_argument("--trajectory-seed", type=int, default=0)
     # Constraints
     parser.add_argument("--constraint-weight", type=float, default=1.0)
@@ -57,8 +57,8 @@ def main():
     parser.add_argument("--constraint-a-weight", type=float, default=1.0)
     parser.add_argument("--constraint-lateral-weight", type=float, default=1.0)
     parser.add_argument("--constraint-omega-weight", type=float, default=1.0)
-    parser.add_argument("--constraint-alpha-weight", type=float, default=1.0)
-    parser.add_argument("--constraint-smooth-max-beta", type=float, default=20.0) # barrier constant
+    parser.add_argument("--constraint-alpha-weight", type=float, default=0.5)
+    parser.add_argument("--constraint-smooth-max-beta", type=float, default=10.0) # barrier constant
     # Visualization settings
     parser.add_argument("--save-opt-GIF", action="store_true", default=False)
     parser.add_argument("--opt-trace-stride", type=int, default=500)
@@ -180,12 +180,13 @@ def main():
             print(loss_history[-1])
             print("Final objective terms:")
             print(f"  FIM:         {float(objective_terms['fim']):.8e}")
+            print(f"  log(FIM):    {float(objective_terms['log_fim']):.8f}")
             print(f"  Constraints: {float(objective_terms['constraints']):.8e}")
             print("  Constraint components:")
             for name in ("v", "a", "lateral", "omega", "alpha"):
                 print(f"    {name:<7}: {float(constraint_components[name]):.8e}")
-            print(f"  Total:       {float(objective_terms['total']):.8e}")
-            print(f"  Constraint share: {100.0 * float(objective_terms['constraint_share']):.2f}%")
+            print(f"  Constraint term (weighted): {float(objective_terms['constraint_term']):.8f}")
+            print(f"  Total:       {float(objective_terms['total']):.8f}")
             print(f"  Constraint weight used: {selected_constraint_weight:.8g}")
             print("Optimized FIM:")
             print(pipeline.compute_fim_matrix(window_length=args.window_length))
