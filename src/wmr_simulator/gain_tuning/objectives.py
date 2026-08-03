@@ -14,12 +14,13 @@ def clip_controller_gains(gains: jax.Array):
 class Realizations(NamedTuple):
     """The frozen stochastic conditions a rollout batch is scored under.
 
-    One bundle per run, built once and shared by everything that rolls out:
-    the gain tuner averages its objective over these realizations, and the
-    trajectory optimizer averages its FIM over the same ones. Sharing them is
-    what makes a trajectory designed to be informative about the gains
-    informative about the gains *as the tuner sees them* -- two independent
-    draws would score the two halves of the loop on different problems.
+    One root bundle per run, built once and shared by everything that rolls
+    out. For a set of tuning trajectories, each trajectory gets independent
+    child noise keys from these roots; the trajectory optimizer averages its
+    FIM over the corresponding root realizations. Sharing the roots is what
+    makes a trajectory designed to be informative about the gains informative
+    about them *as the tuner sees them* -- two independent draws would score
+    the two halves of the loop on different problems.
 
     Held fixed for the whole run (common random numbers): both objectives then
     stay deterministic functions of their decision variables.
@@ -52,6 +53,29 @@ def make_realizations(
             offset_angle,
         ),
     )
+
+
+def split_realization_keys_by_trajectory(
+    realization_keys: jax.Array,
+    num_trajectories: int,
+    namespace: int = 0,
+) -> jax.Array:
+    """Derive frozen, independent noise keys for every trajectory.
+
+    ``realization_keys`` is the run-level ``(R, 2)`` bundle. The returned
+    ``(T, R, 2)`` array gives every trajectory a distinct child key for each
+    realization while remaining deterministic across objective evaluations.
+    ``namespace`` separates otherwise-independent sets such as training and
+    validation trajectories.
+    """
+    realization_keys = jnp.asarray(realization_keys, dtype=jnp.uint32)
+    namespaced_keys = jax.vmap(lambda key: jax.random.fold_in(key, namespace))(
+        realization_keys
+    )
+    keys_by_realization = jax.vmap(
+        lambda key: jax.random.split(key, num_trajectories)
+    )(namespaced_keys)
+    return jnp.swapaxes(keys_by_realization, 0, 1)
 
 
 def _resolve_initial_pose_offsets(initial_pose_offsets, num_realizations: int) -> jax.Array:
