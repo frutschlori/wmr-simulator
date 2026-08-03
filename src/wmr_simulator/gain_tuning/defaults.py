@@ -17,11 +17,10 @@ from __future__ import annotations
 GAIN_TUNING_DEFAULTS: dict = {
     "steps": 500,
     "learning_rate": 1e-4,
-    # Noise realizations averaged into every objective evaluation. With 1 the
-    # optimizer fits a single measurement-noise draw: measured over seeds 0-3 on
-    # the same 16 training trajectories, the per-draw ranking noise (~15% of the
-    # loss) exceeds the spread between candidate gain vectors (~7%), and the
-    # winning gains swing by orders of magnitude with the seed alone.
+    # Noise realizations averaged into every objective evaluation. Each
+    # trajectory receives independent child keys from the run's frozen bundle,
+    # so even R=1 spans one noise stream per trajectory; R>1 adds independent
+    # realizations within every trajectory as well.
     "num_realizations": 4,
     # Randomized rollout start pose, one draw per noise realization: uniform in a
     # disk of init_offset_radius [m] and uniform over +/-init_offset_angle [rad].

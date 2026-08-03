@@ -11,6 +11,7 @@ from wmr_simulator.gain_tuning.objectives import (
     clip_controller_gains,
     make_realizations,
     scheduled_closed_loop_objective_terms,
+    split_realization_keys_by_trajectory,
 )
 
 _NUM_GAINS = 5
@@ -152,6 +153,7 @@ def _make_terms_for_values(
     k_max_rest,
     reference_trajectories,
     initial_pose_offsets,
+    key_namespace=0,
 ):
     reference_trajectories = (
         None if reference_trajectories is None else jnp.asarray(reference_trajectories, dtype=jnp.float32)
@@ -163,6 +165,15 @@ def _make_terms_for_values(
     )
     per_trajectory_offsets = initial_pose_offsets is not None and initial_pose_offsets.ndim == 3
 
+    if reference_trajectories is not None:
+        num_trajectories = int(reference_trajectories.shape[0])
+        replay_robot_keys = split_realization_keys_by_trajectory(
+            replay_robot_keys, num_trajectories, namespace=key_namespace
+        )
+        replay_estimator_keys = split_realization_keys_by_trajectory(
+            replay_estimator_keys, num_trajectories, namespace=key_namespace
+        )
+
     def terms_for_values(values):
         gains = controller_gains_from_optimizer_values(
             values[..., :_NUM_GAINS], k_min_stab=k_min_stab, k_max_stab=k_max_stab, k_max_rest=k_max_rest
@@ -172,13 +183,18 @@ def _make_terms_for_values(
         else:
             params = zero_params(schedule_template)
 
-        def terms_for_reference(reference_states, initial_pose_offsets=initial_pose_offsets):
+        def terms_for_reference(
+            reference_states,
+            robot_keys,
+            estimator_keys,
+            initial_pose_offsets=initial_pose_offsets,
+        ):
             return scheduled_closed_loop_objective_terms(
                 pipeline,
                 gains,
                 params,
-                replay_robot_keys,
-                replay_estimator_keys,
+                robot_keys,
+                estimator_keys,
                 velocity_tracking_weight=velocity_tracking_weight,
                 input_weight=input_weight,
                 input_delta_weight=input_delta_weight,
@@ -189,12 +205,25 @@ def _make_terms_for_values(
             )
 
         if reference_trajectories is None:
-            return terms_for_reference(pipeline.reference_states)
+            return terms_for_reference(
+                pipeline.reference_states, replay_robot_keys, replay_estimator_keys
+            )
         if per_trajectory_offsets:
             return jnp.mean(
-                jax.vmap(terms_for_reference)(reference_trajectories, initial_pose_offsets), axis=0
+                jax.vmap(terms_for_reference)(
+                    reference_trajectories,
+                    replay_robot_keys,
+                    replay_estimator_keys,
+                    initial_pose_offsets,
+                ),
+                axis=0,
             )
-        return jnp.mean(jax.vmap(terms_for_reference)(reference_trajectories), axis=0)
+        return jnp.mean(
+            jax.vmap(terms_for_reference)(
+                reference_trajectories, replay_robot_keys, replay_estimator_keys
+            ),
+            axis=0,
+        )
 
     return terms_for_values
 
@@ -421,11 +450,12 @@ def optimize_controller_gains(
 
     num_w = gain_parametrization_num_params(schedule_template) if schedule_enabled else 0
 
-    # Noise keys and one start-pose offset per realization, drawn once and held
-    # fixed for the whole run so the objective stays a deterministic function of
-    # the gains. ``realizations`` injects a bundle shared with the trajectory
-    # designer (joint_tuning) instead; its count then wins over
-    # ``num_realizations``.
+    # Root noise keys and one start-pose offset per realization, drawn once and
+    # held fixed for the whole run so the objective stays a deterministic
+    # function of the gains. Each trajectory receives independent child noise
+    # keys in `_make_terms_for_values`; ``realizations`` injects roots shared
+    # with the trajectory designer (joint_tuning) instead, and its count then
+    # wins over ``num_realizations``.
     # Designed start offsets, when the trajectories shipped them, replace the
     # tuner's own draw: they are the conditions the trajectory was designed to
     # be informative under, so the number of realizations is theirs, not the
@@ -465,7 +495,7 @@ def optimize_controller_gains(
             f"{init_offset_radius:.4g} m / {np.rad2deg(init_offset_angle):.3g} deg of the reference start."
         )
 
-    def make_terms(reference_trajectories, start_offsets):
+    def make_terms(reference_trajectories, start_offsets, key_namespace):
         initial_pose_offsets = (
             realizations.start_offsets if start_offsets is None else start_offsets
         )
@@ -486,16 +516,19 @@ def optimize_controller_gains(
             k_max_rest=k_max_rest,
             reference_trajectories=reference_trajectories,
             initial_pose_offsets=initial_pose_offsets,
+            key_namespace=key_namespace,
         )
 
-    loss_terms_for_optimizer_values = make_terms(training_reference_trajectories, training_start_offsets)
+    loss_terms_for_optimizer_values = make_terms(
+        training_reference_trajectories, training_start_offsets, key_namespace=0
+    )
     loss_for_optimizer_values = lambda values: jnp.sum(loss_terms_for_optimizer_values(values))
 
     validation_loss_for_optimizer_values = None
     validation_loss_terms_for_optimizer_values = None
     if validation_reference_trajectories is not None and len(validation_reference_trajectories) > 0:
         validation_loss_terms_for_optimizer_values = make_terms(
-            validation_reference_trajectories, validation_start_offsets
+            validation_reference_trajectories, validation_start_offsets, key_namespace=1
         )
         validation_loss_for_optimizer_values = (
             lambda values: jnp.sum(validation_loss_terms_for_optimizer_values(values))
