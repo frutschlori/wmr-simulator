@@ -9,8 +9,15 @@ import pickle
 import numpy as np
 import yaml
 
-from wmr_simulator.joint_tuning.pipeline import GAIN_NAMES, run_joint_tuning
-from wmr_simulator.joint_tuning.start_offsets import START_OFFSET_MODES
+from wmr_simulator.joint_tuning.pipeline import (
+    GAIN_NAMES,
+    MODE_ALTERNATING,
+    MODES,
+    run_joint_tuning,
+)
+from wmr_simulator.trajectory_optimization.start_offsets import START_OFFSET_MODES
+from wmr_simulator.trajectory_optimization.objectives import CRITERIA, DEFAULT_CRITERION
+from wmr_simulator.trajectory_optimization.pipeline import reference_states_export_payload
 from wmr_simulator.visualization.joint_tuning import (
     plot_joint_tuning_history,
     plot_joint_tuning_trajectories,
@@ -22,20 +29,25 @@ def main():
         description="Alternating optimization of controller gains and tuning trajectories."
     )
     parser.add_argument("--problem", type=str, default="problems/pololu_gains.yaml")
-    parser.add_argument("--rounds", type=int, default=250)
-    parser.add_argument("--warm-start-rounds", type=int, default=50)
-    parser.add_argument("--trajectory-learning-rate", type=float, default=1e-3)
-    parser.add_argument("--gain-learning-rate", type=float, default=1e-4)
-    parser.add_argument("--num-realizations", type=int, default=8)
+    parser.add_argument("--mode", choices=list(MODES), default=MODE_ALTERNATING)
+    parser.add_argument("--rounds", type=int, default=1000)
+    parser.add_argument("--warm-start-rounds", type=int, default=500)
+    parser.add_argument("--trajectory-learning-rate", type=float, default=2e-3)
+    parser.add_argument("--gain-learning-rate", type=float, default=1e-3)
+    parser.add_argument("--num-realizations", type=int, default=4)
     parser.add_argument("--num-trajectories", type=int, default=8)
-    parser.add_argument("--num-control-points", type=int, default=7)
+    parser.add_argument("--num-control-points", type=int, default=5)
     parser.add_argument("--start-offset-mode", choices=sorted(START_OFFSET_MODES), default="random")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--criterion", choices=list(CRITERIA), default=DEFAULT_CRITERION)
+    parser.add_argument("--wheel-lp-tau", type=float, default=None)
     parser.add_argument("--out", type=str, default="results/joint_tuning")
     args = parser.parse_args()
 
     result = run_joint_tuning(
         args.problem,
+        mode=args.mode,
+        wheel_lp_tau=args.wheel_lp_tau,
         num_rounds=args.rounds,
         warm_start_rounds=args.warm_start_rounds,
         num_trajectories=args.num_trajectories,
@@ -44,6 +56,7 @@ def main():
         trajectory_learning_rate=args.trajectory_learning_rate,
         gain_learning_rate=args.gain_learning_rate,
         start_offset_mode=args.start_offset_mode,
+        criterion=args.criterion,
         seed=args.seed,
     )
 
@@ -54,6 +67,8 @@ def main():
         yaml.safe_dump(
             {
                 "problem": args.problem,
+                "mode": args.mode,
+                "wheel_lp_tau": float(result.config["wheel_lp_tau"]),
                 "gains": [float(gain) for gain in result.gains],
                 "start_offset_mode": args.start_offset_mode,
                 "seconds_per_round": float(result.timing["seconds_per_round"]),
@@ -64,10 +79,19 @@ def main():
             file,
             sort_keys=False,
         )
+    # The final start offsets ship with every trajectory: under an optimizing
+    # start_offset_mode they are decision variables of the design, and even when
+    # frozen they are the conditions the FIM was averaged over. The gain tuner
+    # reads them back so it tunes on exactly those starts.
+    start_offsets = np.asarray(result.start_offsets, dtype=float)
     for index, reference_states in enumerate(np.asarray(result.reference_states, dtype=float)):
         with open(os.path.join(out_dir, f"reference_states_{index:02d}.pkl"), "wb") as file:
             pickle.dump(
-                {"reference_states": reference_states, "dt": float(result.trajectory_pipeline.problem.dt)},
+                reference_states_export_payload(
+                    reference_states,
+                    float(result.trajectory_pipeline.problem.dt),
+                    start_offsets=start_offsets,
+                ),
                 file,
             )
     print(f"Saved joint tuning result to {out_dir}")

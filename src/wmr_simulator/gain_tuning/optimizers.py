@@ -156,6 +156,13 @@ def _make_terms_for_values(
     reference_trajectories = (
         None if reference_trajectories is None else jnp.asarray(reference_trajectories, dtype=jnp.float32)
     )
+    # (R, 3) -- one offset set shared by every trajectory (the tuner's own draw)
+    # -- or (T, R, 3), one set per trajectory, as read off the design pickles.
+    initial_pose_offsets = (
+        None if initial_pose_offsets is None else jnp.asarray(initial_pose_offsets, dtype=jnp.float32)
+    )
+    per_trajectory_offsets = initial_pose_offsets is not None and initial_pose_offsets.ndim == 3
+
     def terms_for_values(values):
         gains = controller_gains_from_optimizer_values(
             values[..., :_NUM_GAINS], k_min_stab=k_min_stab, k_max_stab=k_max_stab, k_max_rest=k_max_rest
@@ -165,7 +172,7 @@ def _make_terms_for_values(
         else:
             params = zero_params(schedule_template)
 
-        def terms_for_reference(reference_states):
+        def terms_for_reference(reference_states, initial_pose_offsets=initial_pose_offsets):
             return scheduled_closed_loop_objective_terms(
                 pipeline,
                 gains,
@@ -183,6 +190,10 @@ def _make_terms_for_values(
 
         if reference_trajectories is None:
             return terms_for_reference(pipeline.reference_states)
+        if per_trajectory_offsets:
+            return jnp.mean(
+                jax.vmap(terms_for_reference)(reference_trajectories, initial_pose_offsets), axis=0
+            )
         return jnp.mean(jax.vmap(terms_for_reference)(reference_trajectories), axis=0)
 
     return terms_for_values
@@ -375,6 +386,8 @@ def optimize_controller_gains(
     init_offset_angle: float = 0.0,
     training_reference_trajectories: jax.Array | None = None,
     validation_reference_trajectories: jax.Array | None = None,
+    training_start_offsets: jax.Array | None = None,
+    validation_start_offsets: jax.Array | None = None,
     realizations=None,
 ):
     """Single-stage joint optimization of base gains and the gain schedule.
@@ -413,6 +426,18 @@ def optimize_controller_gains(
     # the gains. ``realizations`` injects a bundle shared with the trajectory
     # designer (joint_tuning) instead; its count then wins over
     # ``num_realizations``.
+    # Designed start offsets, when the trajectories shipped them, replace the
+    # tuner's own draw: they are the conditions the trajectory was designed to
+    # be informative under, so the number of realizations is theirs, not the
+    # caller's.
+    if training_start_offsets is not None:
+        designed_realizations = int(jnp.asarray(training_start_offsets).shape[1])
+        if designed_realizations != num_realizations:
+            print(
+                f"Start offsets come from the trajectory design: using {designed_realizations} "
+                f"realizations instead of the requested {num_realizations}."
+            )
+        num_realizations = designed_realizations
     if realizations is None:
         realizations = make_realizations(
             pipeline.robot_key,
@@ -424,14 +449,26 @@ def optimize_controller_gains(
     num_realizations = int(realizations.robot_keys.shape[0])
     replay_robot_keys = realizations.robot_keys
     replay_estimator_keys = realizations.estimator_keys
-    initial_pose_offsets = realizations.start_offsets
-    if init_offset_radius > 0.0 or init_offset_angle > 0.0:
+    if training_start_offsets is not None:
+        if int(jnp.asarray(training_start_offsets).shape[1]) != num_realizations:
+            raise ValueError(
+                "Designed start offsets and the realization bundle disagree on the number of "
+                f"realizations ({jnp.asarray(training_start_offsets).shape[1]} vs {num_realizations})."
+            )
+        print(
+            f"Designed start poses: {num_realizations} offsets per trajectory, read from the "
+            "trajectory pickles."
+        )
+    elif init_offset_radius > 0.0 or init_offset_angle > 0.0:
         print(
             f"Randomized start poses: {num_realizations} offsets within "
             f"{init_offset_radius:.4g} m / {np.rad2deg(init_offset_angle):.3g} deg of the reference start."
         )
 
-    def make_terms(reference_trajectories):
+    def make_terms(reference_trajectories, start_offsets):
+        initial_pose_offsets = (
+            realizations.start_offsets if start_offsets is None else start_offsets
+        )
         return _make_terms_for_values(
             pipeline=pipeline,
             schedule_template=schedule_template,
@@ -451,13 +488,15 @@ def optimize_controller_gains(
             initial_pose_offsets=initial_pose_offsets,
         )
 
-    loss_terms_for_optimizer_values = make_terms(training_reference_trajectories)
+    loss_terms_for_optimizer_values = make_terms(training_reference_trajectories, training_start_offsets)
     loss_for_optimizer_values = lambda values: jnp.sum(loss_terms_for_optimizer_values(values))
 
     validation_loss_for_optimizer_values = None
     validation_loss_terms_for_optimizer_values = None
     if validation_reference_trajectories is not None and len(validation_reference_trajectories) > 0:
-        validation_loss_terms_for_optimizer_values = make_terms(validation_reference_trajectories)
+        validation_loss_terms_for_optimizer_values = make_terms(
+            validation_reference_trajectories, validation_start_offsets
+        )
         validation_loss_for_optimizer_values = (
             lambda values: jnp.sum(validation_loss_terms_for_optimizer_values(values))
         )

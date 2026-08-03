@@ -1,17 +1,25 @@
-"""Start-pose offsets as (optionally) decision variables of the joint loop.
+"""Where a rollout starts: every way a start-pose offset comes into being.
 
-The rollout start offsets are what make the tracking gains observable at all
-(``gain_tuning.objectives.sample_initial_pose_offsets``). The joint loop can
-leave them as a frozen draw, fix them to a deterministic spread, or hand them
-to the trajectory block as decision variables -- one enum, one code path, a
-3-element boolean mask over ``[dx, dy, dtheta]``.
+Sampled at random (:func:`sample_initial_pose_offsets`), spread
+deterministically (:func:`static_start_offsets`), or made a decision variable
+of the design (:func:`squash_start_offsets` and the ``optimize*`` modes) --
+one enum, one code path, a 3-element boolean mask over ``[dx, dy, dtheta]``.
 
-The *trajectory* block owns them, never the gain block: minimizing the gain
-loss over the offsets would drive them to zero and destroy exactly the
-excitation they exist to provide, while minimizing the FIM loss maximizes
-information, which is the only self-consistent choice.
+This is a trajectory-design concern, which is why it lives here: the offsets
+are part of the *experiment* being designed, alongside the curve, and both
+designers optimize them against the same FIM -- the standalone run
+(``pipeline.py``, offsets appended to the control points' decision vector) and
+the alternating ``joint_tuning`` loop. The gain tuner is downstream of that: it
+either reads the designed offsets off the trajectory pickles or, with no design
+to read, calls the sampler here for its own draw.
+
+The *trajectory* side owns them, never the gain side: minimizing the gain loss
+over the offsets would drive them to zero and destroy exactly the excitation
+they exist to provide, while minimizing the FIM loss maximizes information,
+which is the only self-consistent choice.
 """
 
+import jax
 import jax.numpy as jnp
 
 
@@ -107,3 +115,34 @@ def resolve_start_offsets(
     return jnp.where(
         mask, squash_start_offsets(free_offsets, offset_radius, offset_angle), frozen_offsets
     )
+
+
+def sample_initial_pose_offsets(
+    key: jax.Array,
+    num_realizations: int,
+    offset_radius: float,
+    offset_angle: float,
+) -> jax.Array:
+    """Draw one start-pose offset ``[dx, dy, dtheta]`` per noise realization.
+
+    Starting every rollout exactly on the reference leaves only the error the
+    plant fails to track (~1 cm), which is why the tuning loss is nearly flat in
+    kx and ky: those gains act on tracking error, and there is almost none to
+    act on. Placing the robot off the reference start injects the transient that
+    makes them observable -- and matches deployment, where the robot is placed
+    by hand (31-100 mm and up to 9.5 deg across the exp04/exp05 logs).
+
+    Positions are uniform over the disk of ``offset_radius`` (the sqrt keeps
+    them uniform by area rather than clustered at the center); headings are
+    uniform over +/-``offset_angle``. Both 0 returns zeros, i.e. the reference
+    start, exactly as before.
+    """
+    if offset_radius <= 0.0 and offset_angle <= 0.0:
+        return jnp.zeros((num_realizations, 3), dtype=jnp.float32)
+    radius_key, bearing_key, heading_key = jax.random.split(key, 3)
+    radius = offset_radius * jnp.sqrt(jax.random.uniform(radius_key, (num_realizations,)))
+    bearing = jax.random.uniform(bearing_key, (num_realizations,), minval=-jnp.pi, maxval=jnp.pi)
+    heading = jax.random.uniform(heading_key, (num_realizations,), minval=-offset_angle, maxval=offset_angle)
+    return jnp.stack(
+        [radius * jnp.cos(bearing), radius * jnp.sin(bearing), heading], axis=1
+    ).astype(jnp.float32)

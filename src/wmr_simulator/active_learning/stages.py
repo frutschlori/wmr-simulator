@@ -726,6 +726,7 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
         plot_gain_tuning_summary,
         plot_training_trajectory_summary,
         plot_validation_trajectory_summary,
+        rollout_realizations,
     )
     from wmr_simulator.visualization.identification import plot_loss_history
 
@@ -851,17 +852,42 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
     print(f"Wrote {paths.gains_result}")
 
     with collect_plots(paths.visualize_dir / "gain tuning"):
+        summary_references = pipeline.training_reference_trajectories[:1]
+        summary_offsets = result["summary_start_offsets"][None, ...]
         plot_gain_tuning_summary(
             pipeline,
             init_log=result["init_hidden_log"],
             tuned_log=result["final_hidden_log"],
             static_log=result.get("static_hidden_log"),
+            init_realization_poses=rollout_realizations(
+                pipeline, robot_params, summary_references, summary_offsets
+            )[0],
+            tuned_realization_poses=rollout_realizations(
+                pipeline,
+                robot_params,
+                summary_references,
+                summary_offsets,
+                controller_gains=result["optimized_gains"],
+                schedule_params=result["schedule_params"],
+            )[0],
+            static_realization_poses=(
+                None
+                if result["static_gains"] is None
+                else rollout_realizations(
+                    pipeline,
+                    robot_params,
+                    summary_references,
+                    summary_offsets,
+                    controller_gains=result["static_gains"],
+                )[0]
+            ),
             out_prefix="summary_gain_tuning",
         )
         plot_training_trajectory_summary(
             pipeline,
             robot_params=robot_params,
             tuned_gains=result["optimized_gains"],
+            start_offsets=result["training_start_offsets"],
             schedule_params=result["schedule_params"],
             static_gains=result["static_gains"],
             max_trajectories=None,
@@ -871,6 +897,7 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
             pipeline,
             robot_params=robot_params,
             tuned_gains=result["optimized_gains"],
+            start_offsets=result["validation_start_offsets"],
             schedule_params=result["schedule_params"],
             static_gains=result["static_gains"],
             out_prefix="summary_validation",

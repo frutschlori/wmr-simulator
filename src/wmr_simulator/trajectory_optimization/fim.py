@@ -169,6 +169,33 @@ def trace_inverse_criterion(fim_factor: jnp.ndarray, regularization: float = 1e-
     return jnp.sum(inverse_lower**2)
 
 
+def fim_eigenvalues(fim_factor: jnp.ndarray, regularization: float = 1e-6) -> jnp.ndarray:
+    """FIM eigenvalues, descending, without ever assembling the FIM.
+
+    They are the squared singular values of the triangular factor, so the
+    condition number reported from these is the FIM's, computed at the factor's
+    (half) exponent range -- which is the whole reason the criteria work on the
+    factor (see the module docstring).
+    """
+    return _fim_singular_values(fim_factor, regularization=regularization) ** 2
+
+
+def marginal_information(fim_factor: jnp.ndarray, regularization: float = 1e-6) -> jnp.ndarray:
+    """``1 / diag(FIM^-1)`` per parameter: the information about one parameter
+    with all the others free, i.e. the inverse of its marginal variance.
+
+    ``FIM^-1 = R^-1 R^-T`` for the triangular factor ``R``, so the diagonal is
+    the squared row norms of ``R^-1`` and no inverse of the FIM is formed.
+    """
+    triangular_factor = _triangular_factor(fim_factor, regularization=regularization)
+    inverse_triangular = jax.scipy.linalg.solve_triangular(
+        triangular_factor,
+        jnp.eye(triangular_factor.shape[0], dtype=triangular_factor.dtype),
+        lower=False,
+    )
+    return 1.0 / jnp.sum(inverse_triangular**2, axis=1)
+
+
 def condition_number_criterion(fim_factor: jnp.ndarray, regularization: float = 1e-6) -> jnp.ndarray:
     singular_values = _fim_singular_values(fim_factor, regularization=regularization)
     return (singular_values[0] / jnp.maximum(singular_values[-1], 1e-12)) ** 2
