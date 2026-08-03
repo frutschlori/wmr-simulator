@@ -37,6 +37,7 @@ from wmr_simulator.trajectory_optimization.bspline import (
     initial_line_control_points,
 )
 from wmr_simulator.trajectory_optimization.parametrization import normalize_time_scaling
+from wmr_simulator.gain_tuning.objectives import sample_initial_pose_offsets
 from wmr_simulator.types import PhysicalParams, SimulationLog
 from wmr_simulator.visualization.trajectories import (
     plot_loss_history as plot_loss_history_figure,
@@ -117,6 +118,13 @@ OBJECTIVE_MODE_GAIN_TUNING = "gain-tuning"
 # own. The count is the parametrization's stiffness knob (see bspline.py); the
 # scripts pass their own.
 DEFAULT_NUM_CONTROL_POINTS = 8
+# Start-pose offset distribution the gain-tuning FIM averages over [m, rad], and
+# how many draws the average uses. Matched to the gain tuner's own
+# init_offset_radius / init_offset_angle so the trajectory is designed for the
+# conditions it is used under.
+START_OFFSET_RADIUS = 0.2
+START_OFFSET_ANGLE = 0.2
+NUM_START_OFFSET_SAMPLES = 3
 # Lower bound on the relative FIM scale of a controller gain, matching the
 # default k_min_stab of the gain search (gain_tuning.defaults).
 GAIN_FIM_SCALING_FLOOR = 1e-3
@@ -171,6 +179,16 @@ class TrajectoryOptimizationPipeline:
         # objective stiff; excluding it keeps the burnout model in the rollout
         # at its nominal value but drops it from the design parameters.
         self.fim_a_slip_max = bool(fim_a_slip_max) and self.robot.a_slip_max > 0.0
+        # Drawn once and reused at every objective evaluation: the design
+        # criterion is an expectation over start poses, and common random
+        # numbers keep it a deterministic function of the control points, which
+        # the line search needs.
+        self.start_offsets = sample_initial_pose_offsets(
+            jax.random.PRNGKey(0),
+            NUM_START_OFFSET_SAMPLES,
+            START_OFFSET_RADIUS,
+            START_OFFSET_ANGLE,
+        )
         self.control_points = self.initial_control_points(DEFAULT_NUM_CONTROL_POINTS)
         self.reference_states = self.reference_states_from_control_points(self.control_points)
         self._set_closed_loop_log(self.run_closed_loop_deployment(reference_states=self.reference_states))
@@ -249,6 +267,13 @@ class TrajectoryOptimizationPipeline:
         return self.objective_mode != OBJECTIVE_MODE_GAIN_TUNING
 
     def _spline_plan(self, num_control_points: int, time_scaling: str) -> BSplinePlan:
+        """Cached basis for this control-point count.
+
+        Must be warmed *eagerly*: constructing a plan inside a jit trace stages
+        the time grid into a tracer, and the basis is built with NumPy. Callers
+        that hand a fresh control-point count to a jitted optimizer warm it
+        first (see ``optimize_trajectories``).
+        """
         key = (num_control_points, time_scaling)
         plan = self._spline_plan_cache.get(key)
         if plan is None:
@@ -367,9 +392,22 @@ class TrajectoryOptimizationPipeline:
         reference_states: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
         """
-        Runs the normal closed-loop deployment and records estimated poses as measurements.
-        window_length is accepted for API symmetry with replay mode; closed-loop gain sensitivities
-        intentionally use the full rollout without replay resets.
+        Runs the closed-loop deployment once per start-pose offset and stacks the
+        estimated poses. window_length is accepted for API symmetry with replay
+        mode; closed-loop gain sensitivities intentionally use the full rollout
+        without replay resets.
+
+        Stacking is what makes the design criterion an *expectation* over start
+        poses: the FIM of the stacked measurements is the sum of the per-rollout
+        FIMs (``[J1; J2]^T [J1; J2] = J1^T J1 + J2^T J2``), so averaging happens
+        in factored form and no FIM is ever assembled.
+
+        The offsets matter because the Kanayama law multiplies kx and ky by the
+        tracking errors: starting on the reference leaves almost no error, so
+        those two gains are nearly invisible to the design. The offsets are drawn
+        once (``self.start_offsets``) and reused at every evaluation -- common
+        random numbers, which keeps the objective deterministic, as the line
+        search requires.
 
         ``reference_states`` may be passed directly to avoid an otherwise-redundant
         deployment rollout (the sensitivity rollout re-runs the closed loop anyway).
@@ -382,13 +420,22 @@ class TrajectoryOptimizationPipeline:
         if reference_states is None:
             target_log = self.closed_loop_log if closed_loop_log is None else closed_loop_log
             reference_states = target_log.reference.states
-        predicted_log = self.simulation.run_closed_loop(
-            self.nominal_physical_params(),
-            controller_gains=gains,
-            wheel_speed_log_source="estimated",
-            reference_states=reference_states,
-        )
-        return predicted_log.pose.states[1:]
+
+        def rollout(start_offset):
+            predicted_log = self.simulation.run_closed_loop(
+                self.nominal_physical_params(),
+                controller_gains=gains,
+                wheel_speed_log_source="estimated",
+                reference_states=reference_states,
+                initial_pose=reference_states[0, :3] + start_offset,
+            )
+            return predicted_log.pose.states[1:]
+
+        offsets = self.start_offsets
+        measurements = jax.vmap(rollout)(offsets)
+        # Mean rather than sum, so the criterion keeps the scale of a single
+        # rollout and stays comparable across sample counts.
+        return measurements.reshape(-1, 3) / jnp.sqrt(float(offsets.shape[0]))
 
     def measurement_vector(
         self,
@@ -413,8 +460,8 @@ class TrajectoryOptimizationPipeline:
             )
         return measurements.reshape(-1)
 
-    def compute_fim_factor(self, measurement_variances=None,
-        window_length=None, closed_loop_log=None, reference_states=None) -> jnp.ndarray:
+    def compute_fim_factor(self, measurement_variances=None, window_length=None,
+        closed_loop_log=None, reference_states=None) -> jnp.ndarray:
         """Weighted relative parameter sensitivities ``J~``, with ``FIM = J~^T J~``.
 
         This is what the design criteria consume; assembling the FIM squares its
@@ -436,8 +483,8 @@ class TrajectoryOptimizationPipeline:
             parameter_scaling=self.fim_parameter_scaling(params),
         )
 
-    def compute_fim_matrix(self, measurement_variances=None,
-        window_length=None, closed_loop_log=None, reference_states=None) -> jnp.ndarray:
+    def compute_fim_matrix(self, measurement_variances=None, window_length=None,
+        closed_loop_log=None, reference_states=None) -> jnp.ndarray:
         """The assembled Fisher matrix, for reporting/inspection only."""
         return fim_from_factor(
             self.compute_fim_factor(
@@ -465,6 +512,18 @@ class TrajectoryOptimizationPipeline:
 
     def decision_variables_from_control_points(self, control_points: jnp.ndarray) -> jnp.ndarray:
         return jnp.ravel(self.clamp_control_points(control_points))
+
+    def clamp_decision_variables(self, decision_variables: jnp.ndarray) -> jnp.ndarray:
+        """Re-project a decision vector onto the feasible set (environment box
+        and pins). The optimizer applies this after every step."""
+        return self.decision_variables_from_control_points(
+            self.control_points_from_decision_variables(decision_variables)
+        )
+
+    def loss_from_decision_variables(self, decision_variables: jnp.ndarray, **kwargs) -> jnp.ndarray:
+        return self.fim_loss_from_control_points(
+            self.control_points_from_decision_variables(decision_variables), **kwargs
+        )
 
     def set_control_points(self, control_points: jnp.ndarray):
         control_points = self.clamp_control_points(control_points)
@@ -611,6 +670,22 @@ class TrajectoryOptimizationPipeline:
         positions = start[None, :] + line_samples * (goal[None, :] - start[None, :])
         return jnp.asarray(positions, dtype=jnp.float32)
 
+    def initial_decision_variable_candidates(
+        self,
+        num_control_points: int,
+        num_trajectories: int,
+        seed: int = 0,
+    ) -> list[jnp.ndarray]:
+        control_point_candidates = self.initial_control_point_candidates(
+            num_control_points=num_control_points,
+            num_trajectories=num_trajectories,
+            seed=seed,
+        )
+        return [
+            self.decision_variables_from_control_points(control_points)
+            for control_points in control_point_candidates
+        ]
+
     def initial_control_point_candidates(
         self,
         num_control_points: int,
@@ -651,6 +726,8 @@ class TrajectoryOptimizationPipeline:
         constraint_smooth_max_beta: float = 20.0,
         verbose: bool = True,
     ):
+        # Build the basis before anything is traced; see _spline_plan.
+        self._spline_plan(num_control_points, self.time_scaling)
         initial_control_point_candidates = self.initial_control_point_candidates(
             num_control_points=num_control_points,
             num_trajectories=num_trajectories,
@@ -667,11 +744,18 @@ class TrajectoryOptimizationPipeline:
         if vectorized:
             from wmr_simulator.trajectory_optimization.optimizers import optimize_control_points_batch
 
-            initial_control_points = jnp.stack(initial_control_point_candidates, axis=0)
+            initial_decision_variables = jnp.stack(
+                self.initial_decision_variable_candidates(
+                    num_control_points=num_control_points,
+                    num_trajectories=num_trajectories,
+                    seed=seed,
+                ),
+                axis=0,
+            )
             group_constraint_weights = jnp.asarray(constraint_weights_per_trajectory, dtype=jnp.float32)
             optimized_control_points, loss_history = optimize_control_points_batch(
                 pipeline=self,
-                initial_control_points=initial_control_points,
+                initial_decision_variables=initial_decision_variables,
                 num_steps=num_steps,
                 learning_rate=learning_rate,
                 window_length=window_length,
@@ -695,6 +779,12 @@ class TrajectoryOptimizationPipeline:
                     constraint_smooth_max_beta=constraint_smooth_max_beta,
                 )
                 if not np.isfinite(float(final_loss)):
+                    # The trajectory diverged and never recorded a finite point.
+                    # Falling back to its unoptimized initialization keeps the
+                    # batch usable, but silently shipping a straight line as an
+                    # "optimized" trajectory would be worse than saying so.
+                    print(f"  trajectory {trajectory_index} diverged; falling back to its "
+                          f"unoptimized initialization")
                     optimized_control_points = optimized_control_points.at[trajectory_index].set(
                         initial_control_point_candidates[trajectory_index]
                     )
@@ -705,7 +795,7 @@ class TrajectoryOptimizationPipeline:
                         constraint_weight=candidate_constraint_weight,
                         constraint_component_weights=constraint_component_weights,
                         constraint_smooth_max_beta=constraint_smooth_max_beta,
-                    )
+                        )
                 # Raw (unnormalized) final loss, comparable across trajectories for
                 # best-candidate selection; the per-trajectory histories stay
                 # normalized and untouched.
@@ -785,20 +875,38 @@ class TrajectoryOptimizationPipeline:
     ):
         """One figure for a whole batch of optimized trajectories. The rollouts
         run as a single vmapped, jitted batch instead of one eager (and
-        separately compiled) rollout per trajectory."""
+        separately compiled) rollout per trajectory.
+
+        In gain-tuning mode they start from the same start-pose offsets the FIM
+        was averaged over, so the plot shows the conditions the design was
+        actually optimized for rather than an idealized start on the reference."""
         control_point_batch = jnp.stack(
             [self.clamp_control_points(control_points) for control_points in control_point_batch]
         )
         reference_trajectories = jax.vmap(self.reference_states_from_control_points)(control_point_batch)
-        closed_loop_logs = self.simulation.run_closed_loop_batch(
-            self.nominal_physical_params(),
-            reference_trajectories,
-            controller_gains=self.controller_gains,
-            wheel_speed_log_source="estimated",
-        )
+        if self.objective_mode == OBJECTIVE_MODE_GAIN_TUNING:
+            def rollout(reference_states, start_offset):
+                return self.simulation.run_closed_loop(
+                    self.nominal_physical_params(),
+                    controller_gains=self.controller_gains,
+                    wheel_speed_log_source="estimated",
+                    reference_states=reference_states,
+                    initial_pose=reference_states[0, :3] + start_offset,
+                ).pose.true_states
+
+            closed_loop_poses = jax.jit(
+                jax.vmap(jax.vmap(rollout, in_axes=(None, 0)), in_axes=(0, None))
+            )(reference_trajectories, self.start_offsets)
+        else:
+            closed_loop_poses = self.simulation.run_closed_loop_batch(
+                self.nominal_physical_params(),
+                reference_trajectories,
+                controller_gains=self.controller_gains,
+                wheel_speed_log_source="estimated",
+            ).pose.true_states
         return plot_trajectory_set_figure(
             reference_trajectories,
-            closed_loop_logs.pose.true_states,
+            closed_loop_poses,
             control_point_batch=control_point_batch,
             out_prefix=out_prefix,
             out_path=out_path,

@@ -34,8 +34,8 @@ def main():
     parser.add_argument("--save-trajectory", action="store_true", default=True)
     parser.add_argument("--no-save-trajectory", dest="save_trajectory", action="store_false")
     parser.add_argument("--window-length", type=int, default=50) # replay window length, only for identification mode
+    parser.add_argument("--learning-rate", type=float, default=1e-2)
     parser.add_argument("--opt-steps", type=int, default=5000)
-    parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--objective-mode", choices=["identification", "gain-tuning"],
                         default="identification")
     parser.add_argument("--fim-a-slip-max", action=argparse.BooleanOptionalAction, default=False,

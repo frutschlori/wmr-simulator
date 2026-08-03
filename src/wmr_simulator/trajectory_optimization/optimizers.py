@@ -1,3 +1,5 @@
+"""Adam over the B-spline control points, with a relative-progress stopping rule."""
+
 import sys
 
 import numpy as np
@@ -5,6 +7,28 @@ import jax
 import jax.numpy as jnp
 import optax
 from jax_tqdm import scan_tqdm
+
+
+# Stop when the loss has improved by less than CONVERGENCE_REL_TOL (relative)
+# over the last CONVERGENCE_WINDOW steps -- progress slowed to a crawl, not
+# merely a flat step. The comparison is against the loss a whole window ago
+# rather than the previous step, because Adam oscillates and any single good
+# step would otherwise reset the count. Measured tail rate on the tuning
+# objective: ~2% per 50 steps at step 300, ~0.3% by step 1400, so 0.5% ends a
+# run that has essentially stopped moving. This makes --opt-steps a safe upper
+# bound rather than an exact setting.
+#
+# NB this is a threshold, not a switch: 0.0 does not disable the rule, it just
+# demands *any* positive improvement, so a batch whose loss is rising (a
+# diverging learning rate, say) still trips it. Stopping such a run is the right
+# outcome, but do not read "converged" as "found an optimum". Use a negative
+# value to disable it outright.
+CONVERGENCE_REL_TOL = 5e-3
+CONVERGENCE_WINDOW = 50
+
+
+def _relative_improvement(reference_loss, loss):
+    return (reference_loss - loss) / jnp.maximum(jnp.abs(reference_loss), 1e-12)
 
 
 def print_progress(step: int, total_steps: int, loss_value: float, bar_width: int = 30):
@@ -45,9 +69,8 @@ def optimize_control_points(
     opt_state = optimizer.init(initial_decision_variables)
 
     def unnormalized_loss_fn(decision_variables):
-        control_points = pipeline.control_points_from_decision_variables(decision_variables)
-        return pipeline.fim_loss_from_control_points(
-            control_points,
+        return pipeline.loss_from_decision_variables(
+            decision_variables,
             window_length=window_length,
             measurement_variances=measurement_variances,
             constraint_weight=constraint_weight,
@@ -57,7 +80,6 @@ def optimize_control_points(
 
     initial_loss = unnormalized_loss_fn(initial_decision_variables)
     loss_scale = 1.0 / jnp.maximum(initial_loss, 1e-12)
-    # loss_scale = 1.0
 
     def loss_fn(decision_variables):
         return loss_scale * unnormalized_loss_fn(decision_variables)
@@ -66,12 +88,14 @@ def optimize_control_points(
     def train_step(decision_variables, optimizer_state):
         loss_value, grads = jax.value_and_grad(loss_fn)(decision_variables)
         updates, next_optimizer_state = optimizer.update(grads, optimizer_state, decision_variables)
-        next_decision_variables = optax.apply_updates(decision_variables, updates)
-        next_control_points = pipeline.control_points_from_decision_variables(next_decision_variables)
-        next_decision_variables = pipeline.decision_variables_from_control_points(next_control_points)
+        next_decision_variables = pipeline.clamp_decision_variables(
+            optax.apply_updates(decision_variables, updates)
+        )
         return next_decision_variables, next_optimizer_state, loss_value
 
     decision_variables = initial_decision_variables
+    best_decision_variables = initial_decision_variables
+    best_loss = jnp.inf
     loss_history = []
     snapshots = [] if save_trace else None
 
@@ -99,11 +123,26 @@ def optimize_control_points(
         pipeline.optimization_snapshots = snapshots
         return optimized_control_points, loss_history
 
+    window_reference_loss = float(initial_loss * loss_scale)
     for step in range(num_steps):
+        # loss_value is measured at `decision_variables` *before* the update, so
+        # that is the point it belongs to.
+        scored_decision_variables = decision_variables
         decision_variables, opt_state, loss_value = train_step(decision_variables, opt_state)
         loss_history.append(float(loss_value))
+        if float(loss_value) < float(best_loss):
+            best_loss = float(loss_value)
+            best_decision_variables = scored_decision_variables
         if verbose:
             print_progress(step + 1, num_steps, float(loss_value))
+        if (step + 1) % CONVERGENCE_WINDOW == 0:
+            improvement = float(_relative_improvement(window_reference_loss, float(loss_value)))
+            window_reference_loss = float(loss_value)
+            if improvement <= CONVERGENCE_REL_TOL:
+                if verbose:
+                    print(f"\nConverged after {step + 1} steps ({improvement:.2e} relative "
+                          f"improvement over the last {CONVERGENCE_WINDOW} steps).")
+                break
         if save_trace and ((step + 1) % trace_stride == 0 or step + 1 == num_steps):
             control_points = pipeline.control_points_from_decision_variables(decision_variables)
             reference_states = pipeline.reference_states_from_control_points(control_points)
@@ -118,7 +157,7 @@ def optimize_control_points(
                 )
             )
 
-    optimized_control_points = pipeline.control_points_from_decision_variables(decision_variables)
+    optimized_control_points = pipeline.control_points_from_decision_variables(best_decision_variables)
     pipeline.set_control_points(optimized_control_points)
     pipeline.loss_history = loss_history
     pipeline.optimization_snapshots = snapshots
@@ -127,7 +166,7 @@ def optimize_control_points(
 
 def optimize_control_points_batch(
     pipeline,
-    initial_control_points: jax.Array,
+    initial_decision_variables: jax.Array,
     num_steps: int,
     learning_rate: float,
     window_length: int | None = None,
@@ -137,16 +176,25 @@ def optimize_control_points_batch(
     constraint_smooth_max_beta: float = 20.0,
     verbose: bool = True,
 ):
+    """Optimize a batch of trajectories, each with its own optimizer state.
+
+    The trajectories are independent problems that only share a compiled step,
+    so the vmap goes around a single trajectory's update. Each trajectory
+    returns the best point it visited, not its last -- Adam spends a few percent
+    of its steps going uphill, and there is no reason to ship one of them.
+    """
     constraint_weights = jnp.broadcast_to(
         jnp.asarray(constraint_weight, dtype=jnp.float32),
-        (initial_control_points.shape[0],),
+        (initial_decision_variables.shape[0],),
     )
+    num_control_points = pipeline.control_points_from_decision_variables(
+        initial_decision_variables[0]
+    ).shape[0]
     optimizer = optax.adam(learning_rate)
 
     def unnormalized_loss_fn(decision_variables, current_constraint_weight):
-        control_points = pipeline.control_points_from_decision_variables(decision_variables)
-        return pipeline.fim_loss_from_control_points(
-            control_points,
+        return pipeline.loss_from_decision_variables(
+            decision_variables,
             window_length=window_length,
             measurement_variances=measurement_variances,
             constraint_weight=current_constraint_weight,
@@ -157,54 +205,88 @@ def optimize_control_points_batch(
     def scaled_loss_fn(decision_variables, scale, current_constraint_weight):
         return scale * unnormalized_loss_fn(decision_variables, current_constraint_weight)
 
-    decision_variables_from_control_points_batch = jax.vmap(pipeline.decision_variables_from_control_points)
+    clamp_decision_variables_batch = jax.vmap(pipeline.clamp_decision_variables)
     control_points_from_decision_variables_batch = jax.vmap(pipeline.control_points_from_decision_variables)
-    loss_values_fn = jax.vmap(scaled_loss_fn, in_axes=(0, 0, 0))
     unnormalized_loss_values_fn = jax.vmap(unnormalized_loss_fn, in_axes=(0, 0))
 
-    def optimize_batch(control_points, current_constraint_weights):
-        initial_decision_variables = decision_variables_from_control_points_batch(control_points)
+    def step_one(decision_variables, optimizer_state, scale, current_constraint_weight):
+        loss_fn = lambda d: scaled_loss_fn(d, scale, current_constraint_weight)
+        loss_value, grads = jax.value_and_grad(loss_fn)(decision_variables)
+        updates, next_optimizer_state = optimizer.update(grads, optimizer_state, decision_variables)
+        return optax.apply_updates(decision_variables, updates), next_optimizer_state, loss_value
+
+    step_batch = jax.vmap(step_one, in_axes=(0, 0, 0, 0))
+
+    def optimize_batch(initial_decision_variables, current_constraint_weights):
+        initial_decision_variables = clamp_decision_variables_batch(initial_decision_variables)
         initial_loss = unnormalized_loss_values_fn(initial_decision_variables, current_constraint_weights)
         loss_scale = 1.0 / jnp.maximum(initial_loss, 1e-12)
-        initial_opt_state = optimizer.init(initial_decision_variables)
+        initial_opt_state = jax.vmap(optimizer.init)(initial_decision_variables)
 
-        def summed_loss_fn(decision_variables):
-            loss_values = loss_values_fn(decision_variables, loss_scale, current_constraint_weights)
-            return jnp.sum(loss_values), loss_values
+        def train_step(carry, step_index):
+            (decision_variables, optimizer_state, reference, improving, last_loss_values,
+             best_decision_variables, best_loss_values) = carry
+            # Scalar predicate, so this is a real branch rather than a masked
+            # `select`: once every trajectory has stopped improving, the
+            # remaining scan iterations skip the rollouts entirely.
+            all_converged = jnp.all(improving <= 0.0)
 
-        def train_step(carry, _):
-            decision_variables, optimizer_state = carry
-            (_, loss_values), grads = jax.value_and_grad(summed_loss_fn, has_aux=True)(decision_variables)
-            updates, next_optimizer_state = optimizer.update(grads, optimizer_state, decision_variables)
-            next_decision_variables = optax.apply_updates(decision_variables, updates)
-            next_control_points = control_points_from_decision_variables_batch(next_decision_variables)
-            next_decision_variables = decision_variables_from_control_points_batch(next_control_points)
-            return (next_decision_variables, next_optimizer_state), loss_values
+            def run_step(_):
+                next_decision_variables, next_optimizer_state, loss_values = step_batch(
+                    decision_variables, optimizer_state, loss_scale, current_constraint_weights
+                )
+                next_decision_variables = clamp_decision_variables_batch(next_decision_variables)
+                # At the end of each window, score the improvement against the
+                # loss a full window ago and start a fresh window here.
+                window_closed = (step_index + 1) % CONVERGENCE_WINDOW == 0
+                improved = _relative_improvement(reference, loss_values) > CONVERGENCE_REL_TOL
+                # loss_values belongs to `decision_variables` (pre-update), so
+                # that is the point recorded when it is the best seen so far.
+                is_best = loss_values < best_loss_values
+                return (next_decision_variables, next_optimizer_state,
+                        jnp.where(window_closed, loss_values, reference),
+                        jnp.where(window_closed, improved.astype(jnp.float32), improving),
+                        loss_values,
+                        jnp.where(is_best[:, None], decision_variables, best_decision_variables),
+                        jnp.where(is_best, loss_values, best_loss_values))
+
+            def hold(_):
+                return (decision_variables, optimizer_state, reference, improving,
+                        last_loss_values, best_decision_variables, best_loss_values)
+
+            carry = jax.lax.cond(all_converged, hold, run_step, operand=None)
+            return carry, (carry[4], all_converged)
 
         train_step = scan_tqdm(
             num_steps,
             desc=(
                 f"B-spline optimization "
-                f"({initial_control_points.shape[1]} control points, {initial_control_points.shape[0]} trajectories)"
+                f"({num_control_points} control points, {initial_decision_variables.shape[0]} trajectories)"
             ),
         )(train_step)
 
         if num_steps <= 0:
-            return control_points, jnp.empty((0, control_points.shape[0]), dtype=jnp.float32), initial_loss, loss_scale
+            return (initial_decision_variables,
+                    jnp.empty((0, initial_decision_variables.shape[0]), dtype=jnp.float32),
+                    jnp.zeros((0,), dtype=bool), initial_loss, loss_scale)
 
-        (final_decision_variables, _), loss_history = jax.lax.scan(
+        normalized_initial_loss = initial_loss * loss_scale
+        (_, _, _, _, _, best_decision_variables, _), (loss_history, converged) = jax.lax.scan(
             train_step,
-            (initial_decision_variables, initial_opt_state),
+            (initial_decision_variables, initial_opt_state,
+             normalized_initial_loss, jnp.ones_like(normalized_initial_loss),
+             normalized_initial_loss,
+             initial_decision_variables, jnp.full_like(normalized_initial_loss, jnp.inf)),
             jnp.arange(num_steps),
         )
-        final_control_points = control_points_from_decision_variables_batch(final_decision_variables)
-        return final_control_points, loss_history, initial_loss, loss_scale
+        return best_decision_variables, loss_history, converged, initial_loss, loss_scale
 
     optimize_batch = jax.jit(optimize_batch)
-    optimized_control_points, loss_history_by_trajectory, initial_loss, loss_scale = optimize_batch(
-        initial_control_points,
+    best_decision_variables, loss_history_by_trajectory, converged, initial_loss, loss_scale = optimize_batch(
+        initial_decision_variables,
         constraint_weights,
     )
+    optimized_control_points = control_points_from_decision_variables_batch(best_decision_variables)
 
     if verbose:
         print(f"Initial unnormalized batch loss: {np.asarray(initial_loss, dtype=float)}")
@@ -212,6 +294,12 @@ def optimize_control_points_batch(
     if num_steps <= 0:
         return optimized_control_points, []
 
-    loss_history = np.asarray(loss_history_by_trajectory, dtype=float).tolist()
+    # Trim the flat tail the short-circuit leaves behind, so the history plot
+    # shows only the steps that did something.
+    converged = np.asarray(converged, dtype=bool)
+    steps_run = int(np.argmax(converged)) if converged.any() else len(converged)
+    if verbose and converged.any():
+        print(f"All trajectories converged after {steps_run} of {num_steps} steps.")
+    loss_history = np.asarray(loss_history_by_trajectory, dtype=float)[:max(steps_run, 1)].tolist()
 
     return optimized_control_points, loss_history

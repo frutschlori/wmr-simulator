@@ -30,7 +30,7 @@ GAIN_TUNING_DEFAULTS: dict = {
     # optimum, ky's whole range moves the loss by ~5%, one noise sigma). The
     # defaults match how the robot is actually placed by hand across the
     # exp04/exp05 logs: 31-100 mm and up to 9.5 deg. Both 0 disables.
-    "init_offset_radius": 0.3,
+    "init_offset_radius": 0.2,
     "init_offset_angle": 0.2,
     "num_lhs_points": 500,
     "num_adam_optimizations": 3,
