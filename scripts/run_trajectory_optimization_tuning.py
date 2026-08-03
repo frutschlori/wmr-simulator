@@ -58,7 +58,6 @@ def main():
     parser.add_argument("--constraint-lateral-weight", type=float, default=1.0)
     parser.add_argument("--constraint-omega-weight", type=float, default=1.0)
     parser.add_argument("--constraint-alpha-weight", type=float, default=1.0)
-    parser.add_argument("--tangent-floor-weight", type=float, default=1.0) # penalize 0 linear velocity to avoid num instability
     parser.add_argument("--constraint-smooth-max-beta", type=float, default=20.0) # barrier constant
     # Visualization settings
     parser.add_argument("--save-opt-GIF", action="store_true", default=False)
