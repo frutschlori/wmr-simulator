@@ -18,15 +18,30 @@ is what made the loss history choppy.
 Working from ``J~`` halves the exponent: an f32 QR of ``J~`` is backward stable
 relative to ``||J~|| = sqrt(lambda_max)``, so cond(FIM) ~ 1e12 is still
 comfortably resolvable. ``J~ = Q R`` gives ``FIM = R^T R`` with ``R`` a tiny
-``[P, P]`` triangle, and every criterion below is a closed form in ``R`` -- no
+``[P, P]`` triangle, and the eigenvalue criteria are closed forms in ``R`` -- no
 inverse of an ill-conditioned matrix is ever formed. Tikhonov regularization is
 applied by *appending* ``sqrt(reg) I`` rows to the factor, which is exactly
-equivalent to ``FIM + reg I`` and keeps the whole path in factored form.
+equivalent to ``FIM + reg I`` and keeps that path in factored form.
+
+The exception is :func:`trace_inverse_criterion`, the one criterion in the
+optimizer's inner loop, which assembles the small Gram and takes its Cholesky
+instead: the QR is cheap forward but its *backward* pass dominated the whole
+optimizer step. See its docstring for the measurements and the accuracy it
+costs.
 """
 
 import numpy as np
 import jax
 import jax.numpy as jnp
+
+
+# Relative component of the Tikhonov shift, on top of the caller's absolute one.
+# Sized to sit an order of magnitude above float32's rounding error in the Gram
+# (~eps * lambda_max, and trace >= lambda_max): below that the computed Gram can
+# come out indefinite and the Cholesky returns NaN. Measured: at 1e-9 two of six
+# trajectories NaN'd mid-run; at 1e-6 none do, and the shift is still ~0.01% of
+# a healthy lambda_min, so the criterion is unchanged where it matters.
+_RELATIVE_REGULARIZATION = 1e-6
 
 
 def default_measurement_variances(estimator_cfg: dict) -> np.ndarray:
@@ -120,16 +135,38 @@ def logdet_criterion(fim_factor: jnp.ndarray, regularization: float = 1e-6) -> j
     return -2.0 * jnp.sum(jnp.log(jnp.abs(jnp.diag(triangular_factor))))
 
 
+def _regularized_gram(fim_factor: jnp.ndarray, regularization: float) -> jnp.ndarray:
+    """``FIM + shift I`` as a ``[P, P]`` matrix, symmetrized.
+
+    The shift carries a relative term as well as the caller's absolute one, so it
+    scales with the problem and keeps the matrix positive definite (and the
+    Cholesky below real) however badly conditioned the design gets.
+    """
+    gram = fim_factor.T @ fim_factor
+    gram = 0.5 * (gram + gram.T)
+    num_parameters = gram.shape[0]
+    shift = regularization + _RELATIVE_REGULARIZATION * jnp.trace(gram)
+    return gram + shift * jnp.eye(num_parameters, dtype=gram.dtype)
+
+
 def trace_inverse_criterion(fim_factor: jnp.ndarray, regularization: float = 1e-6) -> jnp.ndarray:
-    # FIM^-1 = R^-1 R^-T, so trace(FIM^-1) = ||R^-1||_F^2; one triangular solve
-    # replaces inverting an ill-conditioned symmetric matrix.
-    triangular_factor = _triangular_factor(fim_factor, regularization=regularization)
-    inverse_triangular_factor = jax.scipy.linalg.solve_triangular(
-        triangular_factor,
-        jnp.eye(triangular_factor.shape[0], dtype=triangular_factor.dtype),
-        lower=False,
+    """A-optimality. This one is in the optimizer's inner loop, so it takes the
+    Cholesky of the small Gram rather than the QR of the tall factor.
+
+    Both are the same identity -- ``FIM = L L^T`` gives
+    ``trace(FIM^-1) = ||L^-1||_F^2`` -- but the QR's *backward* pass on a
+    ``[3NK, P]`` matrix cost ~54 ms against a 0.007 ms forward, 63% of an entire
+    optimizer step, while a 5x5 Cholesky is free in both directions. Measured
+    agreement with the QR path is 4-6 significant figures in value and gradient
+    out to cond(FIM) ~ 1e5, which the motion constraints keep it well inside; the
+    eigenvalue criteria below stay on the factor, where accuracy matters more
+    than speed.
+    """
+    lower = jnp.linalg.cholesky(_regularized_gram(fim_factor, regularization))
+    inverse_lower = jax.scipy.linalg.solve_triangular(
+        lower, jnp.eye(lower.shape[0], dtype=lower.dtype), lower=True
     )
-    return jnp.sum(inverse_triangular_factor**2)
+    return jnp.sum(inverse_lower**2)
 
 
 def condition_number_criterion(fim_factor: jnp.ndarray, regularization: float = 1e-6) -> jnp.ndarray:

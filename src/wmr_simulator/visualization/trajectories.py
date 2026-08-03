@@ -230,7 +230,12 @@ def plot_trajectory_set(
 ):
     """Draw a whole batch of optimized trajectories in one figure: each
     trajectory gets a color, its reference dashed and its closed-loop pose
-    solid. Replaces one PDF per trajectory, which is tedious to page through."""
+    solid. Replaces one PDF per trajectory, which is tedious to page through.
+
+    ``closed_loop_poses`` may be ``[N, T, 3]`` (one rollout per trajectory) or
+    ``[N, K, T, 3]`` (one per start-pose offset). The second form is what the
+    gain-tuning design actually optimizes -- its FIM is an average over those K
+    starts -- so drawing the whole family shows the spread the objective saw."""
     os.makedirs("visualize", exist_ok=True)
     output_filename = out_path if out_path is not None else os.path.join("visualize", f"{out_prefix}.pdf")
 
@@ -238,16 +243,25 @@ def plot_trajectory_set(
     closed_loop_poses = np.asarray(closed_loop_poses, dtype=float)
     if control_point_batch is not None:
         control_point_batch = np.asarray(control_point_batch, dtype=float)
+    if closed_loop_poses.ndim == 3:
+        closed_loop_poses = closed_loop_poses[:, None]
     num_trajectories = reference_trajectories.shape[0]
+    num_realizations = closed_loop_poses.shape[1]
     colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
 
     fig, ax = plt.subplots(figsize=(8, 8))
     for index in range(num_trajectories):
         color = colors[index % len(colors)]
         reference_path = decimate_path(reference_trajectories[index][:, :2])
-        actual_path = decimate_path(closed_loop_poses[index][:, :2])
         ax.plot(reference_path[:, 0], reference_path[:, 1], color=color, linestyle="--", linewidth=0.8)
-        ax.plot(actual_path[:, 0], actual_path[:, 1], color=color, linestyle="-", linewidth=0.9)
+        for realization in range(num_realizations):
+            actual_path = decimate_path(closed_loop_poses[index, realization][:, :2])
+            ax.plot(actual_path[:, 0], actual_path[:, 1], color=color, linestyle="-",
+                    linewidth=0.9 if num_realizations == 1 else 0.6,
+                    alpha=1.0 if num_realizations == 1 else 0.75)
+            # Mark where the robot actually started, which is the offset.
+            ax.plot(actual_path[0, 0], actual_path[0, 1], marker=".", color=color,
+                    markersize=4, linestyle="none")
         if control_point_batch is not None:
             control_points = control_point_batch[index]
             ax.scatter(
@@ -262,7 +276,9 @@ def plot_trajectory_set(
 
     legend_handles = [
         Line2D([0], [0], color="black", linestyle="--", linewidth=0.8, label="Reference"),
-        Line2D([0], [0], color="black", linestyle="-", linewidth=0.9, label="Closed-Loop Actual"),
+        Line2D([0], [0], color="black", linestyle="-", linewidth=0.9,
+               label="Closed-Loop Actual" if num_realizations == 1
+               else f"Closed-Loop Actual ({num_realizations} start offsets)"),
     ]
     if control_point_batch is not None:
         legend_handles.append(

@@ -67,8 +67,6 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         "opt_steps": 1000,
         "learning_rate": 1e-2,
         "num_control_points": 8,
-        # Pin the heading at every interior waypoint (its theta becomes a
-        # decision variable). The start heading is always pinned.
         "time_scaling": "s-curve",
         "window_length": 50,
         # Include a_slip_max in the FIM design parameters. Disable when its low
@@ -130,11 +128,9 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
     },
     "tuning_trajectories": {
         "num_trajectories": 20,
-        "opt_steps": 500,
+        "opt_steps": 250,
         "learning_rate": 1e-2,
         "num_control_points": 8,
-        # Pin the heading at every interior waypoint (its theta becomes a
-        # decision variable). The start heading is always pinned.
         "time_scaling": "s-curve",
         "constraint_weight_jitter": 0.3,
         "window_length": 50,
