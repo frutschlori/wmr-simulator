@@ -4,6 +4,7 @@ import jax
 import jax.numpy as jnp
 
 from wmr_simulator.gain_parametrization import outer_gains_over_refs
+from wmr_simulator.trajectory_optimization.start_offsets import sample_initial_pose_offsets
 
 
 def clip_controller_gains(gains: jax.Array):
@@ -51,37 +52,6 @@ def make_realizations(
             offset_angle,
         ),
     )
-
-
-def sample_initial_pose_offsets(
-    key: jax.Array,
-    num_realizations: int,
-    offset_radius: float,
-    offset_angle: float,
-) -> jax.Array:
-    """Draw one start-pose offset ``[dx, dy, dtheta]`` per noise realization.
-
-    Starting every rollout exactly on the reference leaves only the error the
-    plant fails to track (~1 cm), which is why the tuning loss is nearly flat in
-    kx and ky: those gains act on tracking error, and there is almost none to
-    act on. Placing the robot off the reference start injects the transient that
-    makes them observable -- and matches deployment, where the robot is placed
-    by hand (31-100 mm and up to 9.5 deg across the exp04/exp05 logs).
-
-    Positions are uniform over the disk of ``offset_radius`` (the sqrt keeps
-    them uniform by area rather than clustered at the center); headings are
-    uniform over +/-``offset_angle``. Both 0 returns zeros, i.e. the reference
-    start, exactly as before.
-    """
-    if offset_radius <= 0.0 and offset_angle <= 0.0:
-        return jnp.zeros((num_realizations, 3), dtype=jnp.float32)
-    radius_key, bearing_key, heading_key = jax.random.split(key, 3)
-    radius = offset_radius * jnp.sqrt(jax.random.uniform(radius_key, (num_realizations,)))
-    bearing = jax.random.uniform(bearing_key, (num_realizations,), minval=-jnp.pi, maxval=jnp.pi)
-    heading = jax.random.uniform(heading_key, (num_realizations,), minval=-offset_angle, maxval=offset_angle)
-    return jnp.stack(
-        [radius * jnp.cos(bearing), radius * jnp.sin(bearing), heading], axis=1
-    ).astype(jnp.float32)
 
 
 def _resolve_initial_pose_offsets(initial_pose_offsets, num_realizations: int) -> jax.Array:

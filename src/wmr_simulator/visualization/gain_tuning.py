@@ -7,7 +7,46 @@ import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 import numpy as np
 
-from wmr_simulator.visualization.trajectories import decimate_path
+from wmr_simulator.visualization.trajectories import (
+    decimate_path,
+    draw_start_pose_arrow,
+    start_arrow_length,
+)
+
+
+def rollout_realizations(
+    pipeline,
+    robot_params,
+    reference_trajectories,
+    start_offsets,
+    controller_gains=None,
+    schedule_params=None,
+):
+    """Roll out every (trajectory, start offset) pair: ``(T, R, S, 3)`` poses.
+
+    The tuning objective is an average over the start offsets, so a figure that
+    draws one rollout per trajectory shows a single sample of what was scored.
+    Rolling out the whole family under one jitted double vmap costs one compile
+    instead of T*R eager ones.
+    """
+    import jax
+    import jax.numpy as jnp
+
+    reference_trajectories = jnp.asarray(reference_trajectories, dtype=jnp.float32)
+    start_offsets = jnp.asarray(start_offsets, dtype=jnp.float32)
+
+    def rollout(reference_states, start_offset):
+        return pipeline.run_closed_loop(
+            robot_params,
+            use_hidden_robot=True,
+            controller_gains=controller_gains,
+            schedule_params=schedule_params,
+            reference_states=reference_states,
+            initial_pose=reference_states[0, :3] + start_offset,
+        ).pose.true_states
+
+    batched = jax.jit(jax.vmap(jax.vmap(rollout, in_axes=(None, 0)), in_axes=(0, 0)))
+    return np.asarray(batched(reference_trajectories, start_offsets), dtype=float)
 
 
 def plot_gain_tuning_summary(
@@ -15,8 +54,15 @@ def plot_gain_tuning_summary(
     init_log,
     tuned_log,
     static_log=None,
+    init_realization_poses=None,
+    tuned_realization_poses=None,
+    static_realization_poses=None,
     out_prefix="gain_tuning_summary",
 ):
+    """The one-run summary. The logs are realization 0 of trajectory 0, started
+    at *its* offset rather than on the reference; the optional
+    ``*_realization_poses`` ``(R, S, 3)`` batches add the remaining realizations
+    to the trajectory panel, which is the spread the loss was averaged over."""
     os.makedirs("visualize", exist_ok=True)
     pdf_filename = os.path.join("visualize", f"{out_prefix}.pdf")
 
@@ -42,21 +88,48 @@ def plot_gain_tuning_summary(
 
     fig = plt.figure(figsize=(24, 10))
     fig.suptitle(f"Gain Tuning Summary ({out_prefix})", fontsize=16)
-    ax_traj = plt.subplot2grid((2, 10), (0, 0), colspan=1, fig=fig)
-    ax_vel = plt.subplot2grid((2, 10), (0, 1), colspan=3, fig=fig)
-    ax_wheels = plt.subplot2grid((2, 10), (0, 4), colspan=3, fig=fig)
-    ax_motor = plt.subplot2grid((2, 10), (0, 7), colspan=3, fig=fig)
+    # The trajectory panel gets two columns: it now carries every realization
+    # and its start arrow, which is unreadable in one.
+    ax_traj = plt.subplot2grid((2, 12), (0, 0), colspan=2, fig=fig)
+    ax_vel = plt.subplot2grid((2, 12), (0, 2), colspan=4, fig=fig)
+    ax_wheels = plt.subplot2grid((2, 12), (0, 6), colspan=3, fig=fig)
+    ax_motor = plt.subplot2grid((2, 12), (0, 9), colspan=3, fig=fig)
     state_axes = [
-        plt.subplot2grid((2, 10), (1, 0), colspan=3, fig=fig),
-        plt.subplot2grid((2, 10), (1, 3), colspan=4, fig=fig),
-        plt.subplot2grid((2, 10), (1, 7), colspan=3, fig=fig),
+        plt.subplot2grid((2, 12), (1, 0), colspan=4, fig=fig),
+        plt.subplot2grid((2, 12), (1, 4), colspan=4, fig=fig),
+        plt.subplot2grid((2, 12), (1, 8), colspan=4, fig=fig),
     ]
 
     ax_traj.plot(reference[:, 0], reference[:, 1], color="tab:red", linestyle="--", linewidth=1.0, label="Reference")
+    # The remaining realizations first, so the highlighted run stays on top.
+    realization_sets = (
+        (init_realization_poses, "tab:blue"),
+        (static_realization_poses, static_color),
+        (tuned_realization_poses, "tab:orange"),
+    )
+    drawn = [poses for poses, _ in realization_sets if poses is not None]
+    if drawn:
+        for poses, color in realization_sets:
+            if poses is None:
+                continue
+            for realization_poses in np.asarray(poses, dtype=float):
+                ax_traj.plot(
+                    realization_poses[:, 0], realization_poses[:, 1],
+                    color=color, linewidth=0.6, alpha=0.45,
+                )
     ax_traj.plot(init_pose[:, 0], init_pose[:, 1], color="tab:blue", linewidth=1.0, label="Initial")
     if static_pose is not None:
         ax_traj.plot(static_pose[:, 0], static_pose[:, 1], color=static_color, linewidth=1.0, label="tuned (static)")
     ax_traj.plot(tuned_pose[:, 0], tuned_pose[:, 1], color="tab:orange", linewidth=1.2, label=tuned_label)
+    # Only the highlighted run gets an arrow: the panel's time series are that
+    # one realization, and an arrow per realization reads as several starts for
+    # a single plotted run.
+    draw_start_pose_arrow(
+        ax_traj,
+        tuned_pose[0, :3],
+        "tab:orange",
+        start_arrow_length(np.concatenate([init_pose, tuned_pose], axis=0)[:, :2]),
+    )
     ax_traj.set_xlabel("x [m]")
     ax_traj.set_ylabel("y [m]")
     ax_traj.set_title("Trajectory")
@@ -222,12 +295,20 @@ def plot_trajectory_set_summary(
     robot_params,
     tuned_gains,
     reference_trajectories,
+    start_offsets,
     schedule_params=None,
     static_gains=None,
     max_trajectories: int | None = None,
     title: str = "Trajectories",
     out_prefix="trajectory_summary",
 ):
+    """Every trajectory rolled out under *every* start offset it was tuned on
+    (``start_offsets`` is (T, R, 3)), initial gains against tuned.
+
+    Drawing one rollout per trajectory would show one draw out of the R the loss
+    averages over, and would start it on the reference -- where the tracking
+    gains have almost nothing to act on and the run is not the one that was
+    scored."""
     os.makedirs("visualize", exist_ok=True)
     pdf_filename = os.path.join("visualize", f"{out_prefix}.pdf")
 
@@ -248,51 +329,47 @@ def plot_trajectory_set_summary(
     # All rollouts for the figure run as one vmapped, jitted batch per gain set
     # -- eager per-trajectory calls pay a fresh XLA compile each.
     plotted_references = reference_trajectories[:num_trajectories]
-    init_poses = np.asarray(
-        pipeline.run_closed_loop_batch(
-            robot_params,
-            plotted_references,
-            use_hidden_robot=True,
-        ).pose.true_states,
-        dtype=float,
+    plotted_offsets = np.asarray(start_offsets, dtype=float)[:num_trajectories]
+    init_poses = rollout_realizations(
+        pipeline, robot_params, plotted_references, plotted_offsets
     )
-    tuned_poses = np.asarray(
-        pipeline.run_closed_loop_batch(
-            robot_params,
-            plotted_references,
-            use_hidden_robot=True,
-            controller_gains=tuned_gains,
-            schedule_params=schedule_params,
-        ).pose.true_states,
-        dtype=float,
+    tuned_poses = rollout_realizations(
+        pipeline,
+        robot_params,
+        plotted_references,
+        plotted_offsets,
+        controller_gains=tuned_gains,
+        schedule_params=schedule_params,
     )
     static_poses = (
         None
         if static_gains is None
-        else np.asarray(
-            pipeline.run_closed_loop_batch(
-                robot_params,
-                plotted_references,
-                use_hidden_robot=True,
-                controller_gains=static_gains,
-            ).pose.true_states,
-            dtype=float,
+        else rollout_realizations(
+            pipeline,
+            robot_params,
+            plotted_references,
+            plotted_offsets,
+            controller_gains=static_gains,
         )
     )
+    num_realizations = init_poses.shape[1]
+    arrow_length = start_arrow_length(tuned_poses[..., :2])
 
     fig, ax = plt.subplots(figsize=(8, 8))
     for index, reference_states in enumerate(plotted_references):
         color = colors[index % len(colors)]
         reference_path = decimate_path(reference_states[:, :2])
-        init_pose = decimate_path(init_poses[index])
-        tuned_pose = decimate_path(tuned_poses[index])
-
         ax.plot(reference_path[:, 0], reference_path[:, 1], color=color, linestyle="--", linewidth=0.8)
-        ax.plot(init_pose[:, 0], init_pose[:, 1], color=color, linestyle=":", linewidth=0.7)
-        if static_poses is not None:
-            static_pose = decimate_path(static_poses[index])
-            ax.plot(static_pose[:, 0], static_pose[:, 1], color=color, linestyle="-.", linewidth=0.9)
-        ax.plot(tuned_pose[:, 0], tuned_pose[:, 1], color=color, linestyle="-", linewidth=0.9)
+        for realization in range(num_realizations):
+            init_pose = decimate_path(init_poses[index, realization])
+            tuned_pose = decimate_path(tuned_poses[index, realization])
+            ax.plot(init_pose[:, 0], init_pose[:, 1], color=color, linestyle=":", linewidth=0.7, alpha=0.8)
+            if static_poses is not None:
+                static_pose = decimate_path(static_poses[index, realization])
+                ax.plot(static_pose[:, 0], static_pose[:, 1], color=color, linestyle="-.", linewidth=0.9, alpha=0.8)
+            ax.plot(tuned_pose[:, 0], tuned_pose[:, 1], color=color, linestyle="-", linewidth=0.9, alpha=0.8)
+            # The start pose is shared by all three rollouts of this realization.
+            draw_start_pose_arrow(ax, tuned_poses[index, realization][0, :3], color, arrow_length)
 
     legend_handles = [
         Line2D([0], [0], color="black", linestyle="--", linewidth=0.8, label="Reference"),
@@ -308,7 +385,7 @@ def plot_trajectory_set_summary(
     ax.legend(handles=legend_handles, loc="best")
     ax.set_xlabel("x [m]")
     ax.set_ylabel("y [m]")
-    ax.set_title(f"{title} ({num_trajectories} shown)")
+    ax.set_title(f"{title} ({num_trajectories} shown, {num_realizations} start offsets each)")
     ax.set_aspect("equal", adjustable="box")
     ax.grid(True)
     fig.tight_layout()
@@ -322,6 +399,7 @@ def plot_training_trajectory_summary(
     pipeline,
     robot_params,
     tuned_gains,
+    start_offsets,
     schedule_params=None,
     static_gains=None,
     max_trajectories: int | None = 5,
@@ -332,6 +410,7 @@ def plot_training_trajectory_summary(
         robot_params=robot_params,
         tuned_gains=tuned_gains,
         reference_trajectories=pipeline.training_reference_trajectories,
+        start_offsets=start_offsets,
         schedule_params=schedule_params,
         static_gains=static_gains,
         max_trajectories=max_trajectories,
@@ -344,6 +423,7 @@ def plot_validation_trajectory_summary(
     pipeline,
     robot_params,
     tuned_gains,
+    start_offsets,
     schedule_params=None,
     static_gains=None,
     out_prefix="summary_validation",
@@ -353,6 +433,7 @@ def plot_validation_trajectory_summary(
         robot_params=robot_params,
         tuned_gains=tuned_gains,
         reference_trajectories=pipeline.validation_reference_trajectories,
+        start_offsets=start_offsets,
         schedule_params=schedule_params,
         static_gains=static_gains,
         max_trajectories=None,

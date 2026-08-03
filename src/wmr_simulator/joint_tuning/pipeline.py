@@ -51,7 +51,7 @@ from wmr_simulator.gain_tuning.optimizers import (
     controller_gains_to_optimizer_values,
 )
 from wmr_simulator.gain_tuning.pipeline import ControllerTuningPipeline, resolve_gain_robot_params
-from wmr_simulator.joint_tuning.start_offsets import (
+from wmr_simulator.trajectory_optimization.start_offsets import (
     START_OFFSET_MODE_STATIC,
     inverse_squash_start_offsets,
     normalize_start_offset_mode,
@@ -65,7 +65,10 @@ from wmr_simulator.trajectory_optimization.constraints import (
 )
 from wmr_simulator.trajectory_optimization.objectives import (
     DEFAULT_CONSTRAINT_VIOLATION_TOLERANCE,
+    DEFAULT_CRITERION,
     fim_loss,
+    fim_objective_term,
+    normalize_criterion,
 )
 from wmr_simulator.trajectory_optimization.optimizers import (
     CONVERGENCE_REL_TOL,
@@ -80,6 +83,35 @@ from wmr_simulator.trajectory_optimization.pipeline import (
 
 GAIN_NAMES = ("kx", "ky", "kth", "kpmotor", "kimotor")
 CONSTRAINT_COMPONENT_NAMES = ("v", "a", "lateral", "omega", "alpha")
+
+# How the two blocks are interleaved. ``alternating`` is the scheme this package
+# exists for; ``sequential`` is the baseline it has to beat -- the same two
+# blocks, the same shared realizations and the same per-block step counts, but
+# run one after the other, so the trajectories are designed against the initial
+# gains only and never see the gains the tuner converges to.
+MODE_ALTERNATING = "alternating"
+MODE_SEQUENTIAL = "sequential"
+MODES = (MODE_ALTERNATING, MODE_SEQUENTIAL)
+
+
+def normalize_mode(mode: str) -> str:
+    mode = mode.strip().lower()
+    if mode not in MODES:
+        raise ValueError(f"Unsupported joint tuning mode '{mode}'. Expected one of {list(MODES)}.")
+    return mode
+
+
+def _round_schedule(mode: str, num_rounds: int, warm_start_rounds: int) -> list[tuple[bool, bool]]:
+    """``(run_gain_block, run_trajectory_block)`` per round.
+
+    Both modes take exactly ``num_rounds`` trajectory steps and
+    ``num_rounds - warm_start_rounds`` gain steps, so a comparison between them
+    is a comparison of the *interleaving* and not of the budget.
+    """
+    gain_steps = max(0, num_rounds - warm_start_rounds)
+    if mode == MODE_ALTERNATING:
+        return [(index >= warm_start_rounds, True) for index in range(num_rounds)]
+    return [(False, True)] * num_rounds + [(True, False)] * gain_steps
 
 
 class JointState(NamedTuple):
@@ -103,6 +135,8 @@ class JointTuningResult(NamedTuple):
     reference_states: jax.Array         # (T, N, 8)
     start_offsets: jax.Array            # (R, 3)
     realizations: Realizations
+    initial_decision_variables: jax.Array       # (T, 2K) before any step
+    warm_start_decision_variables: jax.Array    # (T, 2K) when the gain block first ran
     state: JointState                   # both Adam states, as the loop left them
     trajectory_pipeline: TrajectoryOptimizationPipeline
     gain_pipeline: ControllerTuningPipeline
@@ -124,6 +158,7 @@ def _max_fractional_violation(components: jax.Array) -> jax.Array:
 def run_joint_tuning(
     problem_path: str,
     *,
+    mode: str = MODE_ALTERNATING,
     num_rounds: int = 250,
     warm_start_rounds: int = 50,
     num_trajectories: int = 8,
@@ -136,6 +171,8 @@ def run_joint_tuning(
     init_offset_angle: float = float(GAIN_TUNING_DEFAULTS["init_offset_angle"]),
     constraint_violation_tolerance: float = DEFAULT_CONSTRAINT_VIOLATION_TOLERANCE,
     constraint_smooth_max_beta: float = 20.0,
+    criterion: str = DEFAULT_CRITERION,
+    wheel_lp_tau: float | None = None,
     time_scaling: str = "s-curve",
     seed: int = 0,
     k_min_stab: float = float(GAIN_TUNING_DEFAULTS["k_min_stab"]),
@@ -165,6 +202,9 @@ def run_joint_tuning(
     if num_realizations <= 0:
         raise ValueError("num_realizations must be positive.")
     start_offset_mode = normalize_start_offset_mode(start_offset_mode)
+    mode = normalize_mode(mode)
+    criterion = normalize_criterion(criterion)
+    schedule = _round_schedule(mode, num_rounds, warm_start_rounds)
 
     construct_start = time.time()
     # One bundle, built once, handed to both sides: the trajectory designer's FIM
@@ -184,6 +224,8 @@ def run_joint_tuning(
         time_scaling=time_scaling,
         objective_mode=OBJECTIVE_MODE_GAIN_TUNING,
         realizations=realizations,
+        wheel_lp_tau=wheel_lp_tau,
+        criterion=criterion,
     )
     gain_pipeline = ControllerTuningPipeline(
         problem_path,
@@ -237,7 +279,7 @@ def run_joint_tuning(
             gains=gains,
             realizations=realizations_from_free(free_offsets),
         )
-        fim_term = fim_loss(fim_factor)
+        fim_term = fim_loss(fim_factor, criterion)
         components = constraint_loss_components_from_reference_states(
             reference_states=reference_states,
             dt=dt,
@@ -247,7 +289,10 @@ def run_joint_tuning(
         )
         component_vector = jnp.stack([components[name] for name in CONSTRAINT_COMPONENT_NAMES])
         constraint_term = jnp.sum(component_vector)
-        total = jnp.log(fim_term) + constraint_term / constraint_violation_tolerance
+        total = (
+            fim_objective_term(fim_factor, criterion)
+            + constraint_term / constraint_violation_tolerance
+        )
         return total, (fim_term, constraint_term, component_vector)
 
     def trajectory_loss(trajectory_params, gains):
@@ -278,6 +323,14 @@ def run_joint_tuning(
         )
         loss_post, _ = trajectory_loss(next_trajectory_params, gains)
         return next_trajectory_params, next_optimizer_state, loss_pre, loss_post, aux
+
+    @jax.jit
+    def trajectory_eval(trajectory_params, gains):
+        """The trajectory diagnostics without a step, for rounds the schedule
+        skips the trajectory block (sequential mode's gain phase). The history
+        stays rectangular; the post-step entry is NaN so the uphill fraction
+        never counts a round in which nothing moved."""
+        return trajectory_loss(trajectory_params, gains)
 
     # --------------------------------------------------------------------- gains
     def gain_loss(gain_values, decision_variables, free_offsets):
@@ -352,9 +405,12 @@ def run_joint_tuning(
     }
     if verbose:
         print(
-            f"Joint tuning: {num_rounds} rounds ({warm_start_rounds} warm-start), "
+            f"Joint tuning [{mode}]: {len(schedule)} rounds "
+            f"({sum(run_trajectory for _, run_trajectory in schedule)} trajectory steps, "
+            f"{sum(run_gain for run_gain, _ in schedule)} gain steps), "
             f"{num_trajectories} trajectories x {num_control_points} control points, "
-            f"{num_realizations} realizations, start offsets '{start_offset_mode}'."
+            f"{num_realizations} realizations, start offsets '{start_offset_mode}', "
+            f"wheel_lp_tau {trajectory_pipeline.wheel_lp_tau:.4g} s."
         )
         print(
             f"  learning rates: trajectory {trajectory_learning_rate:.3g}, "
@@ -365,8 +421,13 @@ def run_joint_tuning(
     converged_at_round = None
     window_reference_loss = None
     previous_gain_loss = None
-    for round_index in range(num_rounds):
-        alternating = round_index >= warm_start_rounds
+    gain_steps_taken = 0
+    warm_start_decision_variables = state.decision_variables
+    for round_index, (alternating, run_trajectory) in enumerate(schedule):
+        if alternating and gain_steps_taken == 0:
+            # The trajectories as the gain block first sees them: everything
+            # after this point is what the alternation itself did.
+            warm_start_decision_variables = state.decision_variables
         if alternating:
             (gain_values, gain_opt_state, gain_loss_pre, gain_loss_post) = gain_step(
                 state.gain_values,
@@ -381,15 +442,26 @@ def run_joint_tuning(
         gains = controller_gains_from_optimizer_values(
             gain_values, k_min_stab=k_min_stab, k_max_stab=k_max_stab, k_max_rest=k_max_rest
         )
-        (
-            trajectory_params,
-            trajectory_opt_state,
-            trajectory_loss_pre,
-            trajectory_loss_post,
-            (per_trajectory_loss, fim_terms, constraint_terms, component_vectors),
-        ) = trajectory_step(
-            (state.decision_variables, state.free_offsets), state.trajectory_opt_state, gains
-        )
+        if run_trajectory:
+            (
+                trajectory_params,
+                trajectory_opt_state,
+                trajectory_loss_pre,
+                trajectory_loss_post,
+                (per_trajectory_loss, fim_terms, constraint_terms, component_vectors),
+            ) = trajectory_step(
+                (state.decision_variables, state.free_offsets), state.trajectory_opt_state, gains
+            )
+        else:
+            trajectory_params = (state.decision_variables, state.free_offsets)
+            trajectory_opt_state = state.trajectory_opt_state
+            trajectory_loss_pre, (
+                per_trajectory_loss,
+                fim_terms,
+                constraint_terms,
+                component_vectors,
+            ) = trajectory_eval(trajectory_params, gains)
+            trajectory_loss_post = jnp.nan
         state = JointState(
             gain_values=gain_values,
             gain_opt_state=gain_opt_state,
@@ -403,7 +475,7 @@ def run_joint_tuning(
         history["trajectory_loss_pre"].append(float(trajectory_loss_pre))
         history["trajectory_loss_post"].append(float(trajectory_loss_post))
         history["fim_loss"].append(np.asarray(fim_terms, dtype=float))
-        history["log_fim_loss"].append(np.asarray(jnp.log(fim_terms), dtype=float))
+        history["log_fim_loss"].append(np.asarray(fim_terms, dtype=float))
         history["constraint_loss"].append(np.asarray(constraint_terms, dtype=float))
         history["max_fractional_violation"].append(
             np.asarray(_max_fractional_violation(component_vectors), dtype=float)
@@ -418,7 +490,9 @@ def run_joint_tuning(
             print(f"  round {round_index}: gain loss is not finite; stopping.")
             break
 
-        if verbose and (round_index % max(1, num_rounds // 20) == 0 or round_index == num_rounds - 1):
+        if verbose and (
+            round_index % max(1, len(schedule) // 20) == 0 or round_index == len(schedule) - 1
+        ):
             gain_text = "warm start" if not alternating else f"{float(gain_loss_pre):.6f}"
             print(
                 f"  round {round_index:>4}: gain loss {gain_text}, "
@@ -431,10 +505,11 @@ def run_joint_tuning(
         # the gain loss: progress slowed to a crawl over a whole window, rather
         # than a single flat round. Only meaningful once the gains actually move.
         if alternating:
+            gain_steps_taken += 1
             previous_gain_loss = float(gain_loss_pre)
             if window_reference_loss is None:
                 window_reference_loss = previous_gain_loss
-            elif (round_index - warm_start_rounds + 1) % CONVERGENCE_WINDOW == 0:
+            elif gain_steps_taken % CONVERGENCE_WINDOW == 0:
                 improvement = float(
                     relative_improvement(window_reference_loss, previous_gain_loss)
                 )
@@ -496,13 +571,17 @@ def run_joint_tuning(
         reference_states=reference_states,
         start_offsets=start_offsets,
         realizations=realizations._replace(start_offsets=start_offsets),
+        initial_decision_variables=decision_variables,
+        warm_start_decision_variables=warm_start_decision_variables,
         state=state,
         trajectory_pipeline=trajectory_pipeline,
         gain_pipeline=gain_pipeline,
         history=history,
         config={
             "problem_path": problem_path,
+            "mode": mode,
             "num_rounds": num_rounds,
+            "rounds_scheduled": len(schedule),
             "warm_start_rounds": warm_start_rounds,
             "num_trajectories": num_trajectories,
             "num_control_points": num_control_points,
@@ -513,15 +592,16 @@ def run_joint_tuning(
             "init_offset_radius": init_offset_radius,
             "init_offset_angle": init_offset_angle,
             "constraint_violation_tolerance": constraint_violation_tolerance,
+            "criterion": criterion,
             "time_scaling": trajectory_pipeline.time_scaling,
             "seed": seed,
             "k_min_stab": k_min_stab,
             "k_max_stab": k_max_stab,
             "k_max_rest": k_max_rest,
-            # The two sides do not roll out the same plant: trajectory
-            # optimization zeroes the encoder low-pass for FIM conditioning
-            # while the gain tuner keeps it. Recorded, not silently fixed.
-            "wheel_lp_tau_asymmetry": True,
+            # Both sides now roll out the same plant. Recorded per run because
+            # the LP-on/LP-off ablation is exactly a comparison over this field.
+            "wheel_lp_tau": float(trajectory_pipeline.wheel_lp_tau),
+            "gain_wheel_lp_tau": float(gain_pipeline.estimator.wheel_lp_tau),
         },
         timing={
             "construct_s": construct_seconds,

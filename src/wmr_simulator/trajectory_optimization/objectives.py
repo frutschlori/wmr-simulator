@@ -20,12 +20,52 @@ from wmr_simulator.trajectory_optimization.fim import max_inverse_eigenvalue, tr
 DEFAULT_CONSTRAINT_VIOLATION_TOLERANCE = 0.05
 
 
-def fim_loss(fim_factor: jnp.ndarray) -> jnp.ndarray:
+CRITERION_A_OPTIMALITY = "a-optimality"
+CRITERION_D_OPTIMALITY = "d-optimality"
+CRITERION_E_OPTIMALITY = "e-optimality"
+CRITERIA = (CRITERION_A_OPTIMALITY, CRITERION_D_OPTIMALITY, CRITERION_E_OPTIMALITY)
+DEFAULT_CRITERION = CRITERION_A_OPTIMALITY
+
+
+def normalize_criterion(criterion: str) -> str:
+    criterion = criterion.strip().lower().replace("_", "-")
+    if criterion not in CRITERIA:
+        raise ValueError(
+            f"Unsupported design criterion '{criterion}'. Expected one of {list(CRITERIA)}."
+        )
+    return criterion
+
+
+def fim_loss(fim_factor: jnp.ndarray, criterion: str = DEFAULT_CRITERION) -> jnp.ndarray:
     """Design criterion, on the FIM *factor* (``FIM = fim_factor^T fim_factor``);
-    see ``fim.py`` on why the criteria never take the assembled FIM."""
-    # return max_inverse_eigenvalue(fim_factor)
+    see ``fim.py`` on why the criteria never take the assembled FIM.
+
+    Smaller is better for all three: a sum of relative variances (A), the
+    negative log-determinant of the information (D), the largest relative
+    variance (E).
+    """
+    if criterion == CRITERION_D_OPTIMALITY:
+        return logdet_criterion(fim_factor)
+    if criterion == CRITERION_E_OPTIMALITY:
+        return max_inverse_eigenvalue(fim_factor)
     return trace_inverse_criterion(fim_factor)
-    # return logdet_criterion(fim_factor)
+
+
+def fim_objective_term(fim_factor: jnp.ndarray, criterion: str = DEFAULT_CRITERION) -> jnp.ndarray:
+    """The FIM half of the objective, in log-information units for every
+    criterion.
+
+    A and E are variances, so they get the ``log`` that makes their gradient the
+    *relative* change in the criterion. D is ``-logdet(FIM)``, which is already
+    in exactly those units -- and is signed, so a ``log`` of it would be NaN
+    half the time. Putting all criteria on the same scale is what lets the one
+    ``constraint_violation_tolerance`` keep its meaning when the criterion is
+    swapped: a ``g_tol`` fractional over-limit costs a ``g_tol`` relative loss
+    of information either way.
+    """
+    if criterion == CRITERION_D_OPTIMALITY:
+        return fim_loss(fim_factor, criterion)
+    return jnp.log(fim_loss(fim_factor, criterion))
 
 
 def trajectory_objective(
@@ -36,10 +76,12 @@ def trajectory_objective(
     weights: dict,
     smooth_max_beta: float = 20.0,
     constraint_violation_tolerance: float = DEFAULT_CONSTRAINT_VIOLATION_TOLERANCE,
+    criterion: str = DEFAULT_CRITERION,
 ) -> jnp.ndarray:
-    """``log(fim_loss) + constraint_loss / constraint_violation_tolerance``.
+    """``fim_objective_term + constraint_loss / constraint_violation_tolerance``.
 
-    The log is monotone, so at a fixed constraint level it does not move the
+    For the default A-optimality the first term is ``log(trace(FIM^-1))``. The
+    log is monotone, so at a fixed constraint level it does not move the
     minimizer; what it changes is that the FIM term's gradient becomes the
     *relative* change in the criterion, which makes it scale-free with no state
     to carry. That matters for alternating gain/trajectory optimization, where
@@ -48,7 +90,7 @@ def trajectory_objective(
     refreshed, make the objective discontinuous between rounds and corrupt
     Adam's moments.
     """
-    return jnp.log(fim_loss(fim_factor)) + (
+    return fim_objective_term(fim_factor, criterion) + (
         1.0 / constraint_violation_tolerance
     ) * constraint_loss_from_reference_states(
         reference_states=reference_states,

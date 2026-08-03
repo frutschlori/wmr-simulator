@@ -30,14 +30,14 @@ GAIN_TUNING_DEFAULTS: dict = {
     # optimum, ky's whole range moves the loss by ~5%, one noise sigma). The
     # defaults match how the robot is actually placed by hand across the
     # exp04/exp05 logs: 31-100 mm and up to 9.5 deg. Both 0 disables.
-    "init_offset_radius": 0.2,
-    "init_offset_angle": 0.2,
+    "init_offset_radius": 0.1,
+    "init_offset_angle": 0.3,
     "num_lhs_points": 500,
     "num_adam_optimizations": 3,
     "validation_split": 0.2,
-    "velocity_tracking_weight": 3.0,
+    "velocity_tracking_weight": 1.2,
     "input_weight": 0.0,
-    "input_delta_weight": 1.0,
+    "input_delta_weight": 0.8,
     # Penalty on step-to-step change in the robot yaw rate (normalized by
     # omega_max); discourages gains that oscillate omega. 0 disables.
     "omega_delta_weight": 0.0,

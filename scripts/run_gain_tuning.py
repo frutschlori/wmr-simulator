@@ -10,6 +10,7 @@ from wmr_simulator.visualization.gain_tuning import (
     plot_gain_tuning_summary,
     plot_training_trajectory_summary,
     plot_validation_trajectory_summary,
+    rollout_realizations,
 )
 from wmr_simulator.visualization.identification import plot_loss_history
 
@@ -66,7 +67,7 @@ def save_tuning_result(out_path: str, problem_path: str, result: dict) -> None:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--problem", type=str, default="problems/pololu_gains.yaml")
-    parser.add_argument("--reference-trajectories-dir", type=str, default="trajectory_exports/tuning_optimized_5000it")
+    parser.add_argument("--reference-trajectories-dir", type=str, default="trajectory_exports/gain_optimized_aktuell")
     parser.add_argument("--validation-split", type=float, default=GAIN_TUNING_DEFAULTS["validation_split"])
     # Optimization hyper-parameters
     parser.add_argument("--num-lhs-points", type=int, default=GAIN_TUNING_DEFAULTS["num_lhs_points"]) # points on initial search grid, 0 to disable
@@ -208,17 +209,41 @@ def main():
 
     save_tuning_result(args.out, args.problem, result)
 
+    # The summary panels show all realizations of the summary trajectory, each
+    # from its own start offset -- the conditions the loss was averaged over.
+    summary_offsets = result["summary_start_offsets"][None, ...]
+    summary_references = pipeline.training_reference_trajectories[:1]
+    summary_realization_poses = {
+        name: rollout_realizations(
+            pipeline,
+            robot_params,
+            summary_references,
+            summary_offsets,
+            controller_gains=gains,
+            schedule_params=schedule,
+        )[0]
+        for name, gains, schedule in (
+            ("init", None, None),
+            ("tuned", result["optimized_gains"], result["schedule_params"]),
+            ("static", result["static_gains"], None),
+        )
+        if not (name == "static" and result["static_gains"] is None)
+    }
     plot_gain_tuning_summary(
         pipeline,
         init_log=result["init_hidden_log"],
         tuned_log=result["final_hidden_log"],
         static_log=result.get("static_hidden_log"),
+        init_realization_poses=summary_realization_poses["init"],
+        tuned_realization_poses=summary_realization_poses["tuned"],
+        static_realization_poses=summary_realization_poses.get("static"),
         out_prefix="summary_gain_tuning",
     )
     plot_training_trajectory_summary(
         pipeline,
         robot_params=robot_params,
         tuned_gains=result["optimized_gains"],
+        start_offsets=result["training_start_offsets"],
         schedule_params=result["schedule_params"],
         static_gains=result["static_gains"],
         max_trajectories=args.num_summary_training_trajectories,
@@ -228,6 +253,7 @@ def main():
         pipeline,
         robot_params=robot_params,
         tuned_gains=result["optimized_gains"],
+        start_offsets=result["validation_start_offsets"],
         schedule_params=result["schedule_params"],
         static_gains=result["static_gains"],
         out_prefix="summary_validation",

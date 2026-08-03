@@ -220,10 +220,41 @@ def plot_trajectory(
     print(f"Trajectory PDF saved at: {output_filename}")
 
 
+def draw_start_pose_arrow(ax, pose, color, length: float, alpha: float = 0.9) -> None:
+    """Mark where a rollout started *and which way it faced*.
+
+    The start offset is three numbers, and a dot only shows two of them: two
+    rollouts starting from the same point with opposite headings are the same
+    marker but very different runs, so the heading gets drawn.
+    """
+    x, y, theta = float(pose[0]), float(pose[1]), float(pose[2])
+    ax.annotate(
+        "",
+        xy=(x + length * np.cos(theta), y + length * np.sin(theta)),
+        xytext=(x, y),
+        arrowprops=dict(arrowstyle="-|>", color=color, linewidth=0.9, alpha=alpha, shrinkA=0, shrinkB=0),
+        annotation_clip=False,
+    )
+
+
+def start_arrow_length(paths) -> float:
+    """Arrow length scaled to the figure: 4% of the drawn extent, so the arrows
+    stay readable whether the trajectories span 1 m or 10."""
+    paths = np.asarray(paths, dtype=float).reshape(-1, np.asarray(paths).shape[-1])
+    if paths.size == 0:
+        return 0.05
+    extent = float(
+        max(
+            np.nanmax(paths[:, 0]) - np.nanmin(paths[:, 0]),
+            np.nanmax(paths[:, 1]) - np.nanmin(paths[:, 1]),
+        )
+    )
+    return max(0.04 * extent, 1e-3)
+
+
 def plot_trajectory_set(
     reference_trajectories,
     closed_loop_poses,
-    control_point_batch=None,
     out_prefix="trajectory_set",
     out_path=None,
     title="Optimized Trajectories",
@@ -241,14 +272,13 @@ def plot_trajectory_set(
 
     reference_trajectories = np.asarray(reference_trajectories, dtype=float)
     closed_loop_poses = np.asarray(closed_loop_poses, dtype=float)
-    if control_point_batch is not None:
-        control_point_batch = np.asarray(control_point_batch, dtype=float)
     if closed_loop_poses.ndim == 3:
         closed_loop_poses = closed_loop_poses[:, None]
     num_trajectories = reference_trajectories.shape[0]
     num_realizations = closed_loop_poses.shape[1]
     colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
 
+    arrow_length = start_arrow_length(closed_loop_poses[..., :2])
     fig, ax = plt.subplots(figsize=(8, 8))
     for index in range(num_trajectories):
         color = colors[index % len(colors)]
@@ -259,20 +289,11 @@ def plot_trajectory_set(
             ax.plot(actual_path[:, 0], actual_path[:, 1], color=color, linestyle="-",
                     linewidth=0.9 if num_realizations == 1 else 0.6,
                     alpha=1.0 if num_realizations == 1 else 0.75)
-            # Mark where the robot actually started, which is the offset.
+            # Mark where the robot actually started, which is the offset, and
+            # which way it faced -- the heading is a design variable too.
             ax.plot(actual_path[0, 0], actual_path[0, 1], marker=".", color=color,
                     markersize=4, linestyle="none")
-        if control_point_batch is not None:
-            control_points = control_point_batch[index]
-            ax.scatter(
-                control_points[:, 0],
-                control_points[:, 1],
-                marker="o",
-                s=18,
-                facecolors="none",
-                edgecolors=color,
-                linewidth=0.8,
-            )
+            draw_start_pose_arrow(ax, closed_loop_poses[index, realization][0, :3], color, arrow_length)
 
     legend_handles = [
         Line2D([0], [0], color="black", linestyle="--", linewidth=0.8, label="Reference"),
@@ -280,19 +301,6 @@ def plot_trajectory_set(
                label="Closed-Loop Actual" if num_realizations == 1
                else f"Closed-Loop Actual ({num_realizations} start offsets)"),
     ]
-    if control_point_batch is not None:
-        legend_handles.append(
-            Line2D(
-                [0],
-                [0],
-                color="black",
-                linestyle="none",
-                marker="o",
-                markerfacecolor="none",
-                markersize=5,
-                label="Waypoints",
-            )
-        )
     ax.legend(handles=legend_handles, loc="best")
     ax.set_xlabel("x [m]")
     ax.set_ylabel("y [m]")

@@ -28,9 +28,22 @@ from wmr_simulator.trajectory_optimization.fim import (
     default_measurement_variances,
     fim_from_factor,
 )
+from wmr_simulator.trajectory_optimization.start_offsets import (
+    START_OFFSET_MODE_RANDOM,
+    START_OFFSET_MODE_STATIC,
+    START_OFFSET_MODES,
+    inverse_squash_start_offsets,
+    normalize_start_offset_mode,
+    resolve_start_offsets,
+    start_offset_mask,
+    static_start_offsets,
+)
 from wmr_simulator.trajectory_optimization.objectives import (
     DEFAULT_CONSTRAINT_VIOLATION_TOLERANCE,
+    DEFAULT_CRITERION,
     fim_loss,
+    fim_objective_term,
+    normalize_criterion,
     trajectory_objective,
 )
 from wmr_simulator.trajectory_optimization.optimizers import optimize_control_points
@@ -144,11 +157,21 @@ def normalize_objective_mode(objective_mode: str) -> str:
     return objective_mode
 
 
-def reference_states_export_payload(reference_states, dt: float, **metadata):
+def reference_states_export_payload(reference_states, dt: float, start_offsets=None, **metadata):
+    """The pickle a designed trajectory ships as.
+
+    ``start_offsets`` (R, 3) are the start-pose offsets the trajectory was
+    designed under -- the realizations the FIM was averaged over. They travel
+    with the curve because the design is only informative about the gains
+    *under those conditions*: the gain tuner reads them back and rolls out on
+    exactly the starts the designer scored, instead of drawing its own.
+    """
     payload = {
         "reference_states": np.asarray(reference_states),
         "dt": float(dt),
     }
+    if start_offsets is not None:
+        payload["start_offsets"] = np.asarray(start_offsets, dtype=float)
     payload.update(metadata)
     return payload
 
@@ -162,6 +185,11 @@ class TrajectoryOptimizationPipeline:
         fim_a_slip_max: bool = True,
         num_realizations: int = DEFAULT_NUM_REALIZATIONS,
         realizations: Realizations | None = None,
+        wheel_lp_tau: float | None = None,
+        criterion: str = DEFAULT_CRITERION,
+        start_offset_mode: str = START_OFFSET_MODE_RANDOM,
+        offset_displacement_step_factor: float = 1.0,
+        offset_heading_step_factor: float = 1.0,
     ):
         self.problem = ProblemDefinition(problem_path)
         self.simulation = SimulationPipeline(problem_path=problem_path, seed=0, reference_trajectories_dir=None)
@@ -169,13 +197,21 @@ class TrajectoryOptimizationPipeline:
         self.controller = self.simulation.controller
         self.controller_gains = self.simulation.gains
         self.estimator = self.simulation.estimator
-        # The encoder low-pass makes the simulated motor loop near-oscillatory,
-        # which ill-conditions the FIM and roughens the descent; trajectory
-        # optimization runs without it (simulation, identification, and gain
-        # tuning keep the filter).
-        self.estimator.wheel_lp_tau = 0.0
+        # The encoder low-pass is part of the plant the designed trajectory will
+        # be driven on: the firmware filters the raw wheel speeds with
+        # tau = 1/(2*pi*3 Hz) = 0.053 s at its 10 ms inner step
+        # (firmware/src/inner_controller.rs), which is exactly what the estimator
+        # reproduces, so the simulated timing is not the problem. It is therefore
+        # kept by default, matching gain tuning and simulation; ``wheel_lp_tau``
+        # overrides it (0.0 disables) for controlled LP-on/LP-off ablations.
+        if wheel_lp_tau is not None:
+            self.estimator.wheel_lp_tau = float(wheel_lp_tau)
+        self.wheel_lp_tau = float(self.estimator.wheel_lp_tau)
         self.time_scaling = normalize_time_scaling(time_scaling)
         self.objective_mode = normalize_objective_mode(objective_mode)
+        # Which design criterion the objective minimizes. It says nothing about
+        # the curve or the parameters -- only about how a FIM is scored.
+        self.criterion = normalize_criterion(criterion)
         # A BSplinePlan is just the basis sampled on this pipeline's time grid,
         # constant given (num_control_points, time_scaling); cache so repeated
         # eager calls (plotting, tests) don't resample it.
@@ -189,23 +225,66 @@ class TrajectoryOptimizationPipeline:
         # common random numbers keep it a deterministic function of the control
         # points. Pass ``realizations`` to score the design on the *same*
         # conditions the gain tuner uses (joint_tuning does).
+        self.offset_radius = float(GAIN_TUNING_DEFAULTS["init_offset_radius"])
+        self.offset_angle = float(GAIN_TUNING_DEFAULTS["init_offset_angle"])
         self.realizations = (
             make_realizations(
                 self.simulation.robot_key,
                 self.simulation.estimator_key,
                 int(num_realizations),
-                float(GAIN_TUNING_DEFAULTS["init_offset_radius"]),
-                float(GAIN_TUNING_DEFAULTS["init_offset_angle"]),
+                self.offset_radius,
+                self.offset_angle,
             )
             if realizations is None
             else realizations
         )
+        # Which components of the start offsets the optimizer may move. The
+        # offsets are decision variables of the *curve's* problem -- they are
+        # scored by the same FIM -- so they ride along in the decision vector,
+        # appended after the control points. ``random``/``static`` leave the
+        # drawn bundle alone and the tail is empty.
+        self.start_offset_mode = normalize_start_offset_mode(start_offset_mode)
+        self.start_offset_mask = start_offset_mask(self.start_offset_mode)
+        if self.start_offset_mode == START_OFFSET_MODE_STATIC:
+            self.realizations = self.realizations._replace(
+                start_offsets=static_start_offsets(
+                    int(self.realizations.robot_keys.shape[0]), self.offset_radius, self.offset_angle
+                )
+            )
+        self.optimize_start_offsets = bool(np.any(np.asarray(self.start_offset_mask)))
+        if self.optimize_start_offsets and self.objective_mode != OBJECTIVE_MODE_GAIN_TUNING:
+            raise ValueError(
+                f"start_offset_mode '{self.start_offset_mode}' optimizes the rollout start poses, "
+                "which only exist as design variables in gain-tuning mode; identification starts "
+                "where the robot is physically placed."
+            )
+        self.num_offset_variables = (
+            3 * int(self.realizations.start_offsets.shape[0]) if self.optimize_start_offsets else 0
+        )
+        # The free variables start *at* the drawn (or static) offsets, so an
+        # optimizing run begins under exactly the conditions a frozen one uses.
+        self.initial_free_offsets = inverse_squash_start_offsets(
+            self.realizations.start_offsets, self.offset_radius, self.offset_angle
+        )
+        # Per-block step factors. Adam normalizes the update magnitude per
+        # coordinate, so scaling the offset entries of the update is exactly an
+        # effective learning rate of factor * learning_rate for them -- which is
+        # the point: the control-point learning rate is tuned and known to work,
+        # and the free offsets live on a different scale (unitless, pre-squash,
+        # against a radius of offset_radius and an angle of offset_angle), so
+        # they need their own pace rather than a rate that moves both.
+        self.offset_displacement_step_factor = float(offset_displacement_step_factor)
+        self.offset_heading_step_factor = float(offset_heading_step_factor)
+        if min(self.offset_displacement_step_factor, self.offset_heading_step_factor) < 0.0:
+            raise ValueError("Offset step factors must be non-negative.")
         self.control_points = self.initial_control_points(DEFAULT_NUM_CONTROL_POINTS)
         self.reference_states = self.reference_states_from_control_points(self.control_points)
         self._set_closed_loop_log(self.run_closed_loop_deployment(reference_states=self.reference_states))
         self.loss_history = None
         self.batch_loss_history = None
         self.batch_final_losses = None
+        # Per-trajectory start offsets of the last batch optimization, (T, R, 3).
+        self.batch_start_offsets = None
         self.batch_constraint_weights = None
         self.optimization_snapshots = None
 
@@ -538,22 +617,102 @@ class TrajectoryOptimizationPipeline:
             pin_start_heading=self.pin_start_heading(),
         )
 
+    # The decision vector is [ravel(control_points), ravel(free_offsets)]. The
+    # offset tail is empty unless start_offset_mode optimizes them, so a run
+    # without it sees exactly the vector it always did.
     def control_points_from_decision_variables(self, decision_variables: jnp.ndarray) -> jnp.ndarray:
-        return self.clamp_control_points(jnp.reshape(jnp.ravel(decision_variables), (-1, 2)))
+        decision_variables = jnp.ravel(decision_variables)
+        if self.num_offset_variables:
+            decision_variables = decision_variables[: -self.num_offset_variables]
+        return self.clamp_control_points(jnp.reshape(decision_variables, (-1, 2)))
 
-    def decision_variables_from_control_points(self, control_points: jnp.ndarray) -> jnp.ndarray:
-        return jnp.ravel(self.clamp_control_points(control_points))
+    def free_offsets_from_decision_variables(self, decision_variables: jnp.ndarray) -> jnp.ndarray:
+        if not self.num_offset_variables:
+            return self.initial_free_offsets
+        return jnp.reshape(jnp.ravel(decision_variables)[-self.num_offset_variables:], (-1, 3))
+
+    def start_offsets_from_decision_variables(self, decision_variables: jnp.ndarray) -> jnp.ndarray:
+        """The start offsets a decision vector stands for: the free variables
+        smoothly squashed into the feasible set, with the frozen draw kept for
+        every component the mode does not optimize."""
+        return resolve_start_offsets(
+            self.free_offsets_from_decision_variables(decision_variables),
+            self.realizations.start_offsets,
+            self.start_offset_mask,
+            self.offset_radius,
+            self.offset_angle,
+        )
+
+    def realizations_from_decision_variables(self, decision_variables: jnp.ndarray) -> Realizations:
+        if not self.num_offset_variables:
+            return self.realizations
+        return self.realizations._replace(
+            start_offsets=self.start_offsets_from_decision_variables(decision_variables)
+        )
+
+    def decision_variables_from_control_points(
+        self, control_points: jnp.ndarray, free_offsets: jnp.ndarray | None = None
+    ) -> jnp.ndarray:
+        control_part = jnp.ravel(self.clamp_control_points(control_points))
+        if not self.num_offset_variables:
+            return control_part
+        free_offsets = self.initial_free_offsets if free_offsets is None else free_offsets
+        return jnp.concatenate([control_part, jnp.ravel(free_offsets)])
 
     def clamp_decision_variables(self, decision_variables: jnp.ndarray) -> jnp.ndarray:
         """Re-project a decision vector onto the feasible set (environment box
-        and pins). The optimizer applies this after every step."""
+        and pins). The optimizer applies this after every step. The offset tail
+        passes through untouched: it is squashed into its feasible set on read,
+        never clipped, because FIM-optimized offsets sit on the boundary and a
+        clip there is the constraint wall Adam bounces off."""
         return self.decision_variables_from_control_points(
-            self.control_points_from_decision_variables(decision_variables)
+            self.control_points_from_decision_variables(decision_variables),
+            self.free_offsets_from_decision_variables(decision_variables),
+        )
+
+    def decision_variable_step_scale(self, num_decision_variables: int) -> jnp.ndarray | None:
+        """Per-coordinate multiplier on the optimizer's update, or None when
+        every coordinate steps at the plain learning rate.
+
+        Only the offset tail is ever scaled; the control points always step at
+        1.0, so a run that touches the factors leaves the curve's optimization
+        exactly as it was."""
+        if not self.num_offset_variables:
+            return None
+        if self.offset_displacement_step_factor == 1.0 and self.offset_heading_step_factor == 1.0:
+            return None
+        num_realizations = int(self.realizations.start_offsets.shape[0])
+        offset_scale = jnp.tile(
+            jnp.asarray(
+                [
+                    self.offset_displacement_step_factor,
+                    self.offset_displacement_step_factor,
+                    self.offset_heading_step_factor,
+                ],
+                dtype=jnp.float32,
+            ),
+            num_realizations,
+        )
+        num_control_variables = int(num_decision_variables) - self.num_offset_variables
+        return jnp.concatenate(
+            [jnp.ones((num_control_variables,), dtype=jnp.float32), offset_scale]
         )
 
     def loss_from_decision_variables(self, decision_variables: jnp.ndarray, **kwargs) -> jnp.ndarray:
+        if self.num_offset_variables:
+            kwargs.setdefault("realizations", self.realizations_from_decision_variables(decision_variables))
         return self.fim_loss_from_control_points(
             self.control_points_from_decision_variables(decision_variables), **kwargs
+        )
+
+    def set_start_offsets(self, start_offsets: jnp.ndarray) -> None:
+        """Adopt a set of start offsets as the pipeline's own: they become the
+        bundle every later rollout, plot and export uses, and the point the free
+        variables sit at."""
+        start_offsets = jnp.asarray(start_offsets, dtype=jnp.float32)
+        self.realizations = self.realizations._replace(start_offsets=start_offsets)
+        self.initial_free_offsets = inverse_squash_start_offsets(
+            start_offsets, self.offset_radius, self.offset_angle
         )
 
     def set_control_points(self, control_points: jnp.ndarray):
@@ -571,6 +730,7 @@ class TrajectoryOptimizationPipeline:
         constraint_component_weights: dict | None = None,
         constraint_smooth_max_beta: float = 20.0,
         constraint_violation_tolerance: float = DEFAULT_CONSTRAINT_VIOLATION_TOLERANCE,
+        criterion: str | None = None,
         gains: jnp.ndarray | None = None,
         realizations: Realizations | None = None,
     ) -> jnp.ndarray:
@@ -606,6 +766,7 @@ class TrajectoryOptimizationPipeline:
             ),
             smooth_max_beta=constraint_smooth_max_beta,
             constraint_violation_tolerance=constraint_violation_tolerance,
+            criterion=self.criterion if criterion is None else normalize_criterion(criterion),
         )
 
     def objective_terms_from_control_points(
@@ -617,6 +778,7 @@ class TrajectoryOptimizationPipeline:
         constraint_component_weights: dict | None = None,
         constraint_smooth_max_beta: float = 20.0,
         constraint_violation_tolerance: float = DEFAULT_CONSTRAINT_VIOLATION_TOLERANCE,
+        criterion: str | None = None,
         gains: jnp.ndarray | None = None,
     ) -> dict[str, jnp.ndarray]:
         """The objective's two terms, separately, in the same units it sums them.
@@ -634,7 +796,8 @@ class TrajectoryOptimizationPipeline:
             closed_loop_log=closed_loop_log,
             gains=gains,
         )
-        fim_term = fim_loss(fim_factor)
+        criterion = self.criterion if criterion is None else normalize_criterion(criterion)
+        fim_term = fim_loss(fim_factor, criterion)
         constraint_term = constraint_loss_from_reference_states(
             reference_states=reference_states,
             dt=self.problem.dt,
@@ -645,9 +808,10 @@ class TrajectoryOptimizationPipeline:
             ),
             smooth_max_beta=constraint_smooth_max_beta,
         )
-        log_fim_term = jnp.log(fim_term)
+        log_fim_term = fim_objective_term(fim_factor, criterion)
         scaled_constraint_term = constraint_term / constraint_violation_tolerance
         return {
+            "criterion": criterion,
             "fim": fim_term,
             "log_fim": log_fim_term,
             "constraints": constraint_term,
@@ -802,7 +966,7 @@ class TrajectoryOptimizationPipeline:
                 axis=0,
             )
             group_constraint_weights = jnp.asarray(constraint_weights_per_trajectory, dtype=jnp.float32)
-            optimized_control_points, loss_history = optimize_control_points_batch(
+            optimized_control_points, loss_history, best_decision_variables = optimize_control_points_batch(
                 pipeline=self,
                 initial_decision_variables=initial_decision_variables,
                 num_steps=num_steps,
@@ -814,11 +978,21 @@ class TrajectoryOptimizationPipeline:
                 constraint_smooth_max_beta=constraint_smooth_max_beta,
                 verbose=verbose,
             )
+            # Each trajectory carries its own start offsets when the mode
+            # optimizes them; without that they are all the shared draw.
+            self.batch_start_offsets = jax.vmap(self.start_offsets_from_decision_variables)(
+                best_decision_variables
+            )
             loss_history = np.asarray(loss_history, dtype=float) if loss_history else np.empty((0, num_trajectories))
             final_losses = []
             for trajectory_index in range(num_trajectories):
                 optimized_control_points_one = optimized_control_points[trajectory_index]
                 candidate_constraint_weight = float(constraint_weights_per_trajectory[trajectory_index])
+                # Scored under this trajectory's own offsets, which is what it
+                # was optimized against.
+                candidate_realizations = self.realizations._replace(
+                    start_offsets=self.batch_start_offsets[trajectory_index]
+                )
                 final_loss = self.fim_loss_from_control_points(
                     optimized_control_points_one,
                     window_length=window_length,
@@ -826,6 +1000,7 @@ class TrajectoryOptimizationPipeline:
                     constraint_weight=candidate_constraint_weight,
                     constraint_component_weights=constraint_component_weights,
                     constraint_smooth_max_beta=constraint_smooth_max_beta,
+                    realizations=candidate_realizations,
                 )
                 if not np.isfinite(float(final_loss)):
                     # The trajectory diverged and never recorded a finite point.
@@ -844,6 +1019,7 @@ class TrajectoryOptimizationPipeline:
                         constraint_weight=candidate_constraint_weight,
                         constraint_component_weights=constraint_component_weights,
                         constraint_smooth_max_beta=constraint_smooth_max_beta,
+                        realizations=candidate_realizations,
                         )
                 # Final objective value, comparable across trajectories for
                 # best-candidate selection (they differ only in their constraint
@@ -852,6 +1028,7 @@ class TrajectoryOptimizationPipeline:
             loss_history = loss_history.tolist()
         else:
             optimized = []
+            candidate_start_offsets = []
             histories = []
             final_losses = []
             for control_points, candidate_constraint_weight in zip(
@@ -891,10 +1068,12 @@ class TrajectoryOptimizationPipeline:
                         constraint_smooth_max_beta=constraint_smooth_max_beta,
                     )
                 optimized.append(optimized_control_points_one)
+                candidate_start_offsets.append(self.realizations.start_offsets)
                 histories.append(loss_history_one)
                 final_losses.append(float(final_loss))
             shapes = {tuple(candidate.shape) for candidate in optimized}
             optimized_control_points = jnp.stack(optimized, axis=0) if len(shapes) == 1 else optimized
+            self.batch_start_offsets = jnp.stack(candidate_start_offsets, axis=0)
             loss_history = np.asarray(histories, dtype=float).T.tolist() if histories and histories[0] else []
 
         self.batch_loss_history = loss_history
@@ -903,6 +1082,7 @@ class TrajectoryOptimizationPipeline:
         self.batch_constraint_weights = constraint_weights_per_trajectory.tolist()
         finite_losses = np.where(np.isfinite(final_losses), final_losses, np.inf)
         best_index = int(np.argmin(finite_losses))
+        self.set_start_offsets(self.batch_start_offsets[best_index])
         self.set_control_points(optimized_control_points[best_index])
         self.loss_history = np.asarray(loss_history)[:, best_index].tolist() if len(loss_history) else []
         return optimized_control_points, loss_history
@@ -921,6 +1101,7 @@ class TrajectoryOptimizationPipeline:
         out_prefix="trajectory_set",
         out_path=None,
         title="Optimized Trajectories",
+        start_offset_batch=None,
     ):
         """One figure for a whole batch of optimized trajectories. The rollouts
         run as a single vmapped, jitted batch instead of one eager (and
@@ -946,17 +1127,37 @@ class TrajectoryOptimizationPipeline:
                 ).pose.true_states
 
             realizations = self.realizations
-            closed_loop_poses = jax.jit(
-                jax.vmap(
-                    jax.vmap(rollout, in_axes=(None, 0, 0, 0)),
-                    in_axes=(0, None, None, None),
+            # One offset set per trajectory when the design optimized them
+            # (each curve then has its own starts), else the shared bundle.
+            if start_offset_batch is None:
+                start_offset_batch = self.batch_start_offsets
+            if start_offset_batch is not None and (
+                jnp.asarray(start_offset_batch).shape[0] == reference_trajectories.shape[0]
+            ):
+                start_offset_batch = jnp.asarray(start_offset_batch, dtype=jnp.float32)
+                closed_loop_poses = jax.jit(
+                    jax.vmap(
+                        jax.vmap(rollout, in_axes=(None, 0, 0, 0)),
+                        in_axes=(0, None, None, 0),
+                    )
+                )(
+                    reference_trajectories,
+                    realizations.robot_keys,
+                    realizations.estimator_keys,
+                    start_offset_batch,
                 )
-            )(
-                reference_trajectories,
-                realizations.robot_keys,
-                realizations.estimator_keys,
-                realizations.start_offsets,
-            )
+            else:
+                closed_loop_poses = jax.jit(
+                    jax.vmap(
+                        jax.vmap(rollout, in_axes=(None, 0, 0, 0)),
+                        in_axes=(0, None, None, None),
+                    )
+                )(
+                    reference_trajectories,
+                    realizations.robot_keys,
+                    realizations.estimator_keys,
+                    realizations.start_offsets,
+                )
         else:
             closed_loop_poses = self.simulation.run_closed_loop_batch(
                 self.nominal_physical_params(),
@@ -967,7 +1168,6 @@ class TrajectoryOptimizationPipeline:
         return plot_trajectory_set_figure(
             reference_trajectories,
             closed_loop_poses,
-            control_point_batch=control_point_batch,
             out_prefix=out_prefix,
             out_path=out_path,
             title=title,
@@ -1039,16 +1239,35 @@ class TrajectoryOptimizationPipeline:
         out_dir="trajectory_exports",
         filename_prefix="reference_states",
         reference_states=None,
+        start_offsets=...,
     ):
         """Export a reference trajectory. Pass ``reference_states`` to export a
         trajectory other than the pipeline's current one -- exporting a batch
         via ``set_control_points`` would run (and compile) a closed-loop rollout
-        per trajectory that the pickle does not use."""
+        per trajectory that the pickle does not use.
+
+        ``start_offsets`` defaults to the design's own: in gain-tuning mode the
+        realization offsets the FIM was averaged over, so the gain tuner reads
+        back the conditions the trajectory was designed under. Identification
+        mode exports none -- there the start is where the robot is physically
+        placed, not a design variable. Pass an explicit array (or None) to
+        override."""
         os.makedirs(out_dir, exist_ok=True)
         reference_states = self.reference_states if reference_states is None else reference_states
+        if start_offsets is ...:
+            start_offsets = (
+                self.realizations.start_offsets
+                if self.objective_mode == OBJECTIVE_MODE_GAIN_TUNING
+                else None
+            )
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"{filename_prefix}_{timestamp}.pkl"
         out_path = os.path.join(out_dir, filename)
         with open(out_path, "wb") as file:
-            pickle.dump(reference_states_export_payload(reference_states, self.problem.dt), file)
+            pickle.dump(
+                reference_states_export_payload(
+                    reference_states, self.problem.dt, start_offsets=start_offsets
+                ),
+                file,
+            )
         return out_path

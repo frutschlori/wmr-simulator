@@ -12,7 +12,12 @@ from wmr_simulator.trajectory_optimization.analysis import (
     create_stacked_tracking_surface_trace_gif,
     render_tracking_surface_frames_for_optimization_trace,
 )
-from wmr_simulator.trajectory_optimization.pipeline import TrajectoryOptimizationPipeline
+from wmr_simulator.trajectory_optimization.start_offsets import START_OFFSET_MODE_RANDOM, START_OFFSET_MODES, START_OFFSET_MODE_OPTIMIZE
+from wmr_simulator.trajectory_optimization.objectives import CRITERIA, DEFAULT_CRITERION
+from wmr_simulator.trajectory_optimization.pipeline import (
+    OBJECTIVE_MODE_GAIN_TUNING,
+    TrajectoryOptimizationPipeline,
+)
 from wmr_simulator.types import PhysicalParams
 
 
@@ -31,7 +36,7 @@ def main():
     parser.add_argument("--problem", default="problems/pololu_gains.yaml")
     parser.add_argument("--title", type=str, default="gain_optimized")
     # Optimization Settings
-    parser.add_argument("--save-trajectory", action="store_true", default=False)
+    parser.add_argument("--save-trajectory", action="store_true", default=True)
     parser.add_argument("--window-length", type=int, default=50) # replay window length, only for identification mode
     parser.add_argument("--learning-rate", type=float, default=2e-3)
     parser.add_argument("--opt-steps", type=int, default=500)
@@ -51,6 +56,18 @@ def main():
     # one, so the motion constraints bind sooner (see bspline.py).
     parser.add_argument("--num-control-points", type=int, default=5)
     parser.add_argument("--trajectory-seed", type=int, default=0)
+    parser.add_argument("--criterion", choices=list(CRITERIA), default=DEFAULT_CRITERION)
+    # What happens to the rollout start offsets the FIM is averaged over:
+    # 'random' keeps the frozen draw, 'static' a deterministic spread, and the
+    # 'optimize*' modes hand them to the optimizer alongside the control points.
+    # They ship in the trajectory pickles either way.
+    parser.add_argument("--start-offset-mode", choices=sorted(START_OFFSET_MODES), default=START_OFFSET_MODE_OPTIMIZE)
+    # Step-size multipliers for the two offset blocks, relative to
+    # --learning-rate. The control points keep the tuned rate at 1.0; the free
+    # offsets live on a different scale and would otherwise crawl.
+    parser.add_argument("--offset-displacement-step-factor", type=float, default=1.0)
+    parser.add_argument("--offset-heading-step-factor", type=float, default=1.0)
+    parser.add_argument("--wheel-lp-tau",type=float,default=None)
     # Constraints
     parser.add_argument("--constraint-weight", type=float, default=1.0)
     parser.add_argument("--constraint-v-weight", type=float, default=1.0)
@@ -79,9 +96,27 @@ def main():
         time_scaling=args.time_scaling,
         objective_mode=args.objective_mode,
         fim_a_slip_max=args.fim_a_slip_max,
+        wheel_lp_tau=args.wheel_lp_tau,
+        criterion=args.criterion,
+        start_offset_mode=args.start_offset_mode,
+        offset_displacement_step_factor=args.offset_displacement_step_factor,
+        offset_heading_step_factor=args.offset_heading_step_factor,
     )
 
     print(f"Loaded problem: {pipeline.problem.path}")
+    print(f"Encoder low-pass: wheel_lp_tau = {pipeline.wheel_lp_tau:.4g} s")
+    print(f"Design criterion: {pipeline.criterion}")
+    print(
+        f"Start offsets: {pipeline.start_offset_mode} "
+        f"({'optimized with the control points' if pipeline.optimize_start_offsets else 'frozen'}, "
+        f"{int(pipeline.realizations.start_offsets.shape[0])} realizations)"
+    )
+    if pipeline.optimize_start_offsets:
+        print(
+            f"  step factors: displacement {pipeline.offset_displacement_step_factor:.4g}, "
+            f"heading {pipeline.offset_heading_step_factor:.4g} "
+            f"(x learning rate {args.learning_rate:.4g})"
+        )
     print(f"Robot: {type(pipeline.robot).__name__}")
     print(f"Time scaling: {pipeline.time_scaling}")
     print(f"Objective mode: {pipeline.objective_mode}")
@@ -199,6 +234,7 @@ def main():
             pipeline.plot_trajectory_batch(
                 optimized_control_point_batch,
                 out_prefix=f"{run_stem}_trajectories",
+                start_offset_batch=pipeline.batch_start_offsets,
             )
         pipeline.plot_loss_history(out_prefix="traj_opt_loss_history" if output_stem is None else f"{output_stem}_loss_history")
         if args.save_opt_GIF:
@@ -261,6 +297,15 @@ def main():
                         filename_prefix=f"{filename_prefix}_{index:02d}",
                         reference_states=pipeline.reference_states_from_control_points(
                             pipeline.clamp_control_points(control_points)
+                        ),
+                        # Each trajectory ships the offsets it was designed
+                        # under, which the gain tuner then tunes on. In
+                        # identification mode there are none: the start is where
+                        # the robot is placed.
+                        start_offsets=(
+                            pipeline.batch_start_offsets[index]
+                            if pipeline.objective_mode == OBJECTIVE_MODE_GAIN_TUNING
+                            else None
                         ),
                     )
                 )

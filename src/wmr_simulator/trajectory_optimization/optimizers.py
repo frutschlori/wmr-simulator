@@ -43,6 +43,20 @@ def print_progress(step: int, total_steps: int, loss_value: float, bar_width: in
     sys.stdout.flush()
 
 
+def _adam_with_step_scale(learning_rate: float, step_scale=None):
+    """Adam, optionally with a per-coordinate multiplier on its update.
+
+    Adam's update magnitude is ~learning_rate in every coordinate regardless of
+    the gradient's scale, so multiplying a block of coordinates by ``f`` gives
+    that block an effective learning rate of ``f * learning_rate`` and leaves
+    the rest untouched. That is what lets the start offsets move at their own
+    pace without disturbing a control-point learning rate that is known to work.
+    """
+    if step_scale is None:
+        return optax.adam(learning_rate)
+    return optax.chain(optax.adam(learning_rate), optax.scale_by_learning_rate(step_scale, flip_sign=False))
+
+
 def optimize_control_points(
     pipeline,
     num_control_points: int,
@@ -65,7 +79,9 @@ def optimize_control_points(
     else:
         initial_control_points = pipeline.clamp_control_points(initial_control_points)
     initial_decision_variables = pipeline.decision_variables_from_control_points(initial_control_points)
-    optimizer = optax.adam(learning_rate)
+    optimizer = _adam_with_step_scale(
+        learning_rate, pipeline.decision_variable_step_scale(initial_decision_variables.shape[0])
+    )
     opt_state = optimizer.init(initial_decision_variables)
 
     # No round-0 loss rescaling: the objective normalizes itself (the FIM term
@@ -118,6 +134,7 @@ def optimize_control_points(
         print(f"Initial loss: {float(initial_loss):.8f}")
     if num_steps <= 0:
         optimized_control_points = pipeline.control_points_from_decision_variables(decision_variables)
+        pipeline.set_start_offsets(pipeline.start_offsets_from_decision_variables(decision_variables))
         pipeline.set_control_points(optimized_control_points)
         pipeline.loss_history = loss_history
         pipeline.optimization_snapshots = snapshots
@@ -158,6 +175,9 @@ def optimize_control_points(
             )
 
     optimized_control_points = pipeline.control_points_from_decision_variables(best_decision_variables)
+    # Offsets first: set_control_points rolls the deployment out, and it should
+    # do so from the starts this run settled on.
+    pipeline.set_start_offsets(pipeline.start_offsets_from_decision_variables(best_decision_variables))
     pipeline.set_control_points(optimized_control_points)
     pipeline.loss_history = loss_history
     pipeline.optimization_snapshots = snapshots
@@ -190,7 +210,9 @@ def optimize_control_points_batch(
     num_control_points = pipeline.control_points_from_decision_variables(
         initial_decision_variables[0]
     ).shape[0]
-    optimizer = optax.adam(learning_rate)
+    optimizer = _adam_with_step_scale(
+        learning_rate, pipeline.decision_variable_step_scale(initial_decision_variables.shape[1])
+    )
 
     # The objective normalizes itself (see trajectory_objective); there is no
     # round-0 loss_scale here either.
@@ -287,7 +309,7 @@ def optimize_control_points_batch(
     if verbose:
         print(f"Initial batch loss: {np.asarray(initial_loss, dtype=float)}")
     if num_steps <= 0:
-        return optimized_control_points, []
+        return optimized_control_points, [], best_decision_variables
 
     # Trim the flat tail the short-circuit leaves behind, so the history plot
     # shows only the steps that did something.
@@ -297,4 +319,4 @@ def optimize_control_points_batch(
         print(f"All trajectories converged after {steps_run} of {num_steps} steps.")
     loss_history = np.asarray(loss_history_by_trajectory, dtype=float)[:max(steps_run, 1)].tolist()
 
-    return optimized_control_points, loss_history
+    return optimized_control_points, loss_history, best_decision_variables

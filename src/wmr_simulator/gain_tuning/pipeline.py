@@ -9,6 +9,7 @@ import yaml
 from wmr_simulator.gain_tuning.objectives import (
     clip_controller_gains,
     closed_loop_objective,
+    make_realizations,
 )
 from wmr_simulator.gain_tuning.optimizers import histories_for_start, optimize_controller_gains
 from wmr_simulator.simulation import SimulationPipeline
@@ -36,6 +37,11 @@ class ControllerTuningPipeline(SimulationPipeline):
         self.reference_trajectory_paths = []
         self.training_reference_trajectories = self.reference_states[None, ...]
         self.validation_reference_trajectories = jnp.empty((0,) + self.reference_states.shape, dtype=jnp.float32)
+        # Per-trajectory start-pose offsets (T, R, 3), read off the trajectory
+        # pickles when the design shipped them, else None (the tuner then draws
+        # its own from init_offset_radius/angle).
+        self.training_start_offsets = None
+        self.validation_start_offsets = None
         if reference_trajectories_dir is not None:
             self._load_reference_trajectory_sets(reference_trajectories_dir, validation_split, seed)
 
@@ -55,11 +61,18 @@ class ControllerTuningPipeline(SimulationPipeline):
             raise ValueError(f"No pickle files found in {reference_trajectories_dir}")
 
         reference_trajectories = []
+        start_offsets = []
         for path in pickle_paths:
             with open(path, "rb") as file:
                 payload = pickle.load(file)
             reference_states = np.asarray(payload["reference_states"] if isinstance(payload, dict) else payload, dtype=float)
             reference_trajectories.append(self._fit_reference_states(reference_states))
+            start_offsets.append(
+                None
+                if not isinstance(payload, dict) or payload.get("start_offsets") is None
+                else np.asarray(payload["start_offsets"], dtype=float)
+            )
+        start_offsets = self._stack_start_offsets(start_offsets, pickle_paths)
 
         indices = np.arange(len(reference_trajectories))
         rng = np.random.default_rng(seed)
@@ -81,6 +94,11 @@ class ControllerTuningPipeline(SimulationPipeline):
             else np.empty((0,) + reference_trajectories[0].shape, dtype=float),
             dtype=jnp.float32,
         )
+        if start_offsets is not None:
+            self.training_start_offsets = jnp.asarray(start_offsets[training_indices], dtype=jnp.float32)
+            self.validation_start_offsets = jnp.asarray(
+                start_offsets[validation_indices], dtype=jnp.float32
+            )
         self.reference_states = self.training_reference_trajectories[0]
         self.loaded_reference_trajectory_path = pickle_paths[int(training_indices[0])]
         self.reference_trajectories_dir = reference_trajectories_dir
@@ -89,6 +107,37 @@ class ControllerTuningPipeline(SimulationPipeline):
             f"{len(training_indices)} training, {len(validation_indices)} validation "
             f"from {reference_trajectories_dir}"
         )
+        if start_offsets is not None:
+            print(
+                f"  with designed start-pose offsets: {start_offsets.shape[1]} per trajectory "
+                "(the tuner rolls out on these instead of drawing its own)"
+            )
+
+    @staticmethod
+    def _stack_start_offsets(start_offsets: list, pickle_paths: list) -> np.ndarray | None:
+        """Stack the per-trajectory offsets into (T, R, 3), or None when the
+        trajectories carry none.
+
+        All-or-none, and one common R: a run whose trajectories were scored
+        under different numbers of realizations -- or half of them under
+        designed starts and half under drawn ones -- is not one experiment, and
+        silently reconciling that would hide it.
+        """
+        present = [offsets is not None for offsets in start_offsets]
+        if not any(present):
+            return None
+        if not all(present):
+            missing = [path for path, has in zip(pickle_paths, present) if not has]
+            raise ValueError(
+                "Some reference trajectories carry designed start offsets and some do not: "
+                f"{missing}. Export them all with offsets, or none."
+            )
+        shapes = {offsets.shape for offsets in start_offsets}
+        if len(shapes) != 1 or len(next(iter(shapes))) != 2 or next(iter(shapes))[1] != 3:
+            raise ValueError(
+                f"Designed start offsets must all have the same shape (R, 3); got {sorted(shapes)}."
+            )
+        return np.stack(start_offsets, axis=0)
 
     @staticmethod
     def _normalize_validation_split(validation_split: float) -> float:
@@ -141,6 +190,7 @@ class ControllerTuningPipeline(SimulationPipeline):
         warm_start_schedule: bool = False,
         init_offset_radius: float = 0.0,
         init_offset_angle: float = 0.0,
+        realizations=None,
     ):
         return optimize_controller_gains(
             pipeline=self,
@@ -164,9 +214,27 @@ class ControllerTuningPipeline(SimulationPipeline):
             warm_start_schedule=warm_start_schedule,
             init_offset_radius=init_offset_radius,
             init_offset_angle=init_offset_angle,
+            realizations=realizations,
             training_reference_trajectories=self.training_reference_trajectories,
             validation_reference_trajectories=self.validation_reference_trajectories,
+            training_start_offsets=self.training_start_offsets,
+            validation_start_offsets=self.validation_start_offsets,
         )
+
+
+def start_offsets_for_set(reference_trajectories, designed_offsets, realizations) -> jax.Array:
+    """The (T, R, 3) start offsets for a set of reference trajectories.
+
+    Designed offsets travel with their trajectory, one set each. Without them
+    every trajectory shares the run's single drawn set, which is what the tuner
+    scores them under -- broadcast so both cases are one array shape.
+    """
+    num_trajectories = int(jnp.asarray(reference_trajectories).shape[0])
+    if designed_offsets is not None:
+        return jnp.asarray(designed_offsets, dtype=jnp.float32)
+    return jnp.broadcast_to(
+        realizations.start_offsets, (num_trajectories,) + realizations.start_offsets.shape
+    ).astype(jnp.float32)
 
 
 def resolve_gain_robot_params(problem_path: str, fixed_wheel_radius, fixed_base_diameter) -> PhysicalParams:
@@ -225,7 +293,7 @@ def run_gain_tuning_experiment(
     ``init_offset_radius`` / ``init_offset_angle`` randomize the rollout start
     pose around the reference start, one draw per noise realization, so the
     tracking gains see real error to act on (see
-    :func:`gain_tuning.objectives.sample_initial_pose_offsets`). Both 0 starts
+    :func:`trajectory_optimization.start_offsets.sample_initial_pose_offsets`). Both 0 starts
     every rollout exactly on the reference.
 
     ``presearch_relative_range`` (> 0) narrows an LHS presearch to a +/- band
@@ -269,11 +337,44 @@ def run_gain_tuning_experiment(
         residual_model=residual_model,
     )
     schedule_enabled = pipeline.gain_schedule_enabled if schedule_enabled is None else bool(schedule_enabled)
-    init_hidden_log = pipeline.run_closed_loop(robot_params, use_hidden_robot=True)
-    init_model_log = pipeline.run_closed_loop(robot_params)
+    # One realization bundle for the whole experiment: the tuner scores its
+    # objective on it and the summary figures roll out on it, so the plots show
+    # the conditions the gains were actually chosen under. Designed offsets
+    # (read off the trajectory pickles) win over the drawn ones and set R.
+    if pipeline.training_start_offsets is not None:
+        designed_realizations = int(pipeline.training_start_offsets.shape[1])
+        if designed_realizations != num_realizations:
+            print(
+                f"Trajectories were designed under {designed_realizations} start offsets; "
+                f"using that instead of the requested {num_realizations} realizations."
+            )
+        num_realizations = designed_realizations
+    realizations = make_realizations(
+        pipeline.robot_key,
+        pipeline.estimator_key,
+        num_realizations,
+        init_offset_radius,
+        init_offset_angle,
+    )
+    training_start_offsets = start_offsets_for_set(
+        pipeline.training_reference_trajectories, pipeline.training_start_offsets, realizations
+    )
+    validation_start_offsets = start_offsets_for_set(
+        pipeline.validation_reference_trajectories, pipeline.validation_start_offsets, realizations
+    )
+    # The single-run summary is trajectory 0, realization 0 -- rolled out from
+    # its offset start, not from the reference, so the figure shows the same
+    # transient the tuning loss was computed on.
+    summary_offsets = training_start_offsets[0]
+    summary_initial_pose = pipeline.initial_reference_pose() + summary_offsets[0]
+    init_hidden_log = pipeline.run_closed_loop(
+        robot_params, use_hidden_robot=True, initial_pose=summary_initial_pose
+    )
+    init_model_log = pipeline.run_closed_loop(robot_params, initial_pose=summary_initial_pose)
 
     def optimize(init_gains, run_schedule_enabled, run_num_steps, run_learning_rate):
         return pipeline.optimize(
+            realizations=realizations,
             init_gains=init_gains,
             num_steps=run_num_steps,
             learning_rate=run_learning_rate,
@@ -360,11 +461,13 @@ def run_gain_tuning_experiment(
         use_hidden_robot=True,
         controller_gains=optimized_gains,
         schedule_params=schedule_params,
+        initial_pose=summary_initial_pose,
     )
     final_model_log = pipeline.run_closed_loop(
         robot_params,
         controller_gains=optimized_gains,
         schedule_params=schedule_params,
+        initial_pose=summary_initial_pose,
     )
     # Rollout of the static run's gains (base gains only, no parametrization)
     # so the plots can overlay "tuned (static)" against "tuned (param)". None
@@ -373,11 +476,21 @@ def run_gain_tuning_experiment(
         None
         if static_gains is None
         else pipeline.run_closed_loop(
-            robot_params, use_hidden_robot=True, controller_gains=static_gains
+            robot_params,
+            use_hidden_robot=True,
+            controller_gains=static_gains,
+            initial_pose=summary_initial_pose,
         )
     )
     return {
         "pipeline": pipeline,
+        # The start offsets everything above was scored and rolled out under:
+        # (T, R, 3) per trajectory set, and the (R, 3) of the summary's
+        # trajectory 0. The plots need them to draw the same conditions.
+        "realizations": realizations,
+        "training_start_offsets": training_start_offsets,
+        "validation_start_offsets": validation_start_offsets,
+        "summary_start_offsets": summary_offsets,
         "init_hidden_log": init_hidden_log,
         "init_model_log": init_model_log,
         "optimized_gains": optimized_gains,

@@ -10,7 +10,7 @@ from wmr_simulator.joint_tuning.pipeline import (
     JointTuningResult,
     run_joint_tuning,
 )
-from wmr_simulator.joint_tuning.start_offsets import (
+from wmr_simulator.trajectory_optimization.start_offsets import (
     START_OFFSET_MODES,
     normalize_start_offset_mode,
 )
