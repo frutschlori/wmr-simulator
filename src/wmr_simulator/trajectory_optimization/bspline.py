@@ -21,6 +21,15 @@ HIGHEST_PRECISION = jax.lax.Precision.HIGHEST
 # velocity, acceleration all continuous).
 DEFAULT_SPLINE_DEGREE = 3
 
+# Floor on |dpos/ds|^2, as a fraction of the curve's own mean, below which the
+# tangent is treated as numerically absent (see _reference_from_derivatives).
+# It has to be small enough not to bias the yaw rate of ordinary curves -- 1e-2
+# already cost 2.5% of omega on a plain circle -- and large enough to swallow
+# the singular neighbourhood. At 1e-4 a sample carrying the mean tangent is
+# damped by 0.01%, while the floor still dominates by two orders of magnitude at
+# the stalled configurations that produced the 1e4 gradient spikes.
+TANGENT_FLOOR_FRACTION = 1e-4
+
 
 def _reference_from_derivatives(
     position: jnp.ndarray,
@@ -32,12 +41,34 @@ def _reference_from_derivatives(
     """Assemble the [T, 8] reference-state matrix from curve derivatives."""
     velocity = dpos_ds * s_dot[:, None]
     acceleration = dpos_ds * s_ddot[:, None] + d2pos_ds2 * (s_dot[:, None] ** 2)
-    theta = jnp.arctan2(dpos_ds[:, 1], dpos_ds[:, 0])
 
+    # Heading and yaw rate come from the tangent, and both are singular where
+    # the tangent vanishes: arctan2(0, 0) has a NaN derivative, and
+    # dtheta/ds = cross / |dpos/ds|^2 differentiates like 1/|dpos/ds|^3. Taking
+    # the derivative w.r.t. s rather than t already removed the s_dot -> 0 half
+    # of this (the s-curve's endpoints), but the |dpos/ds| -> 0 half is still
+    # reachable: every control point is free in gain-tuning mode, and the
+    # environment clip can collapse neighbouring ones onto the same box edge.
+    # Measured on a stalled curve, |dpos/ds| = 4e-3 turned a typical gradient of
+    # 1e-2 into 2.3e2, and an exactly coincident pair produced NaN.
+    #
+    # So: floor the denominator at a fraction of the curve's own mean tangent
+    # (absolute epsilons cannot work -- |dpos/ds| carries the curve's length in
+    # metres per unit s), and hand arctan2 a fixed unit tangent wherever the
+    # real one is below that floor. The substitution has to happen on the
+    # *input*: a jnp.where on the output still evaluates arctan2 at the singular
+    # point and leaks its NaN back through the cotangent.
     tangent_norm_sq = jnp.sum(dpos_ds**2, axis=1)
+    tangent_floor = TANGENT_FLOOR_FRACTION * jnp.mean(tangent_norm_sq) + 1e-12
+    fallback_tangent = jnp.array([1.0, 0.0], dtype=dpos_ds.dtype)
+    safe_tangent = jnp.where(
+        (tangent_norm_sq > tangent_floor)[:, None], dpos_ds, fallback_tangent
+    )
+    theta = jnp.arctan2(safe_tangent[:, 1], safe_tangent[:, 0])
+
     dtheta_ds = (
         dpos_ds[:, 0] * d2pos_ds2[:, 1] - dpos_ds[:, 1] * d2pos_ds2[:, 0]
-    ) / (tangent_norm_sq + 1e-8)
+    ) / (tangent_norm_sq + tangent_floor)
     omega = dtheta_ds * s_dot
 
     return jnp.column_stack(
