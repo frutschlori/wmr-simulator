@@ -1,3 +1,5 @@
+from typing import NamedTuple
+
 import jax
 import jax.numpy as jnp
 
@@ -6,6 +8,49 @@ from wmr_simulator.gain_parametrization import outer_gains_over_refs
 
 def clip_controller_gains(gains: jax.Array):
     return jnp.clip(gains, min=0)
+
+
+class Realizations(NamedTuple):
+    """The frozen stochastic conditions a rollout batch is scored under.
+
+    One bundle per run, built once and shared by everything that rolls out:
+    the gain tuner averages its objective over these realizations, and the
+    trajectory optimizer averages its FIM over the same ones. Sharing them is
+    what makes a trajectory designed to be informative about the gains
+    informative about the gains *as the tuner sees them* -- two independent
+    draws would score the two halves of the loop on different problems.
+
+    Held fixed for the whole run (common random numbers): both objectives then
+    stay deterministic functions of their decision variables.
+    """
+
+    robot_keys: jax.Array       # (R, 2) plant/measurement-noise keys
+    estimator_keys: jax.Array   # (R, 2) estimator-noise keys
+    start_offsets: jax.Array    # (R, 3) [dx, dy, dtheta] start-pose offsets
+
+
+def make_realizations(
+    robot_key: jax.Array,
+    estimator_key: jax.Array,
+    num_realizations: int,
+    offset_radius: float,
+    offset_angle: float,
+) -> Realizations:
+    """Draw ``num_realizations`` noise-key pairs and start-pose offsets.
+
+    The offsets are folded off the robot key with their own tag so they do not
+    correlate with the measurement-noise draws.
+    """
+    return Realizations(
+        robot_keys=jax.random.split(robot_key, num_realizations),
+        estimator_keys=jax.random.split(estimator_key, num_realizations),
+        start_offsets=sample_initial_pose_offsets(
+            jax.random.fold_in(robot_key, 5813),
+            num_realizations,
+            offset_radius,
+            offset_angle,
+        ),
+    )
 
 
 def sample_initial_pose_offsets(

@@ -1,4 +1,4 @@
-sim_time: 8.0 # seconds
+sim_time: 5.0 # seconds
 geometry_controller_dt: 0.05 # seconds
 wheel_controller_dt: 0.01 # seconds
 environment:
@@ -59,7 +59,7 @@ robot:
   a_max: 3.0         # m/s^2
   a_max_lateral: 6.0 # m/s^2
   omega_max: 10.0    # rad/s
-  alpha_max: 20.0    # rad/s^2
+  alpha_max: 30.0    # rad/s^2
 noise_enabled: true # false zeroes the estimator measurement noise everywhere (sim, gain tuning, traj-opt FIM)
 estimator:
   type: "kf"              # estimator type: "kf" (Kalman Filter) or "dr" (Dead Reckoning)

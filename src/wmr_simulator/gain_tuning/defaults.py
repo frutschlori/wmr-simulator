@@ -22,7 +22,7 @@ GAIN_TUNING_DEFAULTS: dict = {
     # the same 16 training trajectories, the per-draw ranking noise (~15% of the
     # loss) exceeds the spread between candidate gain vectors (~7%), and the
     # winning gains swing by orders of magnitude with the seed alone.
-    "num_realizations": 8,
+    "num_realizations": 4,
     # Randomized rollout start pose, one draw per noise realization: uniform in a
     # disk of init_offset_radius [m] and uniform over +/-init_offset_angle [rad].
     # Starting exactly on the reference leaves ~1 cm of tracking error, so the
