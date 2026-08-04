@@ -194,6 +194,7 @@ def optimize_control_points_batch(
     constraint_weight: float = 1.0,
     constraint_component_weights: dict | None = None,
     constraint_smooth_max_beta: float = 20.0,
+    realizations_batch=None,
     verbose: bool = True,
 ):
     """Optimize a batch of trajectories, each with its own optimizer state.
@@ -216,30 +217,58 @@ def optimize_control_points_batch(
 
     # The objective normalizes itself (see trajectory_objective); there is no
     # round-0 loss_scale here either.
-    def loss_fn(decision_variables, current_constraint_weight):
-        return pipeline.loss_from_decision_variables(
-            decision_variables,
-            window_length=window_length,
-            measurement_variances=measurement_variances,
-            constraint_weight=current_constraint_weight,
-            constraint_component_weights=constraint_component_weights,
-            constraint_smooth_max_beta=constraint_smooth_max_beta,
-        )
+    if realizations_batch is None:
+        def loss_fn(decision_variables, current_constraint_weight):
+            return pipeline.loss_from_decision_variables(
+                decision_variables,
+                window_length=window_length,
+                measurement_variances=measurement_variances,
+                constraint_weight=current_constraint_weight,
+                constraint_component_weights=constraint_component_weights,
+                constraint_smooth_max_beta=constraint_smooth_max_beta,
+            )
+    else:
+        def loss_fn(decision_variables, current_constraint_weight, realizations):
+            return pipeline.loss_from_decision_variables(
+                decision_variables,
+                window_length=window_length,
+                measurement_variances=measurement_variances,
+                constraint_weight=current_constraint_weight,
+                constraint_component_weights=constraint_component_weights,
+                constraint_smooth_max_beta=constraint_smooth_max_beta,
+                realizations=realizations,
+            )
 
     clamp_decision_variables_batch = jax.vmap(pipeline.clamp_decision_variables)
     control_points_from_decision_variables_batch = jax.vmap(pipeline.control_points_from_decision_variables)
-    loss_values_fn = jax.vmap(loss_fn, in_axes=(0, 0))
+    if realizations_batch is None:
+        loss_values_fn = jax.vmap(loss_fn, in_axes=(0, 0))
 
-    def step_one(decision_variables, optimizer_state, current_constraint_weight):
-        loss_value, grads = jax.value_and_grad(loss_fn)(decision_variables, current_constraint_weight)
-        updates, next_optimizer_state = optimizer.update(grads, optimizer_state, decision_variables)
-        return optax.apply_updates(decision_variables, updates), next_optimizer_state, loss_value
+        def step_one(decision_variables, optimizer_state, current_constraint_weight):
+            loss_value, grads = jax.value_and_grad(loss_fn)(decision_variables, current_constraint_weight)
+            updates, next_optimizer_state = optimizer.update(grads, optimizer_state, decision_variables)
+            return optax.apply_updates(decision_variables, updates), next_optimizer_state, loss_value
 
-    step_batch = jax.vmap(step_one, in_axes=(0, 0, 0))
+        step_batch = jax.vmap(step_one, in_axes=(0, 0, 0))
+    else:
+        loss_values_fn = jax.vmap(loss_fn, in_axes=(0, 0, 0))
 
-    def optimize_batch(initial_decision_variables, current_constraint_weights):
+        def step_one(decision_variables, optimizer_state, current_constraint_weight, realizations):
+            loss_value, grads = jax.value_and_grad(loss_fn)(
+                decision_variables, current_constraint_weight, realizations
+            )
+            updates, next_optimizer_state = optimizer.update(grads, optimizer_state, decision_variables)
+            return optax.apply_updates(decision_variables, updates), next_optimizer_state, loss_value
+
+        step_batch = jax.vmap(step_one, in_axes=(0, 0, 0, 0))
+
+    def optimize_batch(initial_decision_variables, current_constraint_weights, realizations_batch):
         initial_decision_variables = clamp_decision_variables_batch(initial_decision_variables)
-        initial_loss = loss_values_fn(initial_decision_variables, current_constraint_weights)
+        initial_loss = (
+            loss_values_fn(initial_decision_variables, current_constraint_weights)
+            if realizations_batch is None
+            else loss_values_fn(initial_decision_variables, current_constraint_weights, realizations_batch)
+        )
         initial_opt_state = jax.vmap(optimizer.init)(initial_decision_variables)
 
         def train_step(carry, step_index):
@@ -251,9 +280,14 @@ def optimize_control_points_batch(
             all_converged = jnp.all(improving <= 0.0)
 
             def run_step(_):
-                next_decision_variables, next_optimizer_state, loss_values = step_batch(
-                    decision_variables, optimizer_state, current_constraint_weights
-                )
+                if realizations_batch is None:
+                    next_decision_variables, next_optimizer_state, loss_values = step_batch(
+                        decision_variables, optimizer_state, current_constraint_weights
+                    )
+                else:
+                    next_decision_variables, next_optimizer_state, loss_values = step_batch(
+                        decision_variables, optimizer_state, current_constraint_weights, realizations_batch
+                    )
                 next_decision_variables = clamp_decision_variables_batch(next_decision_variables)
                 # At the end of each window, score the improvement against the
                 # loss a full window ago and start a fresh window here.
@@ -303,6 +337,7 @@ def optimize_control_points_batch(
     best_decision_variables, loss_history_by_trajectory, converged, initial_loss = optimize_batch(
         initial_decision_variables,
         constraint_weights,
+        realizations_batch,
     )
     optimized_control_points = control_points_from_decision_variables_batch(best_decision_variables)
 

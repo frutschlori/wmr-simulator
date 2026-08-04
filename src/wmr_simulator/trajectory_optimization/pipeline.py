@@ -35,6 +35,7 @@ from wmr_simulator.trajectory_optimization.start_offsets import (
     inverse_squash_start_offsets,
     normalize_start_offset_mode,
     resolve_start_offsets,
+    sample_initial_pose_offset_batch,
     start_offset_mask,
     static_start_offsets,
 )
@@ -923,6 +924,32 @@ class TrajectoryOptimizationPipeline:
         candidates = self.initial_control_point_candidates(num_control_points=num_control_points, num_trajectories=num_trajectories)
         return jnp.stack(candidates, axis=0)
 
+    def batch_frozen_start_offsets(self, num_trajectories: int, seed: int) -> jnp.ndarray:
+        """Return the frozen ``(T, R, 3)`` starts for a batch optimization.
+
+        ``random`` deliberately draws a different complete pose bundle per
+        trajectory.  The bundle remains fixed over all of that trajectory's
+        Adam steps, so the objective is still deterministic.  The other modes
+        retain their existing semantics: ``static`` is the same prescribed
+        spread for every trajectory, while optimizing modes receive the common
+        frozen initialization which their decision variables then move.
+        """
+        if self.start_offset_mode != START_OFFSET_MODE_RANDOM:
+            return jnp.broadcast_to(
+                self.realizations.start_offsets,
+                (num_trajectories,) + self.realizations.start_offsets.shape,
+            )
+        batch_key = jax.random.fold_in(
+            jax.random.fold_in(self.simulation.robot_key, 5814), seed
+        )
+        return sample_initial_pose_offset_batch(
+            batch_key,
+            num_trajectories,
+            int(self.realizations.start_offsets.shape[0]),
+            self.offset_radius,
+            self.offset_angle,
+        )
+
     def optimize_trajectories(
         self,
         num_control_points: int,
@@ -953,6 +980,7 @@ class TrajectoryOptimizationPipeline:
         high = 1.0 + float(constraint_weight_jitter)
         constraint_weight_factors = rng.uniform(low, high, size=num_trajectories)
         constraint_weights_per_trajectory = constraint_weight * constraint_weight_factors
+        batch_frozen_start_offsets = self.batch_frozen_start_offsets(num_trajectories, seed)
 
         if vectorized:
             from wmr_simulator.trajectory_optimization.optimizers import optimize_control_points_batch
@@ -966,6 +994,24 @@ class TrajectoryOptimizationPipeline:
                 axis=0,
             )
             group_constraint_weights = jnp.asarray(constraint_weights_per_trajectory, dtype=jnp.float32)
+            # In random mode each trajectory is evaluated under its own
+            # frozen start-pose realization bundle.  This is independent across
+            # trajectories, yet fixed for every step of each objective.
+            batch_realizations = None
+            if self.start_offset_mode == START_OFFSET_MODE_RANDOM:
+                batch_realizations = Realizations(
+                    # The noise roots stay common across candidates; only the
+                    # designed start poses are newly sampled per trajectory.
+                    robot_keys=jnp.broadcast_to(
+                        self.realizations.robot_keys,
+                        (num_trajectories,) + self.realizations.robot_keys.shape,
+                    ),
+                    estimator_keys=jnp.broadcast_to(
+                        self.realizations.estimator_keys,
+                        (num_trajectories,) + self.realizations.estimator_keys.shape,
+                    ),
+                    start_offsets=batch_frozen_start_offsets,
+                )
             optimized_control_points, loss_history, best_decision_variables = optimize_control_points_batch(
                 pipeline=self,
                 initial_decision_variables=initial_decision_variables,
@@ -976,12 +1022,15 @@ class TrajectoryOptimizationPipeline:
                 constraint_weight=group_constraint_weights,
                 constraint_component_weights=constraint_component_weights,
                 constraint_smooth_max_beta=constraint_smooth_max_beta,
+                realizations_batch=batch_realizations,
                 verbose=verbose,
             )
-            # Each trajectory carries its own start offsets when the mode
-            # optimizes them; without that they are all the shared draw.
-            self.batch_start_offsets = jax.vmap(self.start_offsets_from_decision_variables)(
-                best_decision_variables
+            # Random mode gives every trajectory a distinct frozen draw;
+            # optimizing modes return their separately optimized starts.
+            self.batch_start_offsets = (
+                batch_frozen_start_offsets
+                if self.start_offset_mode == START_OFFSET_MODE_RANDOM
+                else jax.vmap(self.start_offsets_from_decision_variables)(best_decision_variables)
             )
             loss_history = np.asarray(loss_history, dtype=float) if loss_history else np.empty((0, num_trajectories))
             final_losses = []
@@ -1035,6 +1084,9 @@ class TrajectoryOptimizationPipeline:
                 initial_control_point_candidates,
                 constraint_weights_per_trajectory,
             ):
+                trajectory_index = len(optimized)
+                if self.start_offset_mode == START_OFFSET_MODE_RANDOM:
+                    self.set_start_offsets(batch_frozen_start_offsets[trajectory_index])
                 optimized_control_points_one, loss_history_one = optimize_control_points(
                     pipeline=self,
                     num_control_points=control_points.shape[0],

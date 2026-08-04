@@ -1,14 +1,14 @@
 problem: problems/pololu_gains.yaml
 gains:
-- 1.2357748746871948
-- 4.658711910247803
-- 4.093794345855713
-- 3.94653582572937
+- 1.234423041343689
+- 5.082069396972656
+- 4.108982086181641
+- 3.961874485015869
 - 0.0
 static_gains: null
 schedule_enabled: false
 schedule: null
-final_loss: 0.008781767450273037
-final_validation_loss: 0.00715619046241045
+final_loss: 0.007683892268687487
+final_validation_loss: 0.006168290972709656
 static_final_loss: null
 static_final_validation_loss: null

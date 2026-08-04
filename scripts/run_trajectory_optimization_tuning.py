@@ -61,10 +61,7 @@ def main():
     # 'random' keeps the frozen draw, 'static' a deterministic spread, and the
     # 'optimize*' modes hand them to the optimizer alongside the control points.
     # They ship in the trajectory pickles either way.
-    parser.add_argument("--start-offset-mode", choices=sorted(START_OFFSET_MODES), default=START_OFFSET_MODE_OPTIMIZE)
-    # Step-size multipliers for the two offset blocks, relative to
-    # --learning-rate. The control points keep the tuned rate at 1.0; the free
-    # offsets live on a different scale and would otherwise crawl.
+    parser.add_argument("--start-offset-mode", choices=sorted(START_OFFSET_MODES), default=START_OFFSET_MODE_RANDOM)
     parser.add_argument("--offset-displacement-step-factor", type=float, default=1.0)
     parser.add_argument("--offset-heading-step-factor", type=float, default=1.0)
     parser.add_argument("--wheel-lp-tau",type=float,default=None)
