@@ -23,6 +23,7 @@ import numpy as np
 
 from wmr_simulator.gain_tuning.defaults import GAIN_TUNING_DEFAULTS
 from wmr_simulator.gain_tuning.objectives import (
+    Realizations,
     closed_loop_objective_terms,
     make_realizations,
     split_realization_keys_by_trajectory,
@@ -32,7 +33,6 @@ from wmr_simulator.gain_tuning.pipeline import (
     resolve_gain_robot_params,
     run_gain_tuning_experiment,
 )
-from wmr_simulator.joint_tuning.benchmark import held_out_trajectories, pose_rmse
 from wmr_simulator.trajectory_optimization.objectives import fim_loss, fim_objective_term
 from wmr_simulator.trajectory_optimization.pipeline import (
     OBJECTIVE_MODE_GAIN_TUNING,
@@ -44,6 +44,69 @@ from wmr_simulator.trajectory_optimization.pipeline import (
 GAIN_NAMES = ("kx", "ky", "kth", "kp_motor", "ki_motor")
 MODES = ("random", "optimize")
 EVAL_SEED = 1234
+
+
+def held_out_trajectories(
+    trajectory_pipeline,
+    num_control_points: int,
+    num_trajectories: int,
+    seed: int = EVAL_SEED,
+) -> jnp.ndarray:
+    """Unoptimized trajectories from the same B-spline family, drawn off a seed
+    no run trains on.
+
+    This is the generalization test that matters: gains tuned on a design that
+    was itself optimized against those gains could be fitting the design rather
+    than the plant, and only a trajectory nobody designed can tell the
+    difference.
+    """
+    decision_variables = jnp.stack(
+        trajectory_pipeline.initial_decision_variable_candidates(
+            num_control_points=num_control_points,
+            num_trajectories=num_trajectories,
+            seed=seed,
+        ),
+        axis=0,
+    )
+    return jax.vmap(
+        lambda variables: trajectory_pipeline.reference_states_from_control_points(
+            trajectory_pipeline.control_points_from_decision_variables(variables)
+        )
+    )(decision_variables)
+
+
+def pose_rmse(
+    gain_pipeline,
+    gains: jnp.ndarray,
+    reference_states: jnp.ndarray,
+    realizations: Realizations,
+) -> jnp.ndarray:
+    """Closed-loop position RMSE against the reference, averaged over the
+    realization bundle. Scored on the *true* poses, not the noisy estimates."""
+    reference_positions = reference_states[1:, :2]
+    indices = jnp.arange(
+        gain_pipeline.inner_steps_per_geometry_step,
+        reference_states.shape[0] * gain_pipeline.inner_steps_per_geometry_step,
+        gain_pipeline.inner_steps_per_geometry_step,
+        dtype=jnp.int32,
+    )
+    reference_start = gain_pipeline.initial_reference_pose(reference_states)
+
+    def one(robot_key, estimator_key, offset):
+        predicted_log = gain_pipeline.run_closed_loop(
+            gain_pipeline.robot_params,
+            controller_gains=gains,
+            robot_key=robot_key,
+            estimator_key=estimator_key,
+            reference_states=reference_states,
+            initial_pose=reference_start + offset,
+        )
+        error = predicted_log.pose.true_states[indices][:, :2] - reference_positions
+        return jnp.sqrt(jnp.mean(jnp.sum(error**2, axis=1)))
+
+    return jnp.mean(
+        jax.vmap(one)(realizations.robot_keys, realizations.estimator_keys, realizations.start_offsets)
+    )
 
 
 def _jsonable(value):

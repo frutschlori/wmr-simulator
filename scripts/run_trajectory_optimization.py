@@ -256,13 +256,15 @@ def main():
             export_dir = os.path.join("trajectory_exports", f"{filename_prefix}_{run_timestamp}")
             os.makedirs(export_dir, exist_ok=True)
             for index, control_points in enumerate(optimized_control_point_batch):
+                clamped_control_points = pipeline.clamp_control_points(control_points)
                 saved_paths.append(
                     pipeline.save_reference_states_pickle(
                         out_dir=export_dir,
                         filename_prefix=f"{filename_prefix}_{index:02d}",
                         reference_states=pipeline.reference_states_from_control_points(
-                            pipeline.clamp_control_points(control_points)
+                            clamped_control_points
                         ),
+                        control_points=clamped_control_points,
                     )
                 )
             print("Saved trajectory pickles:")

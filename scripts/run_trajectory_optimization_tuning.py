@@ -61,7 +61,7 @@ def main():
     # 'random' keeps the frozen draw, 'static' a deterministic spread, and the
     # 'optimize*' modes hand them to the optimizer alongside the control points.
     # They ship in the trajectory pickles either way.
-    parser.add_argument("--start-offset-mode", choices=sorted(START_OFFSET_MODES), default=START_OFFSET_MODE_RANDOM)
+    parser.add_argument("--start-offset-mode", choices=sorted(START_OFFSET_MODES), default=START_OFFSET_MODE_OPTIMIZE)
     parser.add_argument("--offset-displacement-step-factor", type=float, default=1.0)
     parser.add_argument("--offset-heading-step-factor", type=float, default=1.0)
     parser.add_argument("--wheel-lp-tau",type=float,default=None)
@@ -288,13 +288,17 @@ def main():
             export_dir = os.path.join("trajectory_exports", f"{filename_prefix}_{run_timestamp}")
             os.makedirs(export_dir, exist_ok=True)
             for index, control_points in enumerate(optimized_control_point_batch):
+                clamped_control_points = pipeline.clamp_control_points(control_points)
                 saved_paths.append(
                     pipeline.save_reference_states_pickle(
                         out_dir=export_dir,
                         filename_prefix=f"{filename_prefix}_{index:02d}",
                         reference_states=pipeline.reference_states_from_control_points(
-                            pipeline.clamp_control_points(control_points)
+                            clamped_control_points
                         ),
+                        # The curve itself, not just its samples: a warm start
+                        # picks up the decision variables directly.
+                        control_points=clamped_control_points,
                         # Each trajectory ships the offsets it was designed
                         # under, which the gain tuner then tunes on. In
                         # identification mode there are none: the start is where
