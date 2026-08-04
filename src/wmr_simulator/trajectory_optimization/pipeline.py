@@ -143,8 +143,17 @@ DEFAULT_NUM_CONTROL_POINTS = 4
 # than a private copy here.
 DEFAULT_NUM_REALIZATIONS = int(GAIN_TUNING_DEFAULTS["num_realizations"])
 # Lower bound on the relative FIM scale of a controller gain, matching the
-# default k_min_stab of the gain search (gain_tuning.defaults).
-GAIN_FIM_SCALING_FLOOR = 1e-3
+# default k_min_stab of the gain search (gain_tuning.defaults). Only the four
+# gains the tuner searches in log space use it; see fim_parameter_scaling.
+GAIN_FIM_SCALING_FLOOR = float(GAIN_TUNING_DEFAULTS["k_min_stab"])
+# Index of kimotor in the flat 5-gain vector [kx, ky, kth, kpmotor, kimotor].
+# It is the one gain the tuner is allowed to set to exactly 0 (integral action
+# off), which is why it cannot be scaled relative to its own value.
+KIMOTOR_INDEX = 4
+# Fallback FIM scale for kimotor, used only when the problem yaml starts it at
+# 0 and there is no nominal value to scale by: the width of the range the tuner
+# searches it over (gain_tuning.optimizers' sqrt space is [0, k_max_rest]).
+KIMOTOR_FIM_SCALE_FALLBACK = float(GAIN_TUNING_DEFAULTS["k_max_rest"])
 OBJECTIVE_MODES = {OBJECTIVE_MODE_IDENTIFICATION, OBJECTIVE_MODE_GAIN_TUNING}
 
 
@@ -158,7 +167,9 @@ def normalize_objective_mode(objective_mode: str) -> str:
     return objective_mode
 
 
-def reference_states_export_payload(reference_states, dt: float, start_offsets=None, **metadata):
+def reference_states_export_payload(
+    reference_states, dt: float, start_offsets=None, control_points=None, **metadata
+):
     """The pickle a designed trajectory ships as.
 
     ``start_offsets`` (R, 3) are the start-pose offsets the trajectory was
@@ -166,6 +177,16 @@ def reference_states_export_payload(reference_states, dt: float, start_offsets=N
     with the curve because the design is only informative about the gains
     *under those conditions*: the gain tuner reads them back and rolls out on
     exactly the starts the designer scored, instead of drawing its own.
+
+    ``control_points`` (K, 2) are the curve the sampled states came from. The
+    states alone are a lossy record of a design -- they are the basis applied to
+    the control points on one time grid -- so anything that wants to keep
+    *optimizing* the trajectory (the joint loop's warm start) needs the decision
+    variables themselves, not a reconstruction of them.
+
+    Consumers read this payload by key and ignore what they do not know, so
+    adding fields here is safe for the reference exporter, the gain tuner and
+    the identification analysis alike.
     """
     payload = {
         "reference_states": np.asarray(reference_states),
@@ -173,8 +194,105 @@ def reference_states_export_payload(reference_states, dt: float, start_offsets=N
     }
     if start_offsets is not None:
         payload["start_offsets"] = np.asarray(start_offsets, dtype=float)
+    if control_points is not None:
+        payload["control_points"] = np.asarray(control_points, dtype=float)
     payload.update(metadata)
     return payload
+
+
+class ReferenceStatesExport(NamedTuple):
+    """A directory of designed trajectories, read back.
+
+    ``start_offsets`` is (T, R, 3) and ``control_points`` (T, K, 2) when the
+    design shipped them, None when it did not (identification-mode exports carry
+    no offsets). Same all-or-none rule the gain tuner's loader applies to the
+    offsets: a set where half the trajectories were scored under designed starts
+    and half were not is not one experiment.
+    """
+
+    reference_states: np.ndarray            # (T, N, 8)
+    start_offsets: np.ndarray | None        # (T, R, 3)
+    control_points: np.ndarray | None       # (T, K, 2)
+    dt: float
+    paths: list[str]
+
+
+def load_reference_states_exports(directory: str) -> ReferenceStatesExport:
+    """Read back everything :func:`reference_states_export_payload` wrote.
+
+    The counterpart of the writer, and the reader behind a warm start: a run
+    pointed at a directory of pretuned trajectories picks up the curves, their
+    control points and the start offsets they were designed under, rather than
+    re-deriving any of them.
+    """
+    paths = sorted(
+        os.path.join(directory, name)
+        for name in os.listdir(directory)
+        if name.endswith(".pkl")
+    )
+    if not paths:
+        raise ValueError(f"No trajectory pickles found in {directory}")
+
+    reference_states, start_offsets, control_points, timesteps = [], [], [], []
+    for path in paths:
+        with open(path, "rb") as file:
+            payload = pickle.load(file)
+        if not isinstance(payload, dict):
+            raise ValueError(f"{path} is not a reference-states export payload.")
+        reference_states.append(np.asarray(payload["reference_states"], dtype=float))
+        start_offsets.append(
+            None if payload.get("start_offsets") is None
+            else np.asarray(payload["start_offsets"], dtype=float)
+        )
+        control_points.append(
+            None if payload.get("control_points") is None
+            else np.asarray(payload["control_points"], dtype=float)
+        )
+        timesteps.append(float(payload["dt"]))
+
+    shapes = {states.shape for states in reference_states}
+    if len(shapes) != 1:
+        raise ValueError(f"Trajectories in {directory} have differing shapes: {sorted(shapes)}.")
+    if len(set(timesteps)) != 1:
+        raise ValueError(f"Trajectories in {directory} were sampled at differing dt: {timesteps}.")
+
+    present = [offsets is not None for offsets in start_offsets]
+    if any(present) and not all(present):
+        missing = [path for path, has in zip(paths, present) if not has]
+        raise ValueError(
+            "Some trajectories carry designed start offsets and some do not: "
+            f"{missing}. Export them all with offsets, or none."
+        )
+    if all(present):
+        offset_shapes = {offsets.shape for offsets in start_offsets}
+        if len(offset_shapes) != 1 or len(next(iter(offset_shapes))) != 2:
+            raise ValueError(
+                f"Designed start offsets must all have the same shape (R, 3); got {sorted(offset_shapes)}."
+            )
+
+    have_control_points = [points is not None for points in control_points]
+    if any(have_control_points) and not all(have_control_points):
+        missing = [path for path, has in zip(paths, have_control_points) if not has]
+        raise ValueError(
+            f"Some trajectories carry control points and some do not: {missing}. "
+            "Export them all with control points, or none."
+        )
+    if all(have_control_points):
+        point_shapes = {points.shape for points in control_points}
+        if len(point_shapes) != 1 or len(next(iter(point_shapes))) != 2:
+            raise ValueError(
+                f"Control points must all have the same shape (K, 2); got {sorted(point_shapes)}."
+            )
+
+    return ReferenceStatesExport(
+        reference_states=np.stack(reference_states, axis=0),
+        start_offsets=np.stack(start_offsets, axis=0) if all(present) else None,
+        control_points=(
+            np.stack(control_points, axis=0) if all(have_control_points) else None
+        ),
+        dt=timesteps[0],
+        paths=paths,
+    )
 
 
 class TrajectoryOptimizationPipeline:
@@ -197,6 +315,12 @@ class TrajectoryOptimizationPipeline:
         self.robot = self.simulation.robot
         self.controller = self.simulation.controller
         self.controller_gains = self.simulation.gains
+        # kimotor's FIM scale: constant, and pinned to the problem's *nominal*
+        # kimotor. See fim_parameter_scaling for why it cannot track the value.
+        nominal_kimotor = float(self.controller_gains[KIMOTOR_INDEX])
+        self.kimotor_fim_scale = (
+            nominal_kimotor if nominal_kimotor > 0.0 else KIMOTOR_FIM_SCALE_FALLBACK
+        )
         self.estimator = self.simulation.estimator
         # The encoder low-pass is part of the plant the designed trajectory will
         # be driven on: the firmware filters the raw wheel speeds with
@@ -309,10 +433,34 @@ class TrajectoryOptimizationPipeline:
         # space the tuner searches in -- gains move in log space
         # (gain_tuning.optimizers), i.e. by relative steps.
         if self.objective_mode == OBJECTIVE_MODE_GAIN_TUNING:
-            # A gain may legitimately be 0 (kimotor = integral action off), and a
-            # zero scale would blank that column and leave the FIM singular.
-            # Floor it at the smallest gain the tuner can represent.
-            return jnp.maximum(params, GAIN_FIM_SCALING_FLOOR)
+            # ... but only for the four gains that must stay strictly positive
+            # and are therefore searched in log space. kimotor is the exception:
+            # it is allowed to be exactly 0 (integral action off), and a scale
+            # proportional to its own value blanks its FIM column as the tuner
+            # drives it toward 0 -- the FIM goes singular in that direction and
+            # A-optimality picks up an unfixable term that then dominates the
+            # trajectory objective (a floor only bounds how badly: at 1e-3 the
+            # column is still dead).
+            #
+            # All that is needed to fix that is a *constant* scale, and the
+            # constant has to be the problem's nominal kimotor rather than
+            # anything larger. Relative scaling already used the nominal value
+            # at the initial design point, so pinning it there leaves every
+            # design that does not move the gains -- the whole standalone
+            # trajectory optimizer -- bit-identical, while the joint loop's
+            # moving design point no longer collapses the column. The size of
+            # this constant is not cosmetic: it sets how much of trace(FIM^-1)
+            # lives in the kimotor direction (35-40% at the nominal value), and
+            # that share is what buys *curvature* in the design, since tight
+            # turns are what excite the motor loop. Scaling by the search range
+            # k_max_rest = 20 instead dropped the share to 3-5% and cost 28% of
+            # the designed curves' mean |kappa| over 500 steps.
+            return jnp.asarray(
+                jnp.maximum(params, GAIN_FIM_SCALING_FLOOR)
+                .at[KIMOTOR_INDEX]
+                .set(self.kimotor_fim_scale),
+                dtype=jnp.float32,
+            )
         # Identification params (r, L, a_slip_max) are strictly positive.
         return params
 
@@ -1292,6 +1440,7 @@ class TrajectoryOptimizationPipeline:
         filename_prefix="reference_states",
         reference_states=None,
         start_offsets=...,
+        control_points=...,
     ):
         """Export a reference trajectory. Pass ``reference_states`` to export a
         trajectory other than the pipeline's current one -- exporting a batch
@@ -1303,8 +1452,17 @@ class TrajectoryOptimizationPipeline:
         back the conditions the trajectory was designed under. Identification
         mode exports none -- there the start is where the robot is physically
         placed, not a design variable. Pass an explicit array (or None) to
-        override."""
+        override.
+
+        ``control_points`` defaults to the pipeline's own -- but only when
+        ``reference_states`` was not overridden, since a batch export passes
+        someone else's states and the pipeline's current curve would then be the
+        wrong one. A batch caller passes the matching control points explicitly;
+        writing none is better than writing a curve that is not this
+        trajectory's."""
         os.makedirs(out_dir, exist_ok=True)
+        if control_points is ...:
+            control_points = self.control_points if reference_states is None else None
         reference_states = self.reference_states if reference_states is None else reference_states
         if start_offsets is ...:
             start_offsets = (
@@ -1318,7 +1476,10 @@ class TrajectoryOptimizationPipeline:
         with open(out_path, "wb") as file:
             pickle.dump(
                 reference_states_export_payload(
-                    reference_states, self.problem.dt, start_offsets=start_offsets
+                    reference_states,
+                    self.problem.dt,
+                    start_offsets=start_offsets,
+                    control_points=control_points,
                 ),
                 file,
             )

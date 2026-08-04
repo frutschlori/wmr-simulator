@@ -52,8 +52,11 @@ from wmr_simulator.gain_tuning.optimizers import (
 )
 from wmr_simulator.gain_tuning.pipeline import ControllerTuningPipeline, resolve_gain_robot_params
 from wmr_simulator.trajectory_optimization.start_offsets import (
+    START_OFFSET_MODE_OPTIMIZE,
+    START_OFFSET_MODE_RANDOM,
     START_OFFSET_MODE_STATIC,
     inverse_squash_start_offsets,
+    sample_initial_pose_offset_batch,
     normalize_start_offset_mode,
     resolve_start_offsets,
     start_offset_mask,
@@ -78,6 +81,7 @@ from wmr_simulator.trajectory_optimization.optimizers import (
 from wmr_simulator.trajectory_optimization.pipeline import (
     OBJECTIVE_MODE_GAIN_TUNING,
     TrajectoryOptimizationPipeline,
+    load_reference_states_exports,
 )
 
 
@@ -120,12 +124,18 @@ class JointState(NamedTuple):
     ``gain_values`` are optimizer-space (log/sqrt) values, not gains, and
     ``free_offsets`` are the unconstrained pre-squash start-offset variables --
     both blocks' search spaces, not their physical readings.
+
+    The offsets are per *trajectory*, matching the standalone designer (every
+    trajectory in a batch optimizes its own starts and exports them) and the
+    gain tuner downstream, which reads a (T, R, 3) bundle off the pickles. A
+    single shared bundle could not survive a round trip through an export
+    directory, which is what the warm start is.
     """
 
     gain_values: jax.Array              # (5,)
     gain_opt_state: optax.OptState
     decision_variables: jax.Array       # (T, 2K)
-    free_offsets: jax.Array             # (R, 3)
+    free_offsets: jax.Array             # (T, R, 3)
     trajectory_opt_state: optax.OptState
 
 
@@ -133,7 +143,11 @@ class JointTuningResult(NamedTuple):
     gains: jax.Array                    # (5,)
     control_points: jax.Array           # (T, K, 2)
     reference_states: jax.Array         # (T, N, 8)
-    start_offsets: jax.Array            # (R, 3)
+    start_offsets: jax.Array            # (T, R, 3)
+    # The root noise bundle. Its own ``start_offsets`` are the initial draw the
+    # per-trajectory offsets above started from; the offsets the run ended on
+    # are ``start_offsets``, and that is what ships and what anything scoring
+    # the result should roll out from.
     realizations: Realizations
     initial_decision_variables: jax.Array       # (T, 2K) before any step
     warm_start_decision_variables: jax.Array    # (T, 2K) when the gain block first ran
@@ -166,7 +180,8 @@ def run_joint_tuning(
     num_realizations: int = int(GAIN_TUNING_DEFAULTS["num_realizations"]),
     trajectory_learning_rate: float = 1e-3,
     gain_learning_rate: float = 1e-4,
-    start_offset_mode: str = "random",
+    warm_start_trajectories_dir: str | None = None,
+    start_offset_mode: str = START_OFFSET_MODE_OPTIMIZE,
     init_offset_radius: float = float(GAIN_TUNING_DEFAULTS["init_offset_radius"]),
     init_offset_angle: float = float(GAIN_TUNING_DEFAULTS["init_offset_angle"]),
     constraint_violation_tolerance: float = DEFAULT_CONSTRAINT_VIOLATION_TOLERANCE,
@@ -190,6 +205,17 @@ def run_joint_tuning(
     rounds with the gain block skipped. The trajectory optimizer's Adam state
     therefore carries straight into the alternating phase instead of being
     rebuilt.
+
+    ``warm_start_trajectories_dir`` replaces that phase with a set of designed
+    trajectories read off disk: the exports carry the control points and the
+    start offsets they were designed under, and both are adopted as the loop's
+    own, so the alternation begins exactly where a standalone
+    trajectory-optimization run left off. ``warm_start_rounds`` is then 0 -- the
+    trajectories are already warm, and spending rounds re-warming them against
+    the initial gains is exactly the cost this argument exists to avoid. The
+    directory also *sets* ``num_trajectories``, ``num_realizations`` and
+    ``num_control_points``: they are properties of the design being loaded, not
+    of this run.
     """
     if num_rounds < 0:
         raise ValueError("num_rounds must be non-negative.")
@@ -204,6 +230,33 @@ def run_joint_tuning(
     start_offset_mode = normalize_start_offset_mode(start_offset_mode)
     mode = normalize_mode(mode)
     criterion = normalize_criterion(criterion)
+
+    warm_start = (
+        None if warm_start_trajectories_dir is None
+        else load_reference_states_exports(warm_start_trajectories_dir)
+    )
+    if warm_start is not None:
+        if warm_start.start_offsets is None:
+            raise ValueError(
+                f"The trajectories in {warm_start_trajectories_dir} carry no start offsets. "
+                "Only a gain-tuning-mode design can warm-start this loop: its offsets are the "
+                "conditions its FIM was averaged over, and without them the design says nothing "
+                "about the gains."
+            )
+        if warm_start.control_points is None:
+            raise ValueError(
+                f"The trajectories in {warm_start_trajectories_dir} carry no control points. "
+                "The warm start continues optimizing the curve, so it needs the decision "
+                "variables themselves; re-export the design."
+            )
+        # All three counts are properties of the design being loaded, not of
+        # this run: the curve's control points, its trajectories, its
+        # realizations.
+        num_trajectories = int(warm_start.reference_states.shape[0])
+        num_realizations = int(warm_start.start_offsets.shape[1])
+        num_control_points = int(warm_start.control_points.shape[1])
+        warm_start_rounds = 0
+
     schedule = _round_schedule(mode, num_rounds, warm_start_rounds)
 
     construct_start = time.time()
@@ -241,24 +294,49 @@ def run_joint_tuning(
     dt = trajectory_pipeline.problem.dt
 
     mask = start_offset_mask(start_offset_mode)
-    frozen_offsets = (
-        static_start_offsets(num_realizations, init_offset_radius, init_offset_angle)
-        if start_offset_mode == START_OFFSET_MODE_STATIC
-        else realizations.start_offsets
-    )
+    # (T, R, 3): every trajectory gets its own start-pose bundle, as in the
+    # standalone batch designer. A warm start adopts the loaded design's, which
+    # is the whole point of shipping them with the curve.
+    # Same semantics as TrajectoryOptimizationPipeline.batch_frozen_start_offsets:
+    # only `random` gives each trajectory its own draw, because there the draw is
+    # the design; the other modes broadcast one bundle, which `static` keeps and
+    # the optimizing modes move away from independently per trajectory.
+    if warm_start is not None:
+        frozen_offsets = jnp.asarray(warm_start.start_offsets, dtype=jnp.float32)
+    elif start_offset_mode == START_OFFSET_MODE_RANDOM:
+        frozen_offsets = sample_initial_pose_offset_batch(
+            jax.random.fold_in(jax.random.fold_in(jax.random.PRNGKey(seed), 5814), seed),
+            num_trajectories,
+            num_realizations,
+            init_offset_radius,
+            init_offset_angle,
+        )
+    else:
+        frozen_offsets = jnp.broadcast_to(
+            static_start_offsets(num_realizations, init_offset_radius, init_offset_angle)
+            if start_offset_mode == START_OFFSET_MODE_STATIC
+            else realizations.start_offsets,
+            (num_trajectories, num_realizations, 3),
+        )
     # The optimizing modes start *at* the frozen offsets rather than at zero, so
     # every mode begins under the same conditions and only their evolution differs.
-    initial_free_offsets = inverse_squash_start_offsets(
-        frozen_offsets, init_offset_radius, init_offset_angle
-    )
+    initial_free_offsets = jax.vmap(
+        lambda offsets: inverse_squash_start_offsets(
+            offsets, init_offset_radius, init_offset_angle
+        )
+    )(frozen_offsets)
 
     def offsets_from_free(free_offsets):
-        return resolve_start_offsets(
-            free_offsets, frozen_offsets, mask, init_offset_radius, init_offset_angle
-        )
+        """(T, R, 3) free variables -> (T, R, 3) feasible offsets."""
+        return jax.vmap(
+            lambda free, frozen: resolve_start_offsets(
+                free, frozen, mask, init_offset_radius, init_offset_angle
+            )
+        )(free_offsets, frozen_offsets)
 
-    def realizations_from_free(free_offsets):
-        return realizations._replace(start_offsets=offsets_from_free(free_offsets))
+    def realizations_from_offsets(offsets):
+        """The root bundle re-pointed at one trajectory's offsets."""
+        return realizations._replace(start_offsets=offsets)
 
     def reference_states_from_decision_variables(decision_variables):
         return trajectory_pipeline.reference_states_from_control_points(
@@ -266,7 +344,7 @@ def run_joint_tuning(
         )
 
     # ---------------------------------------------------------------- trajectory
-    def trajectory_terms(decision_variables, gains, free_offsets):
+    def trajectory_terms(decision_variables, gains, start_offsets):
         """One trajectory's objective plus the decomposition, in one rollout set.
 
         This is ``trajectory_objective`` written out so the FIM and constraint
@@ -277,7 +355,7 @@ def run_joint_tuning(
         fim_factor = trajectory_pipeline.compute_fim_factor(
             reference_states=reference_states,
             gains=gains,
-            realizations=realizations_from_free(free_offsets),
+            realizations=realizations_from_offsets(start_offsets),
         )
         fim_term = fim_loss(fim_factor, criterion)
         components = constraint_loss_components_from_reference_states(
@@ -297,13 +375,12 @@ def run_joint_tuning(
 
     def trajectory_loss(trajectory_params, gains):
         decision_variables, free_offsets = trajectory_params
-        totals, aux = jax.vmap(trajectory_terms, in_axes=(0, None, None))(
-            decision_variables, gains, free_offsets
+        totals, aux = jax.vmap(trajectory_terms, in_axes=(0, None, 0))(
+            decision_variables, gains, offsets_from_free(free_offsets)
         )
-        # Mean over trajectories: they are independent problems sharing only the
-        # offsets, and Adam's per-coordinate normalization makes the 1/T factor
-        # irrelevant to the control points while giving the shared offsets the
-        # average of the per-trajectory gradients.
+        # Mean over trajectories: with per-trajectory offsets they are fully
+        # independent problems, and Adam's per-coordinate normalization makes
+        # the 1/T factor irrelevant to every coordinate anyway.
         return jnp.mean(totals), (totals,) + aux
 
     trajectory_optimizer = optax.adam(trajectory_learning_rate)
@@ -342,7 +419,7 @@ def run_joint_tuning(
             decision_variables
         )
 
-        def terms_for_reference(reference_states):
+        def terms_for_reference(reference_states, start_offsets):
             return closed_loop_objective_terms(
                 gain_pipeline,
                 gains,
@@ -353,10 +430,12 @@ def run_joint_tuning(
                 input_delta_weight=input_delta_weight,
                 omega_delta_weight=omega_delta_weight,
                 reference_states=reference_states,
-                initial_pose_offsets=offsets,
+                initial_pose_offsets=start_offsets,
             )
 
-        return jnp.sum(jnp.mean(jax.vmap(terms_for_reference)(reference_trajectories), axis=0))
+        return jnp.sum(
+            jnp.mean(jax.vmap(terms_for_reference)(reference_trajectories, offsets), axis=0)
+        )
 
     gain_optimizer = optax.adam(gain_learning_rate)
 
@@ -371,14 +450,24 @@ def run_joint_tuning(
         return next_gain_values, next_optimizer_state, loss_pre, loss_post
 
     # ---------------------------------------------------------------------- init
-    decision_variables = jnp.stack(
-        trajectory_pipeline.initial_decision_variable_candidates(
-            num_control_points=num_control_points,
-            num_trajectories=num_trajectories,
-            seed=seed,
-        ),
-        axis=0,
-    )
+    if warm_start is None:
+        decision_variables = jnp.stack(
+            trajectory_pipeline.initial_decision_variable_candidates(
+                num_control_points=num_control_points,
+                num_trajectories=num_trajectories,
+                seed=seed,
+            ),
+            axis=0,
+        )
+    else:
+        # The design's own control points, straight off the pickles: they are
+        # the trajectory block's decision variables, so the loop resumes on
+        # exactly the curve the export left off on.
+        decision_variables = jax.vmap(
+            lambda control_points: jnp.ravel(
+                trajectory_pipeline.clamp_control_points(control_points)
+            )
+        )(jnp.asarray(warm_start.control_points, dtype=jnp.float32))
     gain_values = controller_gains_to_optimizer_values(
         trajectory_pipeline.controller_gains,
         k_min_stab=k_min_stab,
@@ -416,6 +505,12 @@ def run_joint_tuning(
             f"  learning rates: trajectory {trajectory_learning_rate:.3g}, "
             f"gain {gain_learning_rate:.3g}; constraint tolerance {constraint_violation_tolerance:.3g}."
         )
+        if warm_start is not None:
+            print(
+                f"  warm start: {num_trajectories} designed trajectories from "
+                f"{warm_start_trajectories_dir}, with their control points and start offsets "
+                "(no warm-start rounds)."
+            )
 
     loop_start = time.time()
     converged_at_round = None
@@ -570,7 +665,7 @@ def run_joint_tuning(
         control_points=control_points,
         reference_states=reference_states,
         start_offsets=start_offsets,
-        realizations=realizations._replace(start_offsets=start_offsets),
+        realizations=realizations,
         initial_decision_variables=decision_variables,
         warm_start_decision_variables=warm_start_decision_variables,
         state=state,
@@ -588,6 +683,7 @@ def run_joint_tuning(
             "num_realizations": num_realizations,
             "trajectory_learning_rate": trajectory_learning_rate,
             "gain_learning_rate": gain_learning_rate,
+            "warm_start_trajectories_dir": warm_start_trajectories_dir,
             "start_offset_mode": start_offset_mode,
             "init_offset_radius": init_offset_radius,
             "init_offset_angle": init_offset_angle,
