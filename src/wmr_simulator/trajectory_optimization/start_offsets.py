@@ -146,3 +146,25 @@ def sample_initial_pose_offsets(
     return jnp.stack(
         [radius * jnp.cos(bearing), radius * jnp.sin(bearing), heading], axis=1
     ).astype(jnp.float32)
+
+
+def sample_initial_pose_offset_batch(
+    key: jax.Array,
+    num_trajectories: int,
+    num_realizations: int,
+    offset_radius: float,
+    offset_angle: float,
+) -> jax.Array:
+    """Draw independent frozen start-pose bundles for a trajectory batch.
+
+    The result has shape ``(T, R, 3)``.  Each trajectory receives its own
+    ``R`` realization starts; every bundle is nevertheless fixed for the
+    entire optimization, preserving common random numbers within that
+    trajectory's objective.
+    """
+    trajectory_keys = jax.random.split(key, num_trajectories)
+    return jax.vmap(
+        lambda trajectory_key: sample_initial_pose_offsets(
+            trajectory_key, num_realizations, offset_radius, offset_angle
+        )
+    )(trajectory_keys)
