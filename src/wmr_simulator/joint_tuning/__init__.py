@@ -6,6 +6,7 @@ Its own package because the existing dependency direction is
 """
 
 from wmr_simulator.joint_tuning.pipeline import (
+    JointRoundSnapshot,
     JointState,
     JointTuningResult,
     run_joint_tuning,
@@ -16,6 +17,7 @@ from wmr_simulator.trajectory_optimization.start_offsets import (
 )
 
 __all__ = [
+    "JointRoundSnapshot",
     "JointState",
     "JointTuningResult",
     "START_OFFSET_MODES",

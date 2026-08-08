@@ -21,6 +21,7 @@ from wmr_simulator.trajectory_optimization.pipeline import reference_states_expo
 from wmr_simulator.visualization.joint_tuning import (
     plot_joint_tuning_history,
     plot_joint_tuning_trajectories,
+    save_joint_tuning_trajectory_trace,
 )
 
 
@@ -70,9 +71,18 @@ def main():
     # A directory of designed trajectory pickles to start from, skipping the
     # warm-start rounds entirely. Without it the loop designs its own from
     # scratch, which is what --warm-start-rounds pays for.
-    parser.add_argument("--warm-start-trajectories", type=str, default="trajectory_exports/gain_optimized_current")
+    parser.add_argument("--warm-start-trajectories", type=str,
+                        default="trajectory_exports/gain_optimized_current",
+                        help="Empty string designs the trajectories from scratch instead, which "
+                             "is what --warm-start-rounds pays for.")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--criterion", choices=list(CRITERIA), default=DEFAULT_CRITERION)
+    parser.add_argument("--save-round-GIF", action="store_true", default=False,
+                        help="Animate the trajectories and their closed-loop rollouts round by "
+                             "round. Costs one rollout batch per frame and keeps a per-round "
+                             "snapshot, so it is off by default.")
+    parser.add_argument("--round-trace-stride", type=int, default=5,
+                        help="Rounds between animation frames (--save-round-GIF only).")
     parser.add_argument("--out", type=str, default="results/joint_tuning")
     args = parser.parse_args()
 
@@ -91,6 +101,7 @@ def main():
         trust_stall_rounds=args.trust_stall_rounds,
         gain_steps_per_round=args.gain_steps_per_round,
         trajectory_steps_per_round=args.trajectory_steps_per_round,
+        trajectory_trace_stride=args.round_trace_stride if args.save_round_GIF else 0,
         validation_trajectories_dir=args.validation_trajectories or None,
         convergence_rel_tol=args.convergence_rel_tol,
         convergence_window=args.convergence_window,
@@ -159,6 +170,8 @@ def main():
 
     plot_joint_tuning_history(result.history)
     plot_joint_tuning_trajectories(result)
+    if args.save_round_GIF:
+        save_joint_tuning_trajectory_trace(result)
 
 
 if __name__ == "__main__":
