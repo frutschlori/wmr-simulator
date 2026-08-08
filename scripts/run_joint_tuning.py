@@ -73,14 +73,12 @@ def main():
     parser.add_argument("--warm-start-trajectories", type=str, default="trajectory_exports/gain_optimized_current")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--criterion", choices=list(CRITERIA), default=DEFAULT_CRITERION)
-    parser.add_argument("--wheel-lp-tau", type=float, default=None)
     parser.add_argument("--out", type=str, default="results/joint_tuning")
     args = parser.parse_args()
 
     result = run_joint_tuning(
         args.problem,
         mode=args.mode,
-        wheel_lp_tau=args.wheel_lp_tau,
         num_rounds=args.rounds,
         warm_start_rounds=args.warm_start_rounds,
         num_trajectories=args.num_trajectories,
