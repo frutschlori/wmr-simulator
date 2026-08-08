@@ -266,6 +266,9 @@ def plot_trajectory_set(
     out_prefix="trajectory_set",
     out_path=None,
     title="Optimized Trajectories",
+    axis_limits=None,
+    annotation=None,
+    verbose=True,
 ):
     """Draw a whole batch of optimized trajectories in one figure: each
     trajectory gets a color, its reference dashed and its closed-loop pose
@@ -274,7 +277,13 @@ def plot_trajectory_set(
     ``closed_loop_poses`` may be ``[N, T, 3]`` (one rollout per trajectory) or
     ``[N, K, T, 3]`` (one per start-pose offset). The second form is what the
     gain-tuning design actually optimizes -- its FIM is an average over those K
-    starts -- so drawing the whole family shows the spread the objective saw."""
+    starts -- so drawing the whole family shows the spread the objective saw.
+
+    ``axis_limits`` (``((x_min, x_max), (y_min, y_max))``) pins the view, which
+    an animation needs: autoscaled frames make the curves appear to move
+    whenever the extent changes. ``annotation`` is a corner text block, and
+    ``verbose`` silences the per-file print when this is called once per frame.
+    """
     os.makedirs("visualize", exist_ok=True)
     output_filename = out_path if out_path is not None else os.path.join("visualize", f"{out_prefix}.pdf")
 
@@ -309,17 +318,36 @@ def plot_trajectory_set(
                label="Closed-Loop Actual" if num_realizations == 1
                else f"Closed-Loop Actual ({num_realizations} start offsets)"),
     ]
-    ax.legend(handles=legend_handles, loc="best")
+    # "best" puts the legend top-left, which is where the annotation box goes.
+    ax.legend(handles=legend_handles, loc="lower right" if annotation is not None else "best")
     ax.set_xlabel("x [m]")
     ax.set_ylabel("y [m]")
     ax.set_title(f"{title} ({num_trajectories} shown)")
+    if axis_limits is not None:
+        ax.set_xlim(*axis_limits[0])
+        ax.set_ylim(*axis_limits[1])
+    if annotation is not None:
+        ax.text(
+            0.015, 0.985, annotation, transform=ax.transAxes, va="top", ha="left",
+            fontsize=8, family="monospace", zorder=10,
+            bbox=dict(boxstyle="round,pad=0.35", facecolor="white", edgecolor="0.7", alpha=0.9),
+        )
     ax.set_aspect("equal", adjustable="box")
     ax.grid(True)
     fig.tight_layout()
-    fig.savefig(output_filename, bbox_inches="tight", transparent=False, facecolor="white")
+    # bbox_inches="tight" crops to the drawn content, which changes the pixel
+    # size from frame to frame and makes a GIF jitter; with pinned axes the
+    # frames must all be the same canvas.
+    fig.savefig(
+        output_filename,
+        bbox_inches=None if axis_limits is not None else "tight",
+        transparent=False,
+        facecolor="white",
+    )
     plt.close(fig)
 
-    print(f"Trajectory set PDF saved at: {output_filename}")
+    if verbose:
+        print(f"Trajectory set PDF saved at: {output_filename}")
     return output_filename
 
 

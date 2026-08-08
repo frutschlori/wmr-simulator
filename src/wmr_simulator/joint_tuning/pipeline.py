@@ -207,6 +207,26 @@ class JointState(NamedTuple):
     trajectory_opt_state: optax.OptState
 
 
+class JointRoundSnapshot(NamedTuple):
+    """One round of the alternation, kept only when ``trajectory_trace_stride > 0``.
+
+    The decision variables and the resolved offsets, not the sampled states: the
+    states are the basis applied to the control points on one time grid, so
+    keeping the control points costs (K, 2) per trajectory instead of (N, 8) and
+    the renderer rebuilds the curve through the same pipeline the loop used.
+    ``gains`` are physical gains, and ``validation_loss`` is the held-out score
+    behind them, so a frame can be annotated with the number that actually
+    selects what ships (NaN on a warm-start round, where the gain block did not
+    run and no score was taken).
+    """
+
+    round_index: int
+    control_points: np.ndarray          # (T, K, 2)
+    start_offsets: np.ndarray           # (T, R, 3)
+    gains: np.ndarray                   # (5,)
+    validation_loss: float
+
+
 class JointTuningResult(NamedTuple):
     # The best iterate scored on the frozen scoring set, not the last one. On a
     # pair of blocks that keep moving each other's objective, the last iterate
@@ -227,6 +247,9 @@ class JointTuningResult(NamedTuple):
     state: JointState                   # both Adam states, as the loop left them
     trajectory_pipeline: TrajectoryOptimizationPipeline
     gain_pipeline: ControllerTuningPipeline
+    # Per-round snapshots, empty unless ``trajectory_trace_stride > 0``. Opt-in
+    # so the default run's memory profile is unchanged.
+    trajectory_trace: tuple
     history: dict
     config: dict
     timing: dict
@@ -306,6 +329,12 @@ def run_joint_tuning(
     # one cannot, so the honest setting is a fixed round budget.
     convergence_rel_tol: float = -1.0,
     convergence_window: int = CONVERGENCE_WINDOW,
+    # Keep a snapshot of the trajectory block's decision variables, its offsets,
+    # the round's gains and its validation score every N rounds, for the
+    # per-round animation. 0 (the default) keeps nothing, so a normal run's
+    # memory profile is untouched; a stride is required rather than optional
+    # because a 250-round run is 250 closed-loop rollout batches to render.
+    trajectory_trace_stride: int = 0,
     warm_start_trajectories_dir: str | None = None,
     start_offset_mode: str = START_OFFSET_MODE_OPTIMIZE,
     init_offset_radius: float = float(GAIN_TUNING_DEFAULTS["init_offset_radius"]),
@@ -370,6 +399,8 @@ def run_joint_tuning(
         )
     if convergence_window < 1:
         raise ValueError("convergence_window must be positive.")
+    if trajectory_trace_stride < 0:
+        raise ValueError("trajectory_trace_stride must be non-negative (0 disables the trace).")
     gain_steps_per_round = resolve_steps_per_round(gain_steps_per_round)
     if not 0.0 < trust_shrink < 1.0 < trust_grow:
         raise ValueError("Need 0 < trust_shrink < 1 < trust_grow.")
@@ -741,6 +772,22 @@ def run_joint_tuning(
     warm_start_decision_variables = state.decision_variables
     rejected_rounds = 0
     rounds_at_min_radius = 0
+    trajectory_trace: list[JointRoundSnapshot] = []
+
+    def take_snapshot(round_index, state, gains, gain_score):
+        return JointRoundSnapshot(
+            round_index=int(round_index),
+            control_points=np.asarray(
+                jax.vmap(trajectory_pipeline.control_points_from_decision_variables)(
+                    state.decision_variables
+                ),
+                dtype=float,
+            ),
+            start_offsets=np.asarray(offsets_from_free(state.free_offsets), dtype=float),
+            gains=np.asarray(gains, dtype=float),
+            validation_loss=float(gain_score),
+        )
+
     # The stationary yardstick, frozen at the round the gain block first runs
     # (after any warm start, so it is a designed set and not the raw initial
     # candidates). Every "is this gain vector better" question in the loop is
@@ -888,6 +935,9 @@ def run_joint_tuning(
         history["constraint_components"].append(np.asarray(component_vectors, dtype=float))
         history["gains"].append(np.asarray(gains, dtype=float))
 
+        if trajectory_trace_stride > 0 and round_index % trajectory_trace_stride == 0:
+            trajectory_trace.append(take_snapshot(round_index, state, gains, gain_score))
+
         if not np.isfinite(float(trajectory_loss_pre)):
             print(f"  round {round_index}: trajectory loss is not finite; stopping.")
             break
@@ -952,6 +1002,14 @@ def run_joint_tuning(
                         )
                     break
     loop_seconds = time.time() - loop_start
+
+    # The last round always gets a frame, whatever the stride and however the
+    # loop ended: an animation that stops short of the state the run actually
+    # shipped is misleading.
+    if trajectory_trace_stride > 0 and history["gains"] and (
+        not trajectory_trace or trajectory_trace[-1].round_index != round_index
+    ):
+        trajectory_trace.append(take_snapshot(round_index, state, gains, gain_score))
 
     # `gains` is the best iterate on the frozen scoring set; the last iterate is
     # kept alongside as `final_gains` for diagnostics only. On a loop whose two
@@ -1026,6 +1084,7 @@ def run_joint_tuning(
         state=state,
         trajectory_pipeline=trajectory_pipeline,
         gain_pipeline=gain_pipeline,
+        trajectory_trace=tuple(trajectory_trace),
         history=history,
         config={
             "problem_path": problem_path,
@@ -1049,6 +1108,7 @@ def run_joint_tuning(
             "convergence_rel_tol": convergence_rel_tol,
             "convergence_window": convergence_window,
             "trajectory_steps_per_round": trajectory_steps_per_round,
+            "trajectory_trace_stride": trajectory_trace_stride,
             "warm_start_trajectories_dir": warm_start_trajectories_dir,
             "start_offset_mode": start_offset_mode,
             "init_offset_radius": init_offset_radius,

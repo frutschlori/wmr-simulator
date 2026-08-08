@@ -5,6 +5,7 @@ import os
 import matplotlib.pyplot as plt
 import numpy as np
 
+from wmr_simulator.visualization.animation import create_gif_from_png_frames
 from wmr_simulator.visualization.trajectories import plot_trajectory_set
 
 
@@ -105,28 +106,14 @@ def plot_joint_tuning_trajectories(
     run's own, which is how a held-out panel is drawn with the same gains and
     the same code. ``start_offsets`` is (T, R, 3), one bundle per trajectory:
     each trajectory designs its own starts."""
-    import jax
-
     pipeline = result.trajectory_pipeline
     realizations = result.realizations if realizations is None else realizations
     reference_batch = result.reference_states if reference_states is None else reference_states
     start_offsets = result.start_offsets if start_offsets is None else start_offsets
 
-    def rollout(reference_states, robot_key, estimator_key, start_offset):
-        return pipeline.simulation.run_closed_loop(
-            pipeline.nominal_physical_params(),
-            controller_gains=result.gains,
-            robot_key=robot_key,
-            estimator_key=estimator_key,
-            wheel_speed_log_source="estimated",
-            reference_states=reference_states,
-            initial_pose=reference_states[0, :3] + start_offset,
-        ).pose.true_states
-
-    closed_loop_poses = jax.jit(
-        jax.vmap(jax.vmap(rollout, in_axes=(None, 0, 0, 0)), in_axes=(0, None, None, 0))
-    )(
+    closed_loop_poses = make_closed_loop_rollout(pipeline)(
         reference_batch,
+        result.gains,
         realizations.robot_keys,
         realizations.estimator_keys,
         start_offsets,
@@ -137,4 +124,154 @@ def plot_joint_tuning_trajectories(
         out_prefix=out_prefix,
         out_path=out_path,
         title=title,
+    )
+
+
+def make_closed_loop_rollout(pipeline):
+    """One jitted ``(references, gains, robot_keys, estimator_keys, offsets) ->
+    (T, R, N, 3)`` rollout batch, built once and reused.
+
+    ``gains`` is an argument rather than a closure so the animation can reuse a
+    single compiled function across every frame: the gains change each round but
+    the shapes do not, and re-jitting per frame costs more than the rollouts.
+    """
+    import jax
+
+    def rollout(reference_states, gains, robot_key, estimator_key, start_offset):
+        return pipeline.simulation.run_closed_loop(
+            pipeline.nominal_physical_params(),
+            controller_gains=gains,
+            robot_key=robot_key,
+            estimator_key=estimator_key,
+            wheel_speed_log_source="estimated",
+            reference_states=reference_states,
+            initial_pose=reference_states[0, :3] + start_offset,
+        ).pose.true_states
+
+    return jax.jit(
+        jax.vmap(
+            jax.vmap(rollout, in_axes=(None, None, 0, 0, 0)),
+            in_axes=(0, None, None, None, 0),
+        )
+    )
+
+
+def _frame_annotation(snapshot) -> str:
+    """Round number, that round's gains, and the held-out score behind them.
+
+    The validation loss is on the frame because "tracking improves" is a claim
+    about the *held-out* set: the trajectories in the picture are the training
+    set and they are being optimized to be hard, so the picture alone cannot
+    make that case.
+    """
+    values = [float(value) for value in snapshot.gains]
+    loss = float(snapshot.validation_loss)
+    loss_text = "warm start (no gain step)" if not np.isfinite(loss) else f"{loss:.6f}"
+    # Two short gain lines rather than one long one: a 60-character monospace
+    # line is most of the figure's width.
+    return "\n".join(
+        (
+            f"round {snapshot.round_index}",
+            f"validation loss {loss_text}",
+            "  ".join(f"{name}={value:.3g}" for name, value in zip(GAIN_NAMES[:3], values[:3])),
+            "  ".join(f"{name}={value:.3g}" for name, value in zip(GAIN_NAMES[3:], values[3:])),
+        )
+    )
+
+
+def save_joint_tuning_trajectory_trace(
+    result,
+    out_prefix: str = "joint_tuning_rounds",
+    frames_dir: str | None = None,
+    gif_path: str | None = None,
+    frame_duration: float = 0.2,
+    stop_duration: float = 1.5,
+):
+    """Animate the per-round trace: one frame per recorded round, each the same
+    figure :func:`plot_joint_tuning_trajectories` draws -- every trajectory's
+    reference plus one closed-loop rollout per realization from its own offset
+    start, with the start-pose arrows -- but under *that round's* gains,
+    control points and offsets.
+
+    Needs ``run_joint_tuning(..., trajectory_trace_stride=N)``; the trace is
+    opt-in and empty otherwise. The axes are pinned to the union of every
+    frame's extent so the curves morph instead of the view zooming around them.
+    """
+    import jax
+
+    snapshots = getattr(result, "trajectory_trace", ())
+    if not snapshots:
+        raise ValueError(
+            "No per-round trace on this result. Run run_joint_tuning with "
+            "trajectory_trace_stride > 0."
+        )
+
+    os.makedirs("visualize", exist_ok=True)
+    if frames_dir is None:
+        frames_dir = os.path.join("visualize", f"{out_prefix}_frames")
+    os.makedirs(frames_dir, exist_ok=True)
+
+    pipeline = result.trajectory_pipeline
+    realizations = result.realizations
+    rollout_batch = make_closed_loop_rollout(pipeline)
+    reference_from_control_points = jax.jit(
+        jax.vmap(pipeline.reference_states_from_control_points)
+    )
+
+    print(f"Rendering {len(snapshots)} joint-tuning round frames into {frames_dir}")
+    frames = []
+    for snapshot in snapshots:
+        reference_states = reference_from_control_points(
+            jax.numpy.asarray(snapshot.control_points, dtype=jax.numpy.float32)
+        )
+        closed_loop_poses = rollout_batch(
+            reference_states,
+            jax.numpy.asarray(snapshot.gains, dtype=jax.numpy.float32),
+            realizations.robot_keys,
+            realizations.estimator_keys,
+            jax.numpy.asarray(snapshot.start_offsets, dtype=jax.numpy.float32),
+        )
+        frames.append(
+            (
+                snapshot,
+                np.asarray(reference_states, dtype=float),
+                np.asarray(closed_loop_poses, dtype=float),
+            )
+        )
+
+    # One view for the whole animation, over references and rollouts alike: a
+    # frame that autoscales makes a stationary curve look like it moved.
+    all_x = np.concatenate(
+        [reference[..., 0].ravel() for _, reference, _ in frames]
+        + [poses[..., 0].ravel() for _, _, poses in frames]
+    )
+    all_y = np.concatenate(
+        [reference[..., 1].ravel() for _, reference, _ in frames]
+        + [poses[..., 1].ravel() for _, _, poses in frames]
+    )
+    x_margin = max(0.05 * float(np.ptp(all_x)), 0.05)
+    y_margin = max(0.05 * float(np.ptp(all_y)), 0.05)
+    axis_limits = (
+        (float(all_x.min()) - x_margin, float(all_x.max()) + x_margin),
+        (float(all_y.min()) - y_margin, float(all_y.max()) + y_margin),
+    )
+
+    for snapshot, reference_states, closed_loop_poses in frames:
+        plot_trajectory_set(
+            reference_states,
+            closed_loop_poses,
+            out_path=os.path.join(frames_dir, f"frame_{snapshot.round_index:05d}.png"),
+            title="Joint Tuning",
+            axis_limits=axis_limits,
+            annotation=_frame_annotation(snapshot),
+            verbose=False,
+        )
+
+    if gif_path is None:
+        gif_path = os.path.join("visualize", f"{out_prefix}.gif")
+    return create_gif_from_png_frames(
+        frames_dir=frames_dir,
+        frame_time=frame_duration,
+        stop_time=stop_duration,
+        gif_path=gif_path,
     )
