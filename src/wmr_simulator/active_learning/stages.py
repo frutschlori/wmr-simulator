@@ -925,6 +925,25 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
                 validation_loss_component_history=result["static_validation_loss_component_history"],
                 out_prefix="ctrl_tuning_static",
             )
+
+    # Cross-iteration progress plot, regenerated from every iteration up to
+    # this one (see active_learning.progress.evaluate_pipeline_progress) and
+    # written straight into *this* iteration's visualize dir -- not through
+    # collect_plots, since it never touches the shared repo-root visualize/.
+    # A missing benchmark recording or a plotting failure must never abort the
+    # stage that just produced this iteration's gains, so this is best-effort.
+    try:
+        from wmr_simulator.active_learning.progress import evaluate_pipeline_progress
+        from wmr_simulator.visualization.pipeline_progress import plot_pipeline_progress
+
+        progress_records = evaluate_pipeline_progress(experiment)
+        progress_path = plot_pipeline_progress(
+            progress_records, experiment.root, out_path=paths.visualize_dir / "pipeline_progress.pdf"
+        )
+        print(f"Wrote {progress_path}")
+    except Exception as error:
+        print(f"Pipeline progress plot skipped ({error}).")
+
     return payload
 
 

@@ -2,9 +2,11 @@
 
 One figure, three panels:
 
-- a grouped bar chart with five gain groups (kx, ky, kth, kpmotor, kimotor),
-  one bar per iteration at each group; gains are the controller gains deployed
-  to record each iteration (see ``evaluate_pipeline_progress``);
+- a gain-history line plot (one line per gain: kx, ky, kth, kpmotor,
+  kimotor), x = iteration, styled like the joint-tuning gain-history plot
+  (``visualization.joint_tuning.plot_joint_tuning_history``, whose gain panel
+  it shares a helper with); gains are the controller gains deployed to record
+  each iteration (see ``evaluate_pipeline_progress``);
 - two loss panels laid out exactly like the gain-tuning loss-history plot,
   evaluated on Gain-MLP circle benchmark runs (one point = run mean)
   (``visualization.identification.plot_loss_history``): panel 1 carries the
@@ -27,6 +29,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from wmr_simulator.gain_tuning.optimizers import _GAIN_NAMES
+from wmr_simulator.visualization.joint_tuning import _plot_gain_lines
 
 
 def _plot_metric_pair(ax, right_ax, records, left_key, right_key, left_color, right_color, left_label, right_label):
@@ -72,22 +75,17 @@ def plot_pipeline_progress(records, experiment_root, out_path=None, out_prefix="
     ax_track = plt.subplot2grid((2, 2), (1, 0), fig=fig)
     ax_total = plt.subplot2grid((2, 2), (1, 1), fig=fig)
 
-    # --- grouped gain bar chart (no grid) -----------------------------------
+    # --- gain history line plot ---------------------------------------------
     if gain_records:
         indices = [rec["index"] for rec in gain_records]
         gains = np.vstack([rec["gains"] for rec in gain_records])
-        n_iter, n_gains = gains.shape
-        colors = plt.cm.viridis(np.linspace(0.15, 0.9, n_iter))
-        group_x = np.arange(n_gains)
-        bar_width = 0.8 / n_iter
-        for row, (index, color) in enumerate(zip(indices, colors)):
-            offset = (row - (n_iter - 1) / 2.0) * bar_width
-            ax_gains.bar(group_x + offset, gains[row], width=bar_width, color=color, label=f"it {index:02d}")
-        ax_gains.set_xticks(group_x)
-        ax_gains.set_xticklabels(list(_GAIN_NAMES))
-        ax_gains.set_ylabel("gain value [-]")
+        # marker="o": unlike the joint-tuning round history (hundreds of
+        # points), a pipeline has one point per iteration and can be as short
+        # as a single iteration, where a bare line draws nothing at all.
+        _plot_gain_lines(ax_gains, indices, gains, _GAIN_NAMES, marker="o")
+        ax_gains.set_xlabel("iteration")
+        ax_gains.set_xticks(indices)
         ax_gains.set_title("Controller gains over iterations")
-        ax_gains.legend(loc="upper left", bbox_to_anchor=(1.01, 1.0), borderaxespad=0.0, fontsize="small", title="iteration")
     else:
         ax_gains.text(0.5, 0.5, "no tuned gains", ha="center", va="center", transform=ax_gains.transAxes)
         ax_gains.set_title("Controller gains over iterations")

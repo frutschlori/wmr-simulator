@@ -11,6 +11,22 @@ from wmr_simulator.visualization.trajectories import plot_trajectory_set
 GAIN_NAMES = ("kx", "ky", "kth", "kpmotor", "kimotor")
 
 
+def _plot_gain_lines(ax, xs, gains, gain_names=GAIN_NAMES, marker=None):
+    """One line per gain vs ``xs``, on a shared ``ax``.
+
+    Linear y-axis, not log: the gains span less than a decade once the block
+    is solved, and log turns kimotor's decay towards 0 into a dive off the
+    bottom that dominates the panel and hides what the other four gains do.
+    Shared between the joint-tuning history plot and the cross-iteration
+    pipeline-progress plot (visualization.pipeline_progress), which have
+    different x-axes (rounds vs. iterations) but the same gain-panel styling.
+    """
+    for index, name in enumerate(gain_names):
+        ax.plot(xs, gains[:, index], linewidth=1.2, label=name, marker=marker)
+    ax.set_ylabel("gain")
+    ax.legend(fontsize=7, ncol=2)
+
+
 def plot_joint_tuning_history(history: dict, out_prefix: str = "joint_tuning_history", out_path=None):
     """Four panels: the two block losses, the gains, and the constraint state.
 
@@ -49,14 +65,8 @@ def plot_joint_tuning_history(history: dict, out_prefix: str = "joint_tuning_his
     axes[0, 1].set_title("Trajectory objective  log(A-opt) + penalty")
     axes[0, 1].set_ylabel("objective")
 
-    for index, name in enumerate(GAIN_NAMES):
-        axes[1, 0].plot(rounds, gains[:, index], linewidth=1.2, label=name)
+    _plot_gain_lines(axes[1, 0], rounds, gains)
     axes[1, 0].set_title("Controller gains")
-    # Linear, not log: the gains span less than a decade once BFGS has solved
-    # the block, and a log axis turns kimotor's decay towards 0 into a dive off
-    # the bottom that dominates the panel and hides what the other four do.
-    axes[1, 0].set_ylabel("gain")
-    axes[1, 0].legend(fontsize=7, ncol=2)
 
     axes[1, 1].plot(rounds, np.mean(fim, axis=1), color="C2", linewidth=1.2, label="mean A-optimality")
     axes[1, 1].set_yscale("log")
