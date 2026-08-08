@@ -25,6 +25,66 @@ is why each side keeps its own normalization (the gain loss raw as the tuner
 uses it, the trajectory loss intrinsically normalized by
 :func:`trajectory_optimization.objectives.trajectory_objective`).
 
+Neither block's own loss is a usable progress measure for the *pair*: each is
+evaluated against the other block's current iterate, so the gain loss is scored
+on trajectories that changed since the last round and consecutive values are not
+comparable. Measured over 350 rounds the gain block descends its own objective
+on 97% of its steps while the alternation raises it on 84% of rounds. Two
+consequences, both handled here.
+
+**Training and validation.** The loop's own trajectories are its *training* set:
+they are decision variables and they move every round, so ``gain_loss_pre`` is a
+score on a problem that no longer exists a round later. The gains that ship are
+instead the best iterate on a **validation** set --
+``validation_trajectories_dir``, a fixed, neutral collection the loop never
+optimizes (:mod:`joint_tuning.validation`). Without one the fallback is the
+training trajectories frozen at the round the gain block first ran: stationary,
+which is enough to keep best-iterate selection honest, but biased towards the
+gains that suited that particular design, so it can say "the loop stayed
+stable" and never "these gains are better".
+
+**Early stopping is off by default** (``convergence_rel_tol`` < 0). The rule
+itself is sound -- two-sided (:func:`has_stagnated`), because the standalone
+one-sided form reads a *rising* loss as convergence and used to quit this loop
+at round 150 on a -0.137 "improvement" -- but no stagnation rule fits this
+loop's shape. Every run plateaus with the validation loss flat to five
+significant digits, then goes through a basin transition at ~180 trajectory
+steps where the trajectory block finds a more informative regime and the gains
+follow it (``kth`` 5.2 -> 9.1). Measured, the rule stopped at round 100, about
+90 rounds before the transition. Telling "finished" from "between events" is not
+something this rule can do, so the default is a fixed round budget.
+
+**The trust region is what makes the pair stable** (``trust_radius``, negative
+disables). Without it the loop runs beautifully for ~190 rounds -- the gain loss
+flat to +8%, the trajectory objective descending monotonically, the constraint
+violation *falling* -- and is then destroyed by a single round: the gain loss
+jumps 0.0109 -> 0.0502, ``kth`` 5.85 -> 9.8, and it never recovers. Tightening
+``constraint_violation_tolerance`` 5x only moves the event from round 189 to 210.
+
+The event is a *coupled* basin jump, not either block misbehaving: both
+objectives worsen in the same round (the trajectory objective went uphill
+-9.7359 -> -8.8878 with the violation spiking to 17x tolerance), which neither
+block does on its own. The gain objective has two minima -- ``kth`` ~ 6 at loss
+0.0105 and ``kth`` ~ 8-10 at loss 0.037 -- and once a trajectory move tips the
+gain solver into the second one, the changed gains change the FIM, which kicks
+the trajectory block, which lands somewhere the old gains score 4x worse.
+
+So the step is capped in L2 and then *judged by what it did to the gain block*:
+a trajectory move that raises the gain loss at fixed gains by more than
+``trust_gain_loss_increase`` is rejected and the radius halves; otherwise the
+radius grows back towards its initial value. Judging by the trajectory
+objective would not work -- that objective improves through the jump. This
+deliberately constrains the **coupling** rather than either block, because
+neither block is individually at fault.
+
+Not implemented, and the obvious alternative if the hard cap proves too blunt:
+a **proximal (PALM-style) term** on the trajectory block, ``+ rho/2 * ||theta -
+theta_prev||^2`` added to ``trajectory_objective``. Same goal by a smooth route,
+with actual convergence theory for alternating minimization behind it, and it
+degrades gracefully where a hard radius either binds or does not. It would
+replace (not complement) the radius; keep the gain-loss acceptance test either
+way, since that is what encodes "stay informative, do not become untrackable".
+
 The loop itself is a Python ``for`` over two jitted step functions rather than
 one ``lax.scan``: per-round gradient work is ~0.4 s while the Python overhead is
 under a millisecond, and in exchange every diagnostic is a list append and a
@@ -51,6 +111,11 @@ from wmr_simulator.gain_tuning.optimizers import (
     controller_gains_to_optimizer_values,
 )
 from wmr_simulator.gain_tuning.pipeline import ControllerTuningPipeline, resolve_gain_robot_params
+from wmr_simulator.joint_tuning.gain_solvers import (
+    make_gain_stepper,
+    resolve_steps_per_round,
+)
+from wmr_simulator.joint_tuning.validation import load_validation_trajectories
 from wmr_simulator.trajectory_optimization.start_offsets import (
     START_OFFSET_MODE_OPTIMIZE,
     START_OFFSET_MODE_RANDOM,
@@ -97,7 +162,6 @@ MODE_ALTERNATING = "alternating"
 MODE_SEQUENTIAL = "sequential"
 MODES = (MODE_ALTERNATING, MODE_SEQUENTIAL)
 
-
 def normalize_mode(mode: str) -> str:
     mode = mode.strip().lower()
     if mode not in MODES:
@@ -121,6 +185,10 @@ def _round_schedule(mode: str, num_rounds: int, warm_start_rounds: int) -> list[
 class JointState(NamedTuple):
     """Everything the loop carries between rounds.
 
+    ``gain_opt_state`` is a placeholder: the gain block re-solves from scratch
+    each round (see :mod:`joint_tuning.gain_solvers`), so only the trajectory
+    optimizer actually carries state between rounds.
+
     ``gain_values`` are optimizer-space (log/sqrt) values, not gains, and
     ``free_offsets`` are the unconstrained pre-squash start-offset variables --
     both blocks' search spaces, not their physical readings.
@@ -140,7 +208,12 @@ class JointState(NamedTuple):
 
 
 class JointTuningResult(NamedTuple):
+    # The best iterate scored on the frozen scoring set, not the last one. On a
+    # pair of blocks that keep moving each other's objective, the last iterate
+    # is a tail sample; this is the one that ships.
     gains: jax.Array                    # (5,)
+    final_gains: jax.Array              # (5,) the loop's last iterate
+    best_gain_score: float              # validation loss behind `gains`
     control_points: jax.Array           # (T, K, 2)
     reference_states: jax.Array         # (T, N, 8)
     start_offsets: jax.Array            # (T, R, 3)
@@ -157,6 +230,20 @@ class JointTuningResult(NamedTuple):
     history: dict
     config: dict
     timing: dict
+
+
+def has_stagnated(reference_score: float, score: float, tolerance: float) -> bool:
+    """Has the scoring loss stopped *moving* over a window?
+
+    Two-sided on purpose. The standalone trajectory optimizer's rule asks
+    ``improvement <= tolerance``, which also fires when the loss is getting
+    rapidly worse -- fine there, where a rising loss means a diverging learning
+    rate and stopping is the right outcome, but wrong here: this loop's gain
+    score rises whenever the trajectory block makes the tracking problem harder,
+    and that is a run still in motion, not a converged one. Rises are handled by
+    keeping the best iterate; only genuine flatness ends the run.
+    """
+    return abs(float(relative_improvement(reference_score, score))) <= tolerance
 
 
 def _max_fractional_violation(components: jax.Array) -> jax.Array:
@@ -179,12 +266,57 @@ def run_joint_tuning(
     num_control_points: int = 7,
     num_realizations: int = int(GAIN_TUNING_DEFAULTS["num_realizations"]),
     trajectory_learning_rate: float = 1e-3,
-    gain_learning_rate: float = 1e-4,
+    # Inner steps each block takes per round, i.e. how close each gets to its
+    # *conditional* optimum before handing the problem over. At 1/1 the loop is
+    # pure Jacobi-style alternation and every step of one block lands on an
+    # objective the other block just perturbed; raising these turns it into
+    # block-coordinate descent proper, where each handover happens at a point
+    # the block had time to settle on. The ratio matters more than the counts:
+    # the block that outruns the other wants *fewer* inner steps, not more.
+    gain_steps_per_round: int | None = None,
+    trajectory_steps_per_round: int = 1,
+    # Trust region on the trajectory block, in decision-variable L2 units.
+    # `trust_radius` caps a round's movement; a round whose trajectory move
+    # raises the gain block's own loss by more than `trust_gain_loss_increase`
+    # (relative) is *rejected* and the radius halves, otherwise the radius grows
+    # back towards its initial value. Negative radius disables the whole
+    # mechanism. See the module docstring for what it is defending against.
+    trust_radius: float = 2e-2,
+    trust_gain_loss_increase: float = 0.02,
+    trust_shrink: float = 0.5,
+    trust_grow: float = 1.5,
+    # A collapsed radius means every meaningful trajectory step hurts the gain
+    # block: the pair is at the edge of its stable region and further rounds
+    # achieve nothing. Stopping there is a genuine local-optimality signal for
+    # the *coupled* problem, unlike the loss-stagnation rule above, which cannot
+    # tell a plateau from a pause. Counted on the radius sitting at its floor,
+    # not on consecutive rejections: the observed collapse *oscillates* (accept
+    # grows 1.5x, reject shrinks 0.5x, net decay), so a consecutive-rejection
+    # counter resets constantly and would never fire. 0 disables.
+    trust_stall_rounds: int = 20,
+    validation_trajectories_dir: str | None = None,
+    # Negative disables early stopping, which is the default here on purpose.
+    # Every run of this loop has the same shape: a long plateau where the
+    # validation loss is flat to 5 significant digits, then a basin transition
+    # at ~180 trajectory steps where the trajectory block finds a more
+    # informative regime and the gains re-tune to it (kth 5.2 -> 9.1). *Any*
+    # stagnation rule quits in the plateau -- measured, the old default stopped
+    # at round 100, about 90 rounds before the transition. A stopping rule needs
+    # to know the difference between "finished" and "between events", and this
+    # one cannot, so the honest setting is a fixed round budget.
+    convergence_rel_tol: float = -1.0,
+    convergence_window: int = CONVERGENCE_WINDOW,
     warm_start_trajectories_dir: str | None = None,
     start_offset_mode: str = START_OFFSET_MODE_OPTIMIZE,
     init_offset_radius: float = float(GAIN_TUNING_DEFAULTS["init_offset_radius"]),
     init_offset_angle: float = float(GAIN_TUNING_DEFAULTS["init_offset_angle"]),
-    constraint_violation_tolerance: float = DEFAULT_CONSTRAINT_VIOLATION_TOLERANCE,
+    # Tighter than the standalone designer's DEFAULT_CONSTRAINT_VIOLATION_TOLERANCE.
+    # There the constraint only has to hold one design in the feasible set; here
+    # it also has to keep the trajectory block from running away from the gain
+    # block, and it was not doing that -- measured over 350 rounds the max
+    # fractional violation climbed 0.02 -> 0.20, i.e. 4x the 0.05 tolerance,
+    # buying a 3x better FIM with trajectories the gains could no longer track.
+    constraint_violation_tolerance: float = 0.02,
     constraint_smooth_max_beta: float = 20.0,
     criterion: str = DEFAULT_CRITERION,
     wheel_lp_tau: float | None = None,
@@ -216,6 +348,9 @@ def run_joint_tuning(
     directory also *sets* ``num_trajectories``, ``num_realizations`` and
     ``num_control_points``: they are properties of the design being loaded, not
     of this run.
+
+    The gains returned are the best iterate on the frozen scoring set, not the
+    last one.
     """
     if num_rounds < 0:
         raise ValueError("num_rounds must be non-negative.")
@@ -227,6 +362,28 @@ def run_joint_tuning(
         raise ValueError("num_control_points must be >= 4 (cubic B-spline).")
     if num_realizations <= 0:
         raise ValueError("num_realizations must be positive.")
+    if trajectory_steps_per_round < 1:
+        raise ValueError("trajectory_steps_per_round must be >= 1.")
+    if warm_start_trajectories_dir is None and warm_start_rounds >= num_rounds and num_rounds > 0:
+        raise ValueError(
+            f"warm_start_rounds={warm_start_rounds} >= num_rounds={num_rounds}: the gain block "
+            "would never run and the gains would come back exactly as they went in."
+        )
+    if convergence_window < 1:
+        raise ValueError("convergence_window must be positive.")
+    gain_steps_per_round = resolve_steps_per_round(gain_steps_per_round)
+    if not 0.0 < trust_shrink < 1.0 < trust_grow:
+        raise ValueError("Need 0 < trust_shrink < 1 < trust_grow.")
+    if trust_gain_loss_increase < 0.0:
+        raise ValueError("trust_gain_loss_increase must be non-negative.")
+    trust_region_enabled = trust_radius > 0.0
+    max_trust_radius = trust_radius
+    min_trust_radius = 1e-6
+
+    validation_trajectories = (
+        None if validation_trajectories_dir is None
+        else load_validation_trajectories(validation_trajectories_dir)
+    )
     start_offset_mode = normalize_start_offset_mode(start_offset_mode)
     mode = normalize_mode(mode)
     criterion = normalize_criterion(criterion)
@@ -386,20 +543,31 @@ def run_joint_tuning(
     trajectory_optimizer = optax.adam(trajectory_learning_rate)
 
     @jax.jit
-    def trajectory_step(trajectory_params, optimizer_state, gains):
+    def trajectory_step(trajectory_params, optimizer_state, gains, trust_radius):
         (loss_pre, aux), grads = jax.value_and_grad(trajectory_loss, has_aux=True)(
             trajectory_params, gains
         )
         updates, next_optimizer_state = trajectory_optimizer.update(
             grads, optimizer_state, trajectory_params
         )
+        # Trust region: cap the *whole round's* movement, both blocks of the
+        # decision vector together, at `trust_radius` in L2. Scaling the update
+        # rather than clipping it per coordinate keeps the step's direction --
+        # a shorter version of the move Adam wanted, not a different move.
+        update_norm = jnp.sqrt(
+            sum(jnp.sum(jnp.square(leaf)) for leaf in jax.tree_util.tree_leaves(updates))
+        )
+        scale = jnp.minimum(1.0, trust_radius / jnp.maximum(update_norm, 1e-12))
+        updates = jax.tree_util.tree_map(lambda leaf: leaf * scale, updates)
         decision_variables, free_offsets = optax.apply_updates(trajectory_params, updates)
         next_trajectory_params = (
             jax.vmap(trajectory_pipeline.clamp_decision_variables)(decision_variables),
             free_offsets,
         )
         loss_post, _ = trajectory_loss(next_trajectory_params, gains)
-        return next_trajectory_params, next_optimizer_state, loss_pre, loss_post, aux
+        return (
+            next_trajectory_params, next_optimizer_state, loss_pre, loss_post, aux, update_norm
+        )
 
     @jax.jit
     def trajectory_eval(trajectory_params, gains):
@@ -437,17 +605,70 @@ def run_joint_tuning(
             jnp.mean(jax.vmap(terms_for_reference)(reference_trajectories, offsets), axis=0)
         )
 
-    gain_optimizer = optax.adam(gain_learning_rate)
+    # `gain_steps_per_round` caps a bounded inner solve, not a step count: the
+    # line search would otherwise make "one step" mean nothing. See
+    # joint_tuning.gain_solvers.
+    gain_optimizer_init, gain_step = make_gain_stepper(gain_loss, gain_steps_per_round)
+    # The gain loss on whatever training trajectories it is handed, no step.
+    gain_step_score = jax.jit(gain_loss)
 
-    @jax.jit
-    def gain_step(gain_values, optimizer_state, decision_variables, free_offsets):
-        loss_pre, grads = jax.value_and_grad(gain_loss)(
-            gain_values, decision_variables, free_offsets
+    # ----------------------------------------------------------- validation
+    # Its own frozen noise bundle, independent of the training realizations:
+    # the validation set exists to be a different draw of the same question, and
+    # sharing the training keys would make a gain vector that overfits this run's
+    # particular noise look good on both. The start offsets come from the files.
+    if validation_trajectories is None:
+        validation_score = None
+    else:
+        validation_realizations = make_realizations(
+            jax.random.PRNGKey(seed + 7717),
+            jax.random.PRNGKey(seed + 7718),
+            int(validation_trajectories[0].start_offsets.shape[0]),
+            init_offset_radius,
+            init_offset_angle,
         )
-        updates, next_optimizer_state = gain_optimizer.update(grads, optimizer_state, gain_values)
-        next_gain_values = clip_optimizer_values(optax.apply_updates(gain_values, updates))
-        loss_post = gain_loss(next_gain_values, decision_variables, free_offsets)
-        return next_gain_values, next_optimizer_state, loss_pre, loss_post
+
+        def _validation_term(reference_states, start_offsets):
+            def score(gain_values):
+                gains = controller_gains_from_optimizer_values(
+                    gain_values,
+                    k_min_stab=k_min_stab,
+                    k_max_stab=k_max_stab,
+                    k_max_rest=k_max_rest,
+                )
+                return jnp.sum(
+                    closed_loop_objective_terms(
+                        gain_pipeline,
+                        gains,
+                        validation_realizations.robot_keys,
+                        validation_realizations.estimator_keys,
+                        velocity_tracking_weight=velocity_tracking_weight,
+                        input_weight=input_weight,
+                        input_delta_weight=input_delta_weight,
+                        omega_delta_weight=omega_delta_weight,
+                        reference_states=reference_states,
+                        initial_pose_offsets=start_offsets,
+                    )
+                )
+            # One jit per trajectory: they have different sample counts by
+            # design, so a single traced function would re-trace anyway.
+            return jax.jit(score)
+
+        _validation_terms = [
+            _validation_term(
+                jnp.asarray(trajectory.reference_states, dtype=jnp.float32),
+                jnp.asarray(trajectory.start_offsets, dtype=jnp.float32),
+            )
+            for trajectory in validation_trajectories
+        ]
+
+        def validation_score(gain_values):
+            """Mean over the held-out trajectories. Unweighted: they are chosen
+            to be diverse, so weighting by length or difficulty would let the
+            longest curve decide what 'better gains' means."""
+            return float(
+                np.mean([float(term(gain_values)) for term in _validation_terms])
+            )
 
     # ---------------------------------------------------------------------- init
     if warm_start is None:
@@ -477,7 +698,7 @@ def run_joint_tuning(
     trajectory_params = (decision_variables, initial_free_offsets)
     state = JointState(
         gain_values=gain_values,
-        gain_opt_state=gain_optimizer.init(gain_values),
+        gain_opt_state=gain_optimizer_init(gain_values),
         decision_variables=decision_variables,
         free_offsets=initial_free_offsets,
         trajectory_opt_state=trajectory_optimizer.init(trajectory_params),
@@ -489,7 +710,7 @@ def run_joint_tuning(
         for name in (
             "gain_loss_pre", "gain_loss_post", "trajectory_loss_pre", "trajectory_loss_post",
             "fim_loss", "log_fim_loss", "constraint_loss", "max_fractional_violation", "gains",
-            "constraint_components",
+            "constraint_components", "gain_validation_loss", "trust_radius",
         )
     }
     if verbose:
@@ -502,8 +723,10 @@ def run_joint_tuning(
             f"wheel_lp_tau {trajectory_pipeline.wheel_lp_tau:.4g} s."
         )
         print(
-            f"  learning rates: trajectory {trajectory_learning_rate:.3g}, "
-            f"gain {gain_learning_rate:.3g}; constraint tolerance {constraint_violation_tolerance:.3g}."
+            f"  trajectory learning rate {trajectory_learning_rate:.3g}; "
+            f"constraint tolerance {constraint_violation_tolerance:.3g}; "
+            f"inner steps per round: trajectory {trajectory_steps_per_round}, "
+            f"gain {gain_steps_per_round}."
         )
         if warm_start is not None:
             print(
@@ -514,16 +737,32 @@ def run_joint_tuning(
 
     loop_start = time.time()
     converged_at_round = None
-    window_reference_loss = None
-    previous_gain_loss = None
+    converged_reason = None
+    window_reference_score = None
     gain_steps_taken = 0
     warm_start_decision_variables = state.decision_variables
+    rejected_rounds = 0
+    rounds_at_min_radius = 0
+    # The stationary yardstick, frozen at the round the gain block first runs
+    # (after any warm start, so it is a designed set and not the raw initial
+    # candidates). Every "is this gain vector better" question in the loop is
+    # asked against these trajectories and offsets, never against the moving
+    # ones, so the answers are comparable across rounds.
+    scoring_decision_variables = None
+    scoring_free_offsets = None
+    best_gain_values = state.gain_values
+    best_gain_score = float("inf")
+    best_gain_round = None
     for round_index, (alternating, run_trajectory) in enumerate(schedule):
         if alternating and gain_steps_taken == 0:
             # The trajectories as the gain block first sees them: everything
             # after this point is what the alternation itself did.
             warm_start_decision_variables = state.decision_variables
+            scoring_decision_variables = state.decision_variables
+            scoring_free_offsets = state.free_offsets
         if alternating:
+            # The stepper owns the inner budget; `gain_loss_pre`/`_post`
+            # bracket everything this block did before handing over.
             (gain_values, gain_opt_state, gain_loss_pre, gain_loss_post) = gain_step(
                 state.gain_values,
                 state.gain_opt_state,
@@ -538,15 +777,65 @@ def run_joint_tuning(
             gain_values, k_min_stab=k_min_stab, k_max_stab=k_max_stab, k_max_rest=k_max_rest
         )
         if run_trajectory:
-            (
-                trajectory_params,
-                trajectory_opt_state,
-                trajectory_loss_pre,
-                trajectory_loss_post,
-                (per_trajectory_loss, fim_terms, constraint_terms, component_vectors),
-            ) = trajectory_step(
-                (state.decision_variables, state.free_offsets), state.trajectory_opt_state, gains
+            trajectory_params = (state.decision_variables, state.free_offsets)
+            trajectory_opt_state = state.trajectory_opt_state
+            step_radius = (
+                trust_radius / max(trajectory_steps_per_round, 1)
+                if trust_region_enabled else jnp.inf
             )
+            for inner in range(trajectory_steps_per_round):
+                (
+                    trajectory_params,
+                    trajectory_opt_state,
+                    inner_pre,
+                    trajectory_loss_post,
+                    (per_trajectory_loss, fim_terms, constraint_terms, component_vectors),
+                    update_norm,
+                ) = trajectory_step(
+                    trajectory_params, trajectory_opt_state, gains, step_radius
+                )
+                if inner == 0:
+                    trajectory_loss_pre = inner_pre
+
+            # The acceptance test, and the whole point of the mechanism: the
+            # trajectory block's job is to stay informative about the gains, not
+            # to make the tracking problem unsolvable. So the step is judged by
+            # what it did to the *gain* block's objective at fixed gains. A move
+            # that raises it sharply is the coupled basin jump this defends
+            # against -- measured, one such round took the gain loss 0.0109 ->
+            # 0.0502 and the loop never recovered. Judging the step by the
+            # trajectory objective instead would accept it happily: that
+            # objective improved through the jump.
+            if trust_region_enabled and alternating:
+                gain_loss_before = (
+                    float(gain_loss_post) if np.isfinite(float(gain_loss_post))
+                    else float(gain_step_score(
+                        gain_values, state.decision_variables, state.free_offsets
+                    ))
+                )
+                gain_loss_after = float(
+                    gain_step_score(gain_values, trajectory_params[0], trajectory_params[1])
+                )
+                relative_rise = (gain_loss_after - gain_loss_before) / max(
+                    abs(gain_loss_before), 1e-12
+                )
+                if relative_rise > trust_gain_loss_increase:
+                    # Reject: keep the trajectories *and* the optimizer state, so
+                    # the rejected direction is not baked into Adam's moments and
+                    # re-proposed at full strength next round.
+                    trajectory_params = (state.decision_variables, state.free_offsets)
+                    trajectory_opt_state = state.trajectory_opt_state
+                    trajectory_loss_post = trajectory_loss_pre
+                    trust_radius = max(trust_radius * trust_shrink, min_trust_radius)
+                    rejected_rounds += 1
+                    if verbose:
+                        print(
+                            f"  round {round_index}: trajectory step rejected "
+                            f"(gain loss +{relative_rise:.1%}), trust radius -> {trust_radius:.3g}"
+                        )
+                else:
+                    trust_radius = min(trust_radius * trust_grow, max_trust_radius)
+                    rounds_at_min_radius = 0
         else:
             trajectory_params = (state.decision_variables, state.free_offsets)
             trajectory_opt_state = state.trajectory_opt_state
@@ -565,6 +854,29 @@ def run_joint_tuning(
             trajectory_opt_state=trajectory_opt_state,
         )
 
+        # The comparable number in the loop, and the one that selects what
+        # ships. `gain_loss_pre` (the *training* loss) is scored on trajectories
+        # that moved last round, so it answers a different question every time.
+        # With a validation directory this is a genuinely held-out set; without
+        # one it falls back to the training trajectories frozen at the round the
+        # gain block first ran, which is stationary but biased towards the gains
+        # that suited that design.
+        if alternating:
+            gain_score = (
+                validation_score(gain_values) if validation_score is not None
+                else float(
+                    gain_step_score(gain_values, scoring_decision_variables, scoring_free_offsets)
+                )
+            )
+            if gain_score < best_gain_score:
+                best_gain_score = gain_score
+                best_gain_values = gain_values
+                best_gain_round = round_index
+        else:
+            gain_score = float("nan")
+
+        history["trust_radius"].append(float(trust_radius) if trust_region_enabled else float("nan"))
+        history["gain_validation_loss"].append(gain_score)
         history["gain_loss_pre"].append(float(gain_loss_pre))
         history["gain_loss_post"].append(float(gain_loss_post))
         history["trajectory_loss_pre"].append(float(trajectory_loss_pre))
@@ -596,31 +908,61 @@ def run_joint_tuning(
                 f"max violation {float(jnp.max(_max_fractional_violation(component_vectors))):.4f}"
             )
 
-        # Same stopping rule as the standalone trajectory optimizer, applied to
-        # the gain loss: progress slowed to a crawl over a whole window, rather
-        # than a single flat round. Only meaningful once the gains actually move.
+        if trust_region_enabled:
+            # "At the floor" with slack for one growth step, so an oscillating
+            # collapse (grow, reject, grow, reject) still counts as collapsed.
+            at_floor = trust_radius <= min_trust_radius * trust_grow
+            rounds_at_min_radius = rounds_at_min_radius + 1 if at_floor else 0
+            if trust_stall_rounds > 0 and rounds_at_min_radius >= trust_stall_rounds:
+                converged_at_round = round_index
+                converged_reason = "trust region collapsed"
+                if verbose:
+                    print(
+                        f"  stopping after {round_index + 1} rounds: trust radius has sat at "
+                        f"its floor for {rounds_at_min_radius} rounds -- every meaningful "
+                        "trajectory step hurts the gain block."
+                    )
+                break
+
+        # Stagnation rule on the *scoring* loss. Two departures from the
+        # standalone trajectory optimizer's rule, both required here:
+        #
+        #  * it runs on the frozen-set score, because the standalone rule
+        #    assumes a stationary objective and `gain_loss_pre` is not one;
+        #  * it tests |improvement|, not improvement. The one-sided form treats
+        #    a *rising* loss as convergence, which on this loop is the common
+        #    case -- the trajectory block makes the gain problem harder -- and
+        #    it is precisely wrong: a run whose score is moving is a run that
+        #    has not settled. Rises are handled by keeping the best iterate, not
+        #    by quitting on them.
         if alternating:
             gain_steps_taken += 1
-            previous_gain_loss = float(gain_loss_pre)
-            if window_reference_loss is None:
-                window_reference_loss = previous_gain_loss
-            elif gain_steps_taken % CONVERGENCE_WINDOW == 0:
-                improvement = float(
-                    relative_improvement(window_reference_loss, previous_gain_loss)
-                )
-                window_reference_loss = previous_gain_loss
-                if improvement <= CONVERGENCE_REL_TOL:
+            if window_reference_score is None:
+                window_reference_score = gain_score
+            elif convergence_rel_tol >= 0.0 and gain_steps_taken % convergence_window == 0:
+                improvement = float(relative_improvement(window_reference_score, gain_score))
+                stagnated = has_stagnated(window_reference_score, gain_score, convergence_rel_tol)
+                window_reference_score = gain_score
+                if stagnated:
                     converged_at_round = round_index
+                    converged_reason = "validation loss stagnated"
                     if verbose:
                         print(
-                            f"  converged after {round_index + 1} rounds "
-                            f"({improvement:.2e} relative gain-loss improvement over the "
-                            f"last {CONVERGENCE_WINDOW} rounds)."
+                            f"  stopping after {round_index + 1} rounds: validation loss moved "
+                            f"{improvement:+.2e} (relative) over the last "
+                            f"{convergence_window} gain rounds."
                         )
                     break
     loop_seconds = time.time() - loop_start
 
+    # `gains` is the best iterate on the frozen scoring set; the last iterate is
+    # kept alongside as `final_gains` for diagnostics only. On a loop whose two
+    # blocks keep moving each other's objective the last iterate is a tail
+    # sample, not a result.
     gains = controller_gains_from_optimizer_values(
+        best_gain_values, k_min_stab=k_min_stab, k_max_stab=k_max_stab, k_max_rest=k_max_rest
+    )
+    final_gains = controller_gains_from_optimizer_values(
         state.gain_values, k_min_stab=k_min_stab, k_max_stab=k_max_stab, k_max_rest=k_max_rest
     )
     control_points = jax.vmap(trajectory_pipeline.control_points_from_decision_variables)(
@@ -647,21 +989,36 @@ def run_joint_tuning(
         float(np.mean(np.diff(finite_gain_loss) > 0.0)) if finite_gain_loss.size > 1 else float("nan")
     )
     history["converged_at_round"] = converged_at_round
+    history["converged_reason"] = converged_reason
+    history["best_gain_round"] = best_gain_round
+    history["rejected_rounds"] = rejected_rounds
+    history["rounds_at_min_trust_radius"] = rounds_at_min_radius
+    history["best_gain_score"] = best_gain_score
 
     if verbose:
-        print(f"Final gains: " + ", ".join(
+        print(f"Best gains (round {best_gain_round}, validation loss {best_gain_score:.6f}): " + ", ".join(
             f"{name}={float(value):.6g}" for name, value in zip(GAIN_NAMES, gains)
+        ))
+        print(f"  last iterate: " + ", ".join(
+            f"{name}={float(value):.6g}" for name, value in zip(GAIN_NAMES, final_gains)
         ))
         print(
             f"  uphill fractions -- gain {history['uphill_fraction_gain']:.4f}, "
             f"trajectory {history['uphill_fraction_trajectory']:.4f}, "
             f"joint {history['uphill_fraction_joint']:.4f}"
         )
+        if trust_region_enabled:
+            print(
+                f"  trust region: {rejected_rounds} of {rounds_run} trajectory steps rejected, "
+                f"final radius {trust_radius:.3g} (initial {max_trust_radius:.3g})."
+            )
         print(f"  {rounds_run} rounds in {loop_seconds:.1f} s "
               f"({loop_seconds / max(rounds_run, 1):.3f} s/round).")
 
     return JointTuningResult(
         gains=gains,
+        final_gains=final_gains,
+        best_gain_score=best_gain_score,
         control_points=control_points,
         reference_states=reference_states,
         start_offsets=start_offsets,
@@ -682,7 +1039,18 @@ def run_joint_tuning(
             "num_control_points": num_control_points,
             "num_realizations": num_realizations,
             "trajectory_learning_rate": trajectory_learning_rate,
-            "gain_learning_rate": gain_learning_rate,
+            "trust_radius": trust_radius,
+            "initial_trust_radius": max_trust_radius,
+            "trust_gain_loss_increase": trust_gain_loss_increase,
+            "trust_stall_rounds": trust_stall_rounds,
+            "gain_steps_per_round": gain_steps_per_round,
+            "validation_trajectories_dir": validation_trajectories_dir,
+            "num_validation_trajectories": (
+                0 if validation_trajectories is None else len(validation_trajectories)
+            ),
+            "convergence_rel_tol": convergence_rel_tol,
+            "convergence_window": convergence_window,
+            "trajectory_steps_per_round": trajectory_steps_per_round,
             "warm_start_trajectories_dir": warm_start_trajectories_dir,
             "start_offset_mode": start_offset_mode,
             "init_offset_radius": init_offset_radius,

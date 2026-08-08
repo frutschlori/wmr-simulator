@@ -30,10 +30,39 @@ def main():
     )
     parser.add_argument("--problem", type=str, default="problems/pololu_gains.yaml")
     parser.add_argument("--mode", choices=list(MODES), default=MODE_ALTERNATING)
-    parser.add_argument("--rounds", type=int, default=1000)
+    parser.add_argument("--rounds", type=int, default=250)
     parser.add_argument("--warm-start-rounds", type=int, default=500)
-    parser.add_argument("--trajectory-learning-rate", type=float, default=2e-3)
-    parser.add_argument("--gain-learning-rate", type=float, default=1e-3)
+    # The trajectory block steps slower than the gain block on purpose: it is
+    # the one that runs away, and every step it takes changes the problem the
+    # gain block is solving.
+    parser.add_argument("--trajectory-learning-rate", type=float, default=1e-3)
+    parser.add_argument("--constraint-violation-tolerance", type=float, default=0.005)
+    parser.add_argument("--trust-radius", type=float, default=2e-2,
+                        help="Trust region on the trajectory block's per-round movement "
+                             "(decision-variable L2). Negative disables it.")
+    parser.add_argument("--trust-gain-loss-increase", type=float, default=0.02,
+                        help="Relative gain-loss rise above which a trajectory step is rejected.")
+    parser.add_argument("--trust-stall-rounds", type=int, default=10,
+                        help="Stop after this many consecutive rejections at the minimum radius; "
+                             "0 lets the loop spin instead.")
+    parser.add_argument("--gain-steps-per-round", type=int, default=40,
+                        help="Inner budget for the gain block: a cap on a bounded BFGS solve, "
+                             "whose steps are line-search trials rather than accepted updates. "
+                             "40 reaches the conditional optimum; below 15 is refused.")
+    # One trajectory step per round against 40 gain steps: the ratio is the
+# balance knob (raising both equally is a no-op, 5/5 reproduces 1/1
+# step-for-step), and this asymmetry is what keeps the trajectory block
+# from outrunning the gains. Every measured run used 40/1.
+    parser.add_argument("--trajectory-steps-per-round", type=int, default=1)
+    parser.add_argument("--validation-trajectories", type=str,
+                        default="trajectory_exports/validation_trajectories",
+                        help="Held-out trajectories the shipped gains are selected on. "
+                             "Empty string falls back to the frozen training design.")
+    # Off by default: this loop plateaus and then goes through a basin
+    # transition at ~180 trajectory steps, so any stagnation rule quits in
+    # the plateau. Set >= 0 to re-enable.
+    parser.add_argument("--convergence-rel-tol", type=float, default=-1.0)
+    parser.add_argument("--convergence-window", type=int, default=50)
     parser.add_argument("--num-realizations", type=int, default=4)
     parser.add_argument("--num-trajectories", type=int, default=8)
     parser.add_argument("--num-control-points", type=int, default=5)
@@ -58,7 +87,15 @@ def main():
         num_control_points=args.num_control_points,
         num_realizations=args.num_realizations,
         trajectory_learning_rate=args.trajectory_learning_rate,
-        gain_learning_rate=args.gain_learning_rate,
+        constraint_violation_tolerance=args.constraint_violation_tolerance,
+        trust_radius=args.trust_radius,
+        trust_gain_loss_increase=args.trust_gain_loss_increase,
+        trust_stall_rounds=args.trust_stall_rounds,
+        gain_steps_per_round=args.gain_steps_per_round,
+        trajectory_steps_per_round=args.trajectory_steps_per_round,
+        validation_trajectories_dir=args.validation_trajectories or None,
+        convergence_rel_tol=args.convergence_rel_tol,
+        convergence_window=args.convergence_window,
         warm_start_trajectories_dir=args.warm_start_trajectories,
         start_offset_mode=args.start_offset_mode,
         criterion=args.criterion,
@@ -75,6 +112,18 @@ def main():
                 "mode": args.mode,
                 "wheel_lp_tau": float(result.config["wheel_lp_tau"]),
                 "gains": [float(gain) for gain in result.gains],
+                # The last iterate, kept for diagnostics: on a healthy run it is
+                # close to `gains`, and a large gap means the loop was still
+                # being dragged around when it stopped.
+                "final_gains": [float(gain) for gain in result.final_gains],
+                "best_gain_score": float(result.best_gain_score),
+                "validation_trajectories": result.config["validation_trajectories_dir"],
+                "num_validation_trajectories": result.config["num_validation_trajectories"],
+                "best_gain_round": result.history["best_gain_round"],
+                "converged_at_round": result.history["converged_at_round"],
+                "converged_reason": result.history["converged_reason"],
+                "rejected_rounds": int(result.history["rejected_rounds"]),
+                "final_trust_radius": float(result.config["trust_radius"]),
                 "start_offset_mode": args.start_offset_mode,
                 "seconds_per_round": float(result.timing["seconds_per_round"]),
                 "uphill_fraction_gain": float(result.history["uphill_fraction_gain"]),
@@ -104,7 +153,9 @@ def main():
             )
     print(f"Saved joint tuning result to {out_dir}")
 
-    print("Final gains:")
+    # The best iterate on the frozen scoring set, not the loop's last one -- see
+    # JointTuningResult. `final_gains` is printed by run_joint_tuning itself.
+    print("Best gains (shipped):")
     for name, value in zip(GAIN_NAMES, np.asarray(result.gains, dtype=float)):
         print(f"  {name:<9}: {value:.7g}")
 

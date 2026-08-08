@@ -25,6 +25,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "optimistix>=0.1.0",
     "pytest>=8.0",
 ]
 

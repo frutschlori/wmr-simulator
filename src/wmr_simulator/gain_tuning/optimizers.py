@@ -552,7 +552,14 @@ def optimize_controller_gains(
         w_init=w_init,
     )
     if w_init is not None:
-        print("Warm-starting the gain parametrization from the template (previous result).")
+        # Flat params are zero exactly when the template is a fresh seed (zero
+        # output layer / zero W, both "identity mapping" by convention) rather
+        # than an actually trained theta from a previous iteration -- warn
+        # accordingly instead of always claiming a "previous result".
+        if bool(jnp.allclose(w_init, 0.0)):
+            print("Gain parametrization template has no trained theta yet; starting from identity.")
+        else:
+            print("Warm-starting the gain parametrization from the template (previous result).")
     schedule_state = "enabled" if schedule_enabled else "disabled"
     if num_lhs_points > 0:
         band = (

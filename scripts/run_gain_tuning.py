@@ -67,7 +67,7 @@ def save_tuning_result(out_path: str, problem_path: str, result: dict) -> None:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--problem", type=str, default="problems/pololu_gains.yaml")
-    parser.add_argument("--reference-trajectories-dir", type=str, default="trajectory_exports/gain_optimized_aktuell")
+    parser.add_argument("--reference-trajectories-dir", type=str, default="trajectory_exports/gain_optimized_current")
     parser.add_argument("--validation-split", type=float, default=GAIN_TUNING_DEFAULTS["validation_split"])
     # Optimization hyper-parameters
     parser.add_argument("--num-lhs-points", type=int, default=GAIN_TUNING_DEFAULTS["num_lhs_points"]) # points on initial search grid, 0 to disable
@@ -108,6 +108,14 @@ def main():
     parser.add_argument("--static-tune", action=argparse.BooleanOptionalAction, default=GAIN_TUNING_DEFAULTS["static_tune"])
     parser.add_argument("--static-tune-steps", type=int, default=GAIN_TUNING_DEFAULTS["static_tune_steps"])
     parser.add_argument("--static-tune-learning-rate", type=float, default=GAIN_TUNING_DEFAULTS["static_tune_learning_rate"])
+    # The standalone script has no prior iteration to refine from -- like
+    # active-learning iteration 1, seed the parametrization run's presearch
+    # with the static run's converged gains as extra candidates, since both
+    # presearches are otherwise the same evaluation (identity parametrization).
+    # Disable to test the two runs fully independently.
+    parser.add_argument(
+        "--seed-parametrization-from-static", action=argparse.BooleanOptionalAction, default=True
+    )
     # Refine from a prior result: narrow each run's LHS presearch to a +/- band
     # around its init gains, and/or warm-start the parametrization from the
     # problem's gain_parametrization (theta) instead of the identity mapping.
@@ -155,6 +163,7 @@ def main():
         static_tune=args.static_tune,
         static_tune_steps=args.static_tune_steps,
         static_tune_learning_rate=args.static_tune_learning_rate,
+        seed_parametrization_from_static=args.seed_parametrization_from_static,
         presearch_relative_range=args.presearch_relative_range,
         warm_start_schedule=args.warm_start_schedule,
         init_offset_radius=args.init_offset_radius,

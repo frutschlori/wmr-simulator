@@ -189,7 +189,7 @@ def main():
     parser.add_argument("--export-dir", default="trajectory_exports/baselines")
     parser.add_argument("--name", default=None, help="Export stem (default: baseline_<type>_<timestamp>).")
     # Shared parameters
-    parser.add_argument("--time", type=float, default=8.0, help="Total trajectory time in seconds.")
+    parser.add_argument("--time", type=float, default=5.0, help="Total trajectory time in seconds.")
     parser.add_argument("--center", type=float, nargs=2, default=[0.0, 0.0], help="Path center [x y] in meters.")
 
     # Circle parameters
@@ -215,7 +215,7 @@ def main():
     # Waypoint spline parameters
     parser.add_argument("--num-waypoints", type=int, default=4,
                         help="Number of random waypoints including start and goal (waypoints mode).")
-    parser.add_argument("--start-heading", type=float, default=-3.14,
+    parser.add_argument("--start-heading", type=float, default=0,
                         help="Heading constraint for the start waypoint in radians (waypoints mode).")
     # parser.add_argument("--waypoints", type=parse_waypoints, default='[[1, 1], [1, 0], [0, 0], [0, 1]]')
     parser.add_argument("--waypoints", type=parse_waypoints, default=None)
@@ -235,7 +235,7 @@ def main():
     parser.add_argument("--bridge-time", type=float, default=5.0,
                         help="Duration of the bridge-back trajectory, in seconds.")
     # Simulation settings
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=420)
     parser.add_argument("--skip-simulation", action="store_true", default=False)
     args = parser.parse_args()
 
