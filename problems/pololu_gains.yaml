@@ -45,9 +45,9 @@ controller:
     hidden_sizes: [16]
     seed: 0
     scheduled_indices: [0, 1, 2, 3, 4] # kx, ky, kth; motor PI gains stay static ([0,1,2,3,4] schedules all)
-    bound: 5.0             # upper factor bound, clipped to >= 1 when applied
+    bound: 3.0             # upper factor bound, clipped to >= 1 when applied
     learn_bound: false     # true adds the bound to the trainable vector
-    spectral_norm_cap: 1   # per-matrix spectral norm cap, 0 disables
+    spectral_norm_cap: 1.5   # per-matrix spectral norm cap, 0 disables
 robot:
   type: differential_drive
   wheel_radius: 0.016   # m
@@ -58,7 +58,7 @@ robot:
   v_max: 2.5          # m/s
   a_max: 3.0         # m/s^2
   a_max_lateral: 6.0 # m/s^2
-  omega_max: 5.0    # rad/s
+  omega_max: 10.0    # rad/s
   alpha_max: 20.0    # rad/s^2
 noise_enabled: true # false zeroes the estimator measurement noise everywhere (sim, gain tuning, traj-opt FIM)
 estimator:
@@ -66,8 +66,8 @@ estimator:
   wheel_radius: 0.016     # estimator's wheel_radius [m]
   base_diameter: 0.0842   # estimator's base_diameter [m]
   noise_pos: 0.001        # position measurement noise [m] (from mocap almost no noise)
-  noise_angle: 0.03      # orientation noise [rad] ~ 1 degrees
-  enc_angle_noise: 0.03   # encoder noise [rad]
+  noise_angle: 0.02       # orientation noise [rad] ~ 1 degrees
+  enc_angle_noise: 0.01   # encoder noise [rad]
   wheel_lp_tau: 0.053     # [s] first-order low-pass on encoder wheel speeds fed to the controller (mirrors firmware; ~30 ms lag). 0 disables.
 
   proc_pos_std: 0.001     # [m]   process noise on x,y per step
