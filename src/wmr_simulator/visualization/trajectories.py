@@ -49,6 +49,11 @@ def _plot_trajectory_axes(
         num_replay_intervals = max(len(replay_estimates) - 1, 1)
         resolved_window_length = pipeline.simulation.resolve_replay_window_length(window_length, num_replay_intervals)
         window_start_indices = np.arange(0, num_replay_intervals, resolved_window_length)
+        # One window means the replay was never re-anchored: it is a single
+        # open-loop integration of the whole log, which drifts for reasons that
+        # have nothing to do with a window. Say so rather than calling it
+        # "windowed" and marking a "window start" that is just the start.
+        is_windowed_replay = len(window_start_indices) > 1
     if axis_limits is not None:
         x_limits, y_limits = axis_limits
     elif control_points is not None:
@@ -121,7 +126,10 @@ def _plot_trajectory_axes(
             end_idx = min(start_idx + resolved_window_length, num_replay_intervals)
             if end_idx <= start_idx:
                 continue
-            label = "Windowed Replay Actual" if window_idx == 0 else None
+            if window_idx == 0:
+                label = "Windowed Replay Actual" if is_windowed_replay else "Open-Loop Replay Actual (full sequence)"
+            else:
+                label = None
             window_start = closed_loop_estimates[start_idx : start_idx + 1]
             window_actual = np.concatenate([window_start, replay_actual[start_idx + 1 : end_idx + 1]], axis=0)
             window_actual = decimate_path(window_actual)
@@ -150,7 +158,7 @@ def _plot_trajectory_axes(
             s=36,
             linewidths=1.0,
             color="black",
-            label="Window Start",
+            label="Window Start" if is_windowed_replay else "Replay Start",
         )
 
     ax.set_xlabel("x [m]")
