@@ -52,7 +52,7 @@ def main():
 
     # Path to real experiment log
     parser.add_argument("--pololu-log", type=str,
-                        default="Pololu Data/Experiments/exp05/iteration_01/data/TR01.csv")
+                        default="Pololu Data/archive/Experiments/2026_07_27 Full Pipeline (with Residual and Gain MLP)/exp01/iteration_01/data/TR04.csv")
                         # default="Pololu Data/Experiments/2026_07_01/TR03.csv")
     parser.add_argument("--clip-after-first-trajectory", action="store_true", default=True)
     # Mocap/encoder smoothing defaults are configured in the measurement_smoothing submodule.
