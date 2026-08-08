@@ -105,7 +105,9 @@ def main():
         validation_trajectories_dir=args.validation_trajectories or None,
         convergence_rel_tol=args.convergence_rel_tol,
         convergence_window=args.convergence_window,
-        warm_start_trajectories_dir=args.warm_start_trajectories,
+        # Empty string is how a cold start is asked for: the flag defaults to a
+        # directory, so without this there is no way to turn the warm start off.
+        warm_start_trajectories_dir=args.warm_start_trajectories or None,
         start_offset_mode=args.start_offset_mode,
         criterion=args.criterion,
         seed=args.seed,
