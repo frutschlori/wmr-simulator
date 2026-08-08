@@ -3,6 +3,7 @@ os.environ["JAX_PLATFORMS"] = "cpu"
 
 import argparse
 from wmr_simulator.gain_tuning.defaults import GAIN_TUNING_DEFAULTS
+from wmr_simulator.gain_tuning.optimizers import OPTIMIZERS, describe_optimizer
 from wmr_simulator.gain_tuning.pipeline import (resolve_gain_robot_params, run_gain_tuning_experiment)
 from wmr_simulator.types import print_controller_gains, print_physical_params
 from wmr_simulator.visualization.gain_tuning import (
@@ -72,8 +73,12 @@ def main():
     # Optimization hyper-parameters
     parser.add_argument("--num-lhs-points", type=int, default=GAIN_TUNING_DEFAULTS["num_lhs_points"]) # points on initial search grid, 0 to disable
     parser.add_argument("--num-adam-optimizations", type=int, default=GAIN_TUNING_DEFAULTS["num_adam_optimizations"]) # number of best candidates to refine
-    parser.add_argument("--steps", type=int, default=GAIN_TUNING_DEFAULTS["steps"])                 # adam steps
-    parser.add_argument("--learning-rate", type=float, default=GAIN_TUNING_DEFAULTS["learning_rate"])      # adam learning rate
+    parser.add_argument("--steps", type=int, default=GAIN_TUNING_DEFAULTS["steps"])                 # adam steps / bfgs inner budget
+    parser.add_argument("--learning-rate", type=float, default=GAIN_TUNING_DEFAULTS["learning_rate"])      # adam learning rate (unused by bfgs)
+    # Refinement optimizer for the selected LHS starts. "bfgs" ignores
+    # --learning-rate (its line search sets the step length) and reads --steps
+    # as a total inner budget split into restarts of 40.
+    parser.add_argument("--optimizer", choices=list(OPTIMIZERS), default=GAIN_TUNING_DEFAULTS["optimizer"])
     parser.add_argument("--num-realizations", type=int, default=GAIN_TUNING_DEFAULTS["num_realizations"]) # noise realizations over 1 trajectory
     # Randomized start pose per realization (0 disables): the robot is placed off
     # the reference start, so the tracking gains have real error to act on.
@@ -157,6 +162,7 @@ def main():
         k_max_rest=args.k_max_rest,
         num_lhs_points=args.num_lhs_points,
         num_adam_optimizations=args.num_adam_optimizations,
+        optimizer=args.optimizer,
         schedule_enabled=args.gain_schedule,
         gain_delta_weight=args.gain_delta_weight,
         residual_model=residual_model,
@@ -184,7 +190,8 @@ def main():
     print(f"Stable gain search range: [{args.k_min_stab:.8g}, {args.k_max_stab:.8g}]")
     print(f"I/D motor gain search max: {args.k_max_rest:.8g}")
     print(f"LHS points: {args.num_lhs_points}")
-    print(f"Adam starts: {args.num_adam_optimizations}")
+    print(f"Refinement starts: {args.num_adam_optimizations}")
+    print(f"Refinement: {describe_optimizer(args.optimizer, args.steps, args.learning_rate)}")
     print(f"Final loss: {result['final_loss']:.8f}")
     print_loss_breakdown("Final training loss components:", result["loss_component_history"])
     if result["final_validation_loss"] is not None:

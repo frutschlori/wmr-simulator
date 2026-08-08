@@ -52,7 +52,9 @@ def plot_joint_tuning_history(history: dict, out_prefix: str = "joint_tuning_his
     for index, name in enumerate(GAIN_NAMES):
         axes[1, 0].plot(rounds, gains[:, index], linewidth=1.2, label=name)
     axes[1, 0].set_title("Controller gains")
-    axes[1, 0].set_yscale("log")
+    # Linear, not log: the gains span less than a decade once BFGS has solved
+    # the block, and a log axis turns kimotor's decay towards 0 into a dive off
+    # the bottom that dominates the panel and hides what the other four do.
     axes[1, 0].set_ylabel("gain")
     axes[1, 0].legend(fontsize=7, ncol=2)
 

@@ -186,6 +186,7 @@ class ControllerTuningPipeline(SimulationPipeline):
         k_max_rest: float = 20.0,
         num_lhs_points: int = 0,
         num_adam_optimizations: int = 1,
+        optimizer: str = "adam",
         presearch_relative_range: float = 0.0,
         warm_start_schedule: bool = False,
         init_offset_radius: float = 0.0,
@@ -210,6 +211,7 @@ class ControllerTuningPipeline(SimulationPipeline):
             k_max_rest=k_max_rest,
             num_lhs_points=num_lhs_points,
             num_adam_optimizations=num_adam_optimizations,
+            optimizer=optimizer,
             presearch_relative_range=presearch_relative_range,
             warm_start_schedule=warm_start_schedule,
             init_offset_radius=init_offset_radius,
@@ -275,6 +277,10 @@ def run_gain_tuning_experiment(
     k_max_rest: float = 20.0,
     num_lhs_points: int = 0,
     num_adam_optimizations: int = 1,
+    # "adam" or "bfgs"; see gain_tuning.optimizers. BFGS needs no learning rate
+    # (its line search sets the step length) and reaches kimotor = 0 by
+    # gradient, which is on the box boundary and out of Adam's reach.
+    optimizer: str = "adam",
     schedule_enabled: bool | None = None,
     gain_delta_weight: float = 0.0,
     residual_model=None,
@@ -307,21 +313,21 @@ def run_gain_tuning_experiment(
     optimizations run, so the static controller and the parametrized one are
     two separate options rather than two stages of one search:
 
-    * the static run: LHS presearch + multistart Adam over the base gains only,
+    * the static run: LHS presearch + multistart refinement over the base gains only,
       centered on ``static_init_gains`` (the previous iteration's static gains;
       the problem's gains when None) and using
       ``static_tune_steps``/``static_tune_learning_rate`` when given.
     * the parametrization run: LHS presearch with the (warm-started)
       parametrization already active, centered on the problem's gains, followed
-      directly by joint multistart Adam over base gains + parametrization,
+      directly by joint multistart refinement over base gains + parametrization,
       using ``num_steps``/``learning_rate``.
 
     Their loss histories are returned separately (``loss_history`` is the
     parametrization run's, ``static_*`` the static run's).
 
     ``seed_parametrization_from_static`` skips the parametrization run's own LHS
-    presearch and multistarts its Adam directly from the problem's gains plus
-    the static run's per-start Adam results. Meant for the first active-learning
+    presearch and multistarts the refinement directly from the problem's gains plus
+    the static run's per-start results. Meant for the first active-learning
     iteration, where there is no trained parametrization to warm-start from: the
     two presearches would then be the same evaluation (identity
     parametrization), so re-running one is wasted candidate evaluations and the
@@ -391,6 +397,7 @@ def run_gain_tuning_experiment(
             k_max_rest=k_max_rest,
             num_lhs_points=num_lhs_points if run_num_lhs_points is None else run_num_lhs_points,
             num_adam_optimizations=num_adam_optimizations,
+            optimizer=optimizer,
             presearch_relative_range=presearch_relative_range,
             warm_start_schedule=warm_start_schedule,
             init_offset_radius=init_offset_radius,
@@ -406,10 +413,9 @@ def run_gain_tuning_experiment(
             learning_rate if static_tune_learning_rate is None else float(static_tune_learning_rate)
         )
         static_init = pipeline.gains if static_init_gains is None else jnp.asarray(static_init_gains, dtype=jnp.float32)
-        print(
-            "Static run: optimizing base gains only "
-            f"({static_steps} steps, learning rate {static_learning_rate:.8g})."
-        )
+        # The budget itself is reported by the "Refining ..." line inside
+        # optimize_controller_gains, which knows how each optimizer reads it.
+        print("Static run: optimizing base gains only.")
         static_optimization = optimize(
             static_init, run_schedule_enabled=False,
             run_num_steps=static_steps, run_learning_rate=static_learning_rate,
@@ -421,7 +427,7 @@ def run_gain_tuning_experiment(
     # When seeding from the static run, its own LHS presearch already searched
     # this same evaluation (identity parametrization), so a second presearch
     # here would spend the full candidate budget only to be beaten by the
-    # already-converged static seeds -- skip it and multistart Adam directly
+    # already-converged static seeds -- skip it and multistart the refinement directly
     # from the problem's gains + the static run's results.
     parametrization_num_lhs_points = num_lhs_points
     if static_optimization is not None and seed_parametrization_from_static:
@@ -429,8 +435,8 @@ def run_gain_tuning_experiment(
         parametrization_init_gains = jnp.concatenate([parametrization_init_gains, seeds], axis=0)
         parametrization_num_lhs_points = 0
         print(
-            "Parametrization run: skipping its own presearch, multistart Adam directly from the "
-            f"problem's gains + the {int(seeds.shape[0])} static Adam result(s) "
+            "Parametrization run: skipping its own presearch, refining directly from the "
+            f"problem's gains + the {int(seeds.shape[0])} static run result(s) "
             "(first iteration: nothing to warm-start from)."
         )
     else:

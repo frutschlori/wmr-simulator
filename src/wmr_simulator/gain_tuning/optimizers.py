@@ -2,6 +2,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
+import optimistix as optx
 from jax_tqdm import scan_tqdm
 
 from wmr_simulator.gain_parametrization import flat_params as gain_parametrization_flat_params
@@ -13,6 +14,38 @@ from wmr_simulator.gain_tuning.objectives import (
     scheduled_closed_loop_objective_terms,
     split_realization_keys_by_trajectory,
 )
+
+OPTIMIZER_ADAM = "adam"
+OPTIMIZER_BFGS = "bfgs"
+OPTIMIZERS = (OPTIMIZER_ADAM, OPTIMIZER_BFGS)
+
+# One bounded BFGS solve, in optimistix steps. Those steps are *line-search
+# trials*, not accepted updates, so this is not a step count: measured on this
+# objective, a budget of 5 does not leave the initial point at all, 15 crawls,
+# 40 reaches the conditional optimum. `--steps` is then split into chunks of
+# this size, which also gives the loss history one point per chunk.
+_BFGS_STEPS_PER_SOLVE = 40
+_BFGS_RTOL = 1e-4
+_BFGS_ATOL = 1e-8
+
+
+def describe_optimizer(optimizer: str, num_steps: int, learning_rate: float | None = None) -> str:
+    """One-line description of the refinement budget, for log lines.
+
+    The two optimizers read ``num_steps`` differently and only Adam has a
+    learning rate, so every message that reports the budget goes through here
+    instead of assuming Adam.
+    """
+    optimizer = optimizer.strip().lower()
+    if optimizer == OPTIMIZER_BFGS:
+        return (
+            f"BFGS, {max(1, int(num_steps) // _BFGS_STEPS_PER_SOLVE)} restarts x "
+            f"{_BFGS_STEPS_PER_SOLVE} inner steps (no learning rate; the line search sets the "
+            "step length)"
+        )
+    rate = "" if learning_rate is None else f", learning rate {float(learning_rate):.8g}"
+    return f"Adam, {int(num_steps)} steps{rate}"
+
 
 _NUM_GAINS = 5
 _NUM_STABLE_GAINS = 4
@@ -391,6 +424,116 @@ def _run_adam_optimizer(
     )
 
 
+def _run_bfgs_optimizer(
+    initial_values,
+    initial_losses,
+    loss_terms_for_optimizer_values,
+    validation_loss_for_optimizer_values,
+    validation_loss_terms_for_optimizer_values,
+    num_steps,
+):
+    """Multistart BFGS, with the same return contract as ``_run_adam_optimizer``.
+
+    A "step" here is a *restart*: one bounded ``optx.minimise`` of
+    ``_BFGS_STEPS_PER_SOLVE`` inner steps, resumed from the previous solve's
+    answer. Restarting rather than running one long solve is deliberate --
+    measured on the joint loop's gain block, 5 restarts of 40 reach 0.009939
+    where a single 200-step solve stalls at 0.013097, because a fresh Hessian
+    approximation escapes the flat directions the previous one had baked in.
+    It is also what gives this a per-chunk loss history at all, since
+    ``minimise`` exposes no per-step trace.
+
+    There is no learning rate: the line search sets the step length, which is
+    the whole reason this reaches ``kimotor = 0`` (on the box boundary, half an
+    optimizer-space unit from the nominal value) where Adam cannot.
+    """
+    num_solves = max(1, int(num_steps) // _BFGS_STEPS_PER_SOLVE)
+    solver = optx.BestSoFarMinimiser(optx.BFGS(rtol=_BFGS_RTOL, atol=_BFGS_ATOL))
+
+    def objective(values, _args):
+        # Bare scalar: the (value, aux) form is for `solver.step`, not
+        # `minimise`. Clipping inside keeps the box constraint out of the
+        # solver's hands; only the gain part is clipped, the parametrization
+        # tail bounds its own effect.
+        return jnp.sum(loss_terms_for_optimizer_values(clip_optimizer_values(values)))
+
+    def one_solve(values):
+        solution = optx.minimise(
+            objective, solver, values, args=None,
+            max_steps=_BFGS_STEPS_PER_SOLVE,
+            # Hitting the cap without converging is the budget working, not a
+            # failure.
+            throw=False,
+        )
+        return clip_optimizer_values(solution.value)
+
+    def scored(values):
+        losses = jax.vmap(lambda v: jnp.sum(loss_terms_for_optimizer_values(v)))(values)
+        terms = jax.vmap(loss_terms_for_optimizer_values)(values)
+        if validation_loss_for_optimizer_values is None:
+            validation = jnp.full_like(losses, jnp.nan)
+            validation_terms = jnp.full_like(terms, jnp.nan)
+        else:
+            validation = jax.vmap(validation_loss_for_optimizer_values)(values)
+            validation_terms = jax.vmap(validation_loss_terms_for_optimizer_values)(values)
+        return losses, validation, terms, validation_terms
+
+    @scan_tqdm(num_solves, desc=f"BFGS solves ({initial_values.shape[0]} starts)")
+    def solve_step(carry, _):
+        values, best_values, best_score = carry
+        next_values = jax.vmap(one_solve)(values)
+        losses, validation, terms, validation_terms = scored(next_values)
+        # Same best-iterate bookkeeping as the Adam path: score on validation
+        # when there is one, else on training.
+        score = losses if validation_loss_for_optimizer_values is None else validation
+        improved = score < best_score
+        return (
+            (next_values, jnp.where(improved[:, None], next_values, best_values),
+             jnp.where(improved, score, best_score)),
+            (losses, validation, terms, validation_terms),
+        )
+
+    initial_terms = jax.vmap(loss_terms_for_optimizer_values)(initial_values)
+    initial_losses = jnp.asarray(initial_losses, dtype=jnp.float32)
+    if validation_loss_for_optimizer_values is None:
+        initial_validation = jnp.full_like(initial_losses, jnp.nan)
+        initial_validation_terms = jnp.full_like(initial_terms, jnp.nan)
+        initial_score = initial_losses
+    else:
+        initial_validation = jax.vmap(validation_loss_for_optimizer_values)(initial_values)
+        initial_validation_terms = jax.vmap(validation_loss_terms_for_optimizer_values)(initial_values)
+        initial_score = initial_validation
+
+    (final_values, best_values, best_score), (
+        loss_trace, validation_trace, terms_trace, validation_terms_trace
+    ) = jax.lax.scan(
+        solve_step,
+        (initial_values, initial_values, initial_score),
+        jnp.arange(num_solves),
+    )
+
+    loss_history = jnp.concatenate([initial_losses[None, :], loss_trace], axis=0)
+    loss_terms_history = jnp.concatenate([initial_terms[None, :, :], terms_trace], axis=0)
+    validation_history = None
+    validation_terms_history = None
+    if validation_loss_for_optimizer_values is not None:
+        validation_history = np.asarray(
+            jnp.concatenate([initial_validation[None, :], validation_trace], axis=0), dtype=float
+        )
+        validation_terms_history = np.asarray(
+            jnp.concatenate([initial_validation_terms[None, :, :], validation_terms_trace], axis=0),
+            dtype=float,
+        )
+    return (
+        best_values,
+        np.asarray(best_score, dtype=float),
+        np.asarray(loss_history, dtype=float),
+        validation_history,
+        np.asarray(loss_terms_history, dtype=float),
+        validation_terms_history,
+    )
+
+
 def optimize_controller_gains(
     pipeline,
     init_gains: jax.Array,
@@ -409,6 +552,7 @@ def optimize_controller_gains(
     k_max_rest: float = 20.0,
     num_lhs_points: int = 0,
     num_adam_optimizations: int = 1,
+    optimizer: str = OPTIMIZER_ADAM,
     presearch_relative_range: float = 0.0,
     warm_start_schedule: bool = False,
     init_offset_radius: float = 0.0,
@@ -447,6 +591,9 @@ def optimize_controller_gains(
         raise ValueError("num_lhs_points must be non-negative.")
     if num_adam_optimizations <= 0:
         raise ValueError("num_adam_optimizations must be positive.")
+    optimizer = optimizer.strip().lower()
+    if optimizer not in OPTIMIZERS:
+        raise ValueError(f"Unsupported optimizer '{optimizer}'. Expected one of {list(OPTIMIZERS)}.")
 
     num_w = gain_parametrization_num_params(schedule_template) if schedule_enabled else 0
 
@@ -574,6 +721,10 @@ def optimize_controller_gains(
         )
     else:
         print(f"Starting initial gain candidate evaluation (LHS disabled; gain schedule {schedule_state}).")
+    num_starts = min(int(num_adam_optimizations), int(candidate_values.shape[0]))
+    print(
+        f"Refining {num_starts} start(s) with {describe_optimizer(optimizer, num_steps, learning_rate)}."
+    )
     initial_values, initial_losses, start_candidate_indices = _select_initial_optimizer_values(
         candidate_values=candidate_values,
         loss_for_optimizer_values=loss_for_optimizer_values,
@@ -590,14 +741,25 @@ def optimize_controller_gains(
         validation_loss_history,
         loss_terms_history,
         validation_terms_history,
-    ) = _run_adam_optimizer(
-        initial_values=initial_values,
-        initial_losses=initial_losses,
-        loss_terms_for_optimizer_values=loss_terms_for_optimizer_values,
-        validation_loss_for_optimizer_values=validation_loss_for_optimizer_values,
-        validation_loss_terms_for_optimizer_values=validation_loss_terms_for_optimizer_values,
-        num_steps=num_steps,
-        learning_rate=learning_rate,
+    ) = (
+        _run_adam_optimizer(
+            initial_values=initial_values,
+            initial_losses=initial_losses,
+            loss_terms_for_optimizer_values=loss_terms_for_optimizer_values,
+            validation_loss_for_optimizer_values=validation_loss_for_optimizer_values,
+            validation_loss_terms_for_optimizer_values=validation_loss_terms_for_optimizer_values,
+            num_steps=num_steps,
+            learning_rate=learning_rate,
+        )
+        if optimizer == OPTIMIZER_ADAM
+        else _run_bfgs_optimizer(
+            initial_values=initial_values,
+            initial_losses=initial_losses,
+            loss_terms_for_optimizer_values=loss_terms_for_optimizer_values,
+            validation_loss_for_optimizer_values=validation_loss_for_optimizer_values,
+            validation_loss_terms_for_optimizer_values=validation_loss_terms_for_optimizer_values,
+            num_steps=num_steps,
+        )
     )
     # Pick the winning start on the validation trajectories when there are any.
     # Selecting on the training loss rewards the start that fit its own noise

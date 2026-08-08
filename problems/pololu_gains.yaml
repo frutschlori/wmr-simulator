@@ -58,7 +58,7 @@ robot:
   v_max: 2.5          # m/s
   a_max: 3.0         # m/s^2
   a_max_lateral: 6.0 # m/s^2
-  omega_max: 10.0    # rad/s
+  omega_max: 5.0    # rad/s
   alpha_max: 20.0    # rad/s^2
 noise_enabled: true # false zeroes the estimator measurement noise everywhere (sim, gain tuning, traj-opt FIM)
 estimator:
