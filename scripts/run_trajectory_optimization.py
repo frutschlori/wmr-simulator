@@ -33,7 +33,19 @@ def main():
     # Optimization Settings
     parser.add_argument("--save-trajectory", action="store_true", default=True)
     parser.add_argument("--no-save-trajectory", dest="save_trajectory", action="store_false")
-    parser.add_argument("--window-length", type=int, default=None) # replay window length, only for identification mode
+    # Replay window length, identification mode only. 50 (not None/full-sequence):
+    # the replay integrates the *estimated* wheel speeds open loop, and the encoder
+    # noise that survives the firmware low-pass is autocorrelated over wheel_lp_tau,
+    # so a full-sequence replay is a heading random walk. Measured over 10 estimator
+    # seeds on the 5 s default problem: replay-vs-truth pose RMSE 0.0067 +/- 0.0009 m
+    # windowed against 0.083 +/- 0.048 m un-windowed. The FIM is J^T J -- it assumes
+    # i.i.d. measurement noise -- so it reads that drift as information: un-windowed
+    # trace(FIM^-1) is 205x "better" while the measured signal-to-noise ratio for
+    # wheel_radius actually *falls* (0.13 -> 0.08), and fitting (r, L) to an
+    # un-windowed replay drives base_diameter to 2x its true value absorbing the
+    # drift. Window resets keep the residual stationary, which is what the FIM's
+    # covariance assumption needs.
+    parser.add_argument("--window-length", type=int, default=50)
     parser.add_argument("--learning-rate", type=float, default=1e-2)
     parser.add_argument("--opt-steps", type=int, default=500)
     parser.add_argument("--objective-mode", choices=["identification", "gain-tuning"],
