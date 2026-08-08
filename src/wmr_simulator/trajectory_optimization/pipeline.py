@@ -479,20 +479,24 @@ class TrajectoryOptimizationPipeline:
     def constraint_weights(self, scale: float = 1.0, component_weights: dict | None = None) -> dict[str, jnp.ndarray]:
         return constraint_weights(scale=scale, component_weights=component_weights)
 
-    def pinned_positions(self, num_control_points: int) -> dict[int, np.ndarray]:
+    def pinned_positions(self) -> dict[int, np.ndarray]:
         """Control points whose position is boundary data rather than a decision
         variable, mapped to that position.
 
         An identification trajectory must run from the pose the robot is
-        physically placed in to the specified goal. The spline is clamped, so
-        the curve begins at the first control point and ends at the last, and
-        pinning those two is the whole of it. A gain-tuning trajectory has no
+        physically placed in -- only the start is boundary data, since that is
+        the one pose that has to be set by hand on the real robot before a run.
+        The spline is clamped, so the curve begins at the first control point,
+        and pinning it is the whole of it; the goal control point (the last
+        one, since the curve also ends there) is a free decision variable,
+        bounded only by the environment-box clip every control point already
+        gets in ``clamp_control_points``. A gain-tuning trajectory has no
         meaningful start or goal -- it only has to excite the gains somewhere
-        inside the environment box -- so every control point is free.
+        inside the environment box -- so every control point is free there too.
         """
         if self.objective_mode == OBJECTIVE_MODE_GAIN_TUNING:
             return {}
-        return {0: self.problem.start[:2], num_control_points - 1: self.problem.goal[:2]}
+        return {0: self.problem.start[:2]}
 
     def pin_start_heading(self) -> bool:
         """Whether the second control point is held on the start-heading ray.
@@ -759,7 +763,7 @@ class TrajectoryOptimizationPipeline:
         return clamp_control_points(
             self.problem,
             control_points,
-            pinned_positions=self.pinned_positions(control_points.shape[0]),
+            pinned_positions=self.pinned_positions(),
             pin_start_heading=self.pin_start_heading(),
         )
 
