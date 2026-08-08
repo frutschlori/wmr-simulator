@@ -31,7 +31,24 @@ GAIN_TUNING_DEFAULTS: dict = {
     # exp04/exp05 logs: 31-100 mm and up to 9.5 deg. Both 0 disables.
     "init_offset_radius": 0.1,
     "init_offset_angle": 0.3,
-    "num_lhs_points": 4000,
+    # 0 = presearch off, which is the default now that the refinement optimizer
+    # is BFGS. The LHS sweep exists to hand Adam a good starting basin; measured
+    # on trajectory_exports/gain_optimized_current, BFGS with no presearch
+    # reaches held-out 0.009392 against 0.009390 with 64 LHS points, so the
+    # sweep buys nothing. Raise it again if a run looks basin-trapped.
+    "num_lhs_points": 0,
+    # Refinement optimizer: "bfgs" or "adam". BFGS ignores `learning_rate` (its
+    # line search sets the step length) and reads `steps` as a total inner
+    # budget split into restarts of 40 line-search-bounded steps. It reaches
+    # kimotor = 0 by gradient, which sits on the box boundary and is out of
+    # Adam's reach at any learning rate that keeps the other four stable.
+    "optimizer": "bfgs",
+    # Number of refinement multistarts, i.e. how many of the best presearch
+    # candidates get refined. Inert in the default configuration: with the
+    # presearch off there is only the one init-gain candidate to start from, so
+    # `num_starts = min(this, num_candidates)` collapses to 1. It still binds
+    # when the presearch is re-enabled or when `init_gains` is passed as a
+    # batch. (Name predates the optimizer being selectable.)
     "num_adam_optimizations": 3,
     "validation_split": 0.2,
     "velocity_tracking_weight": 1.0,
@@ -39,7 +56,7 @@ GAIN_TUNING_DEFAULTS: dict = {
     "input_delta_weight": 1.0,
     # Penalty on step-to-step change in the robot yaw rate (normalized by
     # omega_max); discourages gains that oscillate omega. 0 disables.
-    "omega_delta_weight": 1.0,
+    "omega_delta_weight": 1.5,
     "gain_delta_weight": 0.0,
     "k_min_stab": 1e-3,
     "k_max_stab": 50.0,
