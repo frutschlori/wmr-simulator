@@ -64,7 +64,6 @@ def main():
     parser.add_argument("--start-offset-mode", choices=sorted(START_OFFSET_MODES), default=START_OFFSET_MODE_OPTIMIZE)
     parser.add_argument("--offset-displacement-step-factor", type=float, default=1.0)
     parser.add_argument("--offset-heading-step-factor", type=float, default=1.0)
-    parser.add_argument("--wheel-lp-tau",type=float,default=None)
     # Constraints
     parser.add_argument("--constraint-weight", type=float, default=1.0)
     parser.add_argument("--constraint-v-weight", type=float, default=1.0)
@@ -93,7 +92,6 @@ def main():
         time_scaling=args.time_scaling,
         objective_mode=args.objective_mode,
         fim_a_slip_max=args.fim_a_slip_max,
-        wheel_lp_tau=args.wheel_lp_tau,
         criterion=args.criterion,
         start_offset_mode=args.start_offset_mode,
         offset_displacement_step_factor=args.offset_displacement_step_factor,

@@ -304,7 +304,6 @@ class TrajectoryOptimizationPipeline:
         fim_a_slip_max: bool = True,
         num_realizations: int = DEFAULT_NUM_REALIZATIONS,
         realizations: Realizations | None = None,
-        wheel_lp_tau: float | None = None,
         criterion: str = DEFAULT_CRITERION,
         start_offset_mode: str = START_OFFSET_MODE_RANDOM,
         offset_displacement_step_factor: float = 1.0,
@@ -326,11 +325,9 @@ class TrajectoryOptimizationPipeline:
         # be driven on: the firmware filters the raw wheel speeds with
         # tau = 1/(2*pi*3 Hz) = 0.053 s at its 10 ms inner step
         # (firmware/src/inner_controller.rs), which is exactly what the estimator
-        # reproduces, so the simulated timing is not the problem. It is therefore
-        # kept by default, matching gain tuning and simulation; ``wheel_lp_tau``
-        # overrides it (0.0 disables) for controlled LP-on/LP-off ablations.
-        if wheel_lp_tau is not None:
-            self.estimator.wheel_lp_tau = float(wheel_lp_tau)
+        # reproduces, so the simulated timing is not the problem. It is always on
+        # (read from the problem config); read-only mirror for callers that want
+        # the effective value without reaching into ``self.estimator``.
         self.wheel_lp_tau = float(self.estimator.wheel_lp_tau)
         self.time_scaling = normalize_time_scaling(time_scaling)
         self.objective_mode = normalize_objective_mode(objective_mode)

@@ -319,7 +319,6 @@ def run_joint_tuning(
     constraint_violation_tolerance: float = 0.02,
     constraint_smooth_max_beta: float = 20.0,
     criterion: str = DEFAULT_CRITERION,
-    wheel_lp_tau: float | None = None,
     time_scaling: str = "s-curve",
     seed: int = 0,
     k_min_stab: float = float(GAIN_TUNING_DEFAULTS["k_min_stab"]),
@@ -434,7 +433,6 @@ def run_joint_tuning(
         time_scaling=time_scaling,
         objective_mode=OBJECTIVE_MODE_GAIN_TUNING,
         realizations=realizations,
-        wheel_lp_tau=wheel_lp_tau,
         criterion=criterion,
     )
     gain_pipeline = ControllerTuningPipeline(
@@ -1062,8 +1060,8 @@ def run_joint_tuning(
             "k_min_stab": k_min_stab,
             "k_max_stab": k_max_stab,
             "k_max_rest": k_max_rest,
-            # Both sides now roll out the same plant. Recorded per run because
-            # the LP-on/LP-off ablation is exactly a comparison over this field.
+            # Both sides roll out the same plant; recorded per run as provenance
+            # (the encoder low-pass is always on, read from the problem config).
             "wheel_lp_tau": float(trajectory_pipeline.wheel_lp_tau),
             "gain_wheel_lp_tau": float(gain_pipeline.estimator.wheel_lp_tau),
         },
