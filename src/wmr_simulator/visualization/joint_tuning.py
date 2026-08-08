@@ -29,10 +29,21 @@ def plot_joint_tuning_history(history: dict, out_prefix: str = "joint_tuning_his
 
     fig, axes = plt.subplots(2, 2, figsize=(11, 7))
 
-    axes[0, 0].plot(rounds, gain_loss, color="C0", linewidth=1.2)
+    # Both gain curves, because the gap between them *is* the moving-target
+    # effect: training is scored on the trajectories being optimized, which
+    # change every round, so only validation is comparable across rounds and
+    # only validation selects the gains that ship.
+    axes[0, 0].plot(rounds, gain_loss, color="C0", linewidth=1.2, alpha=0.5, label="training")
+    if "gain_validation_loss" in history:
+        validation_loss = np.asarray(history["gain_validation_loss"], dtype=float)
+        axes[0, 0].plot(rounds, validation_loss, color="C1", linewidth=1.4, label="validation")
+        best_round = history.get("best_gain_round")
+        if best_round is not None:
+            axes[0, 0].axvline(best_round, color="C3", linestyle="--", linewidth=1.0, label="best (shipped)")
     axes[0, 0].set_title("Gain-tuning loss (warm-start rounds are blank)")
     axes[0, 0].set_ylabel("loss")
     axes[0, 0].set_yscale("log")
+    axes[0, 0].legend(fontsize=7)
 
     axes[0, 1].plot(rounds, trajectory_loss, color="C1", linewidth=1.2)
     axes[0, 1].set_title("Trajectory objective  log(A-opt) + penalty")

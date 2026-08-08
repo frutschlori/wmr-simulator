@@ -319,14 +319,15 @@ def run_gain_tuning_experiment(
     Their loss histories are returned separately (``loss_history`` is the
     parametrization run's, ``static_*`` the static run's).
 
-    ``seed_parametrization_from_static`` adds the static run's per-start Adam
-    results to the parametrization run's presearch as extra candidates (the LHS
-    points still compete, and the band stays centered on the problem's gains).
-    Meant for the first active-learning iteration, where there is no trained
-    parametrization to warm-start from: the two presearches are then the same
-    evaluation (identity parametrization), so the converged static gains are
-    free information. From the second iteration on the runs should stay fully
-    independent so each option refines its own lineage.
+    ``seed_parametrization_from_static`` skips the parametrization run's own LHS
+    presearch and multistarts its Adam directly from the problem's gains plus
+    the static run's per-start Adam results. Meant for the first active-learning
+    iteration, where there is no trained parametrization to warm-start from: the
+    two presearches would then be the same evaluation (identity
+    parametrization), so re-running one is wasted candidate evaluations and the
+    converged static gains are free information instead. From the second
+    iteration on the runs should stay fully independent (this flag off) so each
+    option refines its own lineage.
     """
     pipeline = ControllerTuningPipeline(
         problem_path=problem_path,
@@ -372,7 +373,7 @@ def run_gain_tuning_experiment(
     )
     init_model_log = pipeline.run_closed_loop(robot_params, initial_pose=summary_initial_pose)
 
-    def optimize(init_gains, run_schedule_enabled, run_num_steps, run_learning_rate):
+    def optimize(init_gains, run_schedule_enabled, run_num_steps, run_learning_rate, run_num_lhs_points=None):
         return pipeline.optimize(
             realizations=realizations,
             init_gains=init_gains,
@@ -388,7 +389,7 @@ def run_gain_tuning_experiment(
             k_min_stab=k_min_stab,
             k_max_stab=k_max_stab,
             k_max_rest=k_max_rest,
-            num_lhs_points=num_lhs_points,
+            num_lhs_points=num_lhs_points if run_num_lhs_points is None else run_num_lhs_points,
             num_adam_optimizations=num_adam_optimizations,
             presearch_relative_range=presearch_relative_range,
             warm_start_schedule=warm_start_schedule,
@@ -414,20 +415,30 @@ def run_gain_tuning_experiment(
             run_num_steps=static_steps, run_learning_rate=static_learning_rate,
         )
         static_gains = static_optimization["gains"]
-        print("Parametrization run: independent presearch with the parametrization active.")
 
     # Row 0 stays the problem's gains: it is what a narrowed presearch centers on.
     parametrization_init_gains = jnp.atleast_2d(pipeline.gains)
+    # When seeding from the static run, its own LHS presearch already searched
+    # this same evaluation (identity parametrization), so a second presearch
+    # here would spend the full candidate budget only to be beaten by the
+    # already-converged static seeds -- skip it and multistart Adam directly
+    # from the problem's gains + the static run's results.
+    parametrization_num_lhs_points = num_lhs_points
     if static_optimization is not None and seed_parametrization_from_static:
         seeds = static_optimization["final_gains_per_start"]
         parametrization_init_gains = jnp.concatenate([parametrization_init_gains, seeds], axis=0)
+        parametrization_num_lhs_points = 0
         print(
-            f"  seeding its presearch with the {int(seeds.shape[0])} static Adam "
-            "result(s) as extra candidates (first iteration: nothing to warm-start from)."
+            "Parametrization run: skipping its own presearch, multistart Adam directly from the "
+            f"problem's gains + the {int(seeds.shape[0])} static Adam result(s) "
+            "(first iteration: nothing to warm-start from)."
         )
+    else:
+        print("Parametrization run: independent presearch with the parametrization active.")
 
     optimization = optimize(parametrization_init_gains, run_schedule_enabled=schedule_enabled,
-                            run_num_steps=num_steps, run_learning_rate=learning_rate)
+                            run_num_steps=num_steps, run_learning_rate=learning_rate,
+                            run_num_lhs_points=parametrization_num_lhs_points)
     optimized_gains = optimization["gains"]
     schedule_params = optimization["schedule_params"]
     (
