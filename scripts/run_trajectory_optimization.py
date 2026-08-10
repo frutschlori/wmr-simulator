@@ -13,7 +13,6 @@ from wmr_simulator.trajectory_optimization.analysis import (
     render_tracking_surface_frames_for_optimization_trace,
 )
 from wmr_simulator.trajectory_optimization.pipeline import (
-    DEFAULT_DIVERGENCE_TOLERANCE,
     TrajectoryOptimizationPipeline,
 )
 from wmr_simulator.types import PhysicalParams
@@ -57,7 +56,6 @@ def main():
     # Gate rollouts that stray further than this [m] from the reference out of the
     # design FIM: an untrackable design is informative about instability, not about
     # the gains, and an ungated FIM reads that as a reward. 0 disables.
-    parser.add_argument("--divergence-tolerance", type=float, default=DEFAULT_DIVERGENCE_TOLERANCE)
     parser.add_argument("--trajectory-seed", type=int, default=0)
     # Constraints
     parser.add_argument("--constraint-weight", type=float, default=1.0)
@@ -65,8 +63,8 @@ def main():
     parser.add_argument("--constraint-a-weight", type=float, default=1.0)
     parser.add_argument("--constraint-lateral-weight", type=float, default=1.0)
     parser.add_argument("--constraint-omega-weight", type=float, default=1.0)
-    parser.add_argument("--constraint-alpha-weight", type=float, default=1.0)
-    parser.add_argument("--constraint-smooth-max-beta", type=float, default=20.0) # barrier constant
+    parser.add_argument("--constraint-alpha-weight", type=float, default=0.5)
+    parser.add_argument("--constraint-smooth-max-beta", type=float, default=10.0) # barrier constant
     # Visualization settings
     parser.add_argument("--save-opt-GIF", action="store_true", default=False)
     parser.add_argument("--opt-trace-stride", type=int, default=500)
@@ -87,7 +85,6 @@ def main():
         time_scaling=args.time_scaling,
         objective_mode=args.objective_mode,
         fim_a_slip_max=args.fim_a_slip_max,
-        divergence_tolerance=args.divergence_tolerance,
     )
 
     print(f"Loaded problem: {pipeline.problem.path}")
