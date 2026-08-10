@@ -195,6 +195,7 @@ def main():
             for name in ("v", "a", "lateral", "omega", "alpha"):
                 print(f"    {name:<7}: {float(constraint_components[name]):.8e}")
             print(f"  Constraint term (weighted): {float(objective_terms['constraint_term']):.8f}")
+            print(f"  Tangent floor (weighted):   {float(objective_terms['tangent_floor_term']):.8f}")
             print(f"  Total:       {float(objective_terms['total']):.8f}")
             print(f"  Constraint weight used: {selected_constraint_weight:.8g}")
             print("Optimized FIM:")

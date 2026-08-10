@@ -9,6 +9,7 @@ import jax
 import jax.numpy as jnp
 from scipy.interpolate import BSpline
 
+from wmr_simulator.trajectory_optimization.constraints import smooth_positive_max
 from wmr_simulator.trajectory_optimization.parametrization import (
     normalize_time_scaling,
     time_scaling_derivatives,
@@ -29,6 +30,31 @@ DEFAULT_SPLINE_DEGREE = 3
 # damped by 0.01%, while the floor still dominates by two orders of magnitude at
 # the stalled configurations that produced the 1e4 gradient spikes.
 TANGENT_FLOOR_FRACTION = 1e-4
+
+# The guard above, restated as the floor on ``|dpos/ds|`` itself: it fires at
+# ``sqrt(TANGENT_FLOOR_FRACTION) * rms(|dpos/ds|)``, i.e. at 1% of the curve's
+# own rms tangent. Named so the loss below can be defined against it.
+GUARD_TANGENT_FRACTION = float(np.sqrt(TANGENT_FLOOR_FRACTION))
+
+# Floor on |dpos/ds| that ``tangent_floor_loss`` holds the curve above, as a
+# fraction of the curve's own rms tangent; <= 0 disables the term. Below the
+# floor the curve has effectively stalled: heading and yaw rate are read off the
+# tangent, so a vanishing one is not a slow robot, it is an undefined pose.
+#
+# Relative, and to the same quantity the guard scales by, for two reasons. It
+# makes the margin over the guard a constant of the code rather than of the
+# problem -- 0.025 against GUARD_TANGENT_FRACTION's 0.01 is 2.5x at every scale,
+# so a larger environment or a longer path never quietly lets the optimizer
+# reach the fallback tangent. And it is the more faithful statement of the
+# pathology: what breaks the reference is one stretch of curve being far slower
+# than the rest, not the curve being slow in absolute metres. (A uniformly tiny
+# curve is scale-invariant to this term and is left to the FIM, which hates it.)
+#
+# 0.025 reproduces the absolute 0.15 that was tuned by eye on
+# ``problems/pololu_gains.yaml``, whose designs sit at rms |dpos/ds| ~ 6.3
+# (spread 3.2-9.3 over ten trajectories, so the effective floor is now
+# 0.08-0.23 per design rather than one number for all of them).
+DEFAULT_MIN_TANGENT_FRACTION = 0.03
 
 
 def _reference_from_derivatives(
@@ -205,6 +231,72 @@ def clamp_control_points(
     return clamped
 
 
+def rms_tangent_norm(reference_basis: jnp.ndarray, control_points: jnp.ndarray) -> jnp.ndarray:
+    """``sqrt(mean(|dpos/ds|^2))`` -- the curve's own scale, and exactly the
+    quantity ``_reference_from_derivatives`` floors against, so a floor stated
+    as a fraction of it keeps a fixed ratio to the guard at any problem size."""
+    tangent = jnp.matmul(reference_basis, control_points, precision=HIGHEST_PRECISION)
+    return jnp.sqrt(jnp.mean(jnp.sum(tangent**2, axis=1)) + 1e-12)
+
+
+def tangent_floor_loss(
+    tangent_basis: jnp.ndarray,
+    reference_basis: jnp.ndarray,
+    control_points: jnp.ndarray,
+    min_tangent_fraction: float = DEFAULT_MIN_TANGENT_FRACTION,
+    smooth_max_beta: float = 20.0,
+) -> jnp.ndarray:
+    """Squared smooth-max *fractional* shortfall of ``|dpos/ds|`` below
+    ``min_tangent_fraction * rms(|dpos/ds|)`` -- the same
+    ``smooth_positive_max(g)**2`` form as every motion limit in
+    ``constraints.py``, because this is one: the curve has to keep moving.
+
+    Writing it that way (rather than as a mean over samples) is what makes it
+    commensurable with the rest of the objective, and it is what gives the term
+    any authority. A stall occupies ~20 of 101 samples, so a mean dilutes a
+    93% shortfall to a loss of 0.11 -- against a FIM term that pays 2.0 log
+    units for the stall (measured, 6cp design 0: ``trace(FIM^-1)`` 7.4e-5
+    stalled against 5.6e-4 for the same route spread out). The smooth max keeps
+    the 0.93, and the pipeline then divides by the same
+    ``constraint_violation_tolerance`` as the limits, so a fractional tangent
+    shortfall costs exactly what an equal fractional over-limit costs.
+
+    The shortfall is measured against the floor itself, so the term saturates at
+    ~1 for a fully stalled curve and one fraction keeps its meaning across
+    problems.
+
+    The floor is ``stop_gradient``-wrapped: it sets the bar, and must not become
+    something the optimizer can push on. Without that, lowering the whole
+    curve's rms tangent -- a shorter, duller path -- would satisfy the term as
+    readily as fixing the stall, which is the opposite of the intent.
+
+    ``tangent_basis`` must be sampled uniformly in ``s``, *not* on the time
+    grid: under the s-curve scaling the time samples cluster at ``s = 0`` and
+    ``s = 1``, which is exactly where a stall does not happen.
+    ``reference_basis`` is the time-grid one, because the guard's own mean is
+    taken there.
+
+    This is complementary to ``TANGENT_FLOOR_FRACTION`` in
+    :func:`_reference_from_derivatives`: that guard keeps the gradient finite at
+    a stalled curve, while this loss keeps the optimizer 2.5x away from ever
+    reaching it.
+    """
+    if min_tangent_fraction <= 0.0:
+        return jnp.asarray(0.0, dtype=jnp.float32)
+    control_points = jnp.asarray(control_points, dtype=jnp.float32)
+    tangent = jnp.matmul(tangent_basis, control_points, precision=HIGHEST_PRECISION)
+    tangent_norm = jnp.sqrt(jnp.sum(tangent**2, axis=1) + 1e-8)
+    floor = jax.lax.stop_gradient(
+        min_tangent_fraction * rms_tangent_norm(reference_basis, control_points)
+    )
+    # A degenerate curve has no scale to be relative to, so the floor collapses
+    # with it; the clamp only keeps 0/0 out of the gradient. Such a curve is not
+    # a *stall* -- nothing about it is slower than the rest of it -- and it is
+    # the FIM's problem, not this term's.
+    shortfall = (floor - tangent_norm) / jnp.maximum(floor, 1e-6)
+    return smooth_positive_max(shortfall, beta=smooth_max_beta) ** 2
+
+
 class BSplinePlan:
     """Precomputed, control-point-independent evaluation matrices for a clamped
     uniform B-spline on a given time grid and time scaling.
@@ -232,6 +324,57 @@ class BSplinePlan:
         self.B0 = jnp.asarray(B0, dtype=jnp.float32)
         self.B1 = jnp.asarray(B1, dtype=jnp.float32)
         self.B2 = jnp.asarray(B2, dtype=jnp.float32)
+
+        # Second d/ds basis, on a *uniform* s grid, for the tangent-floor loss
+        # only: the time grid above is warped by the time scaling, and the
+        # s-curve puts most of its samples at the two ends, leaving the middle
+        # of the curve -- where the control points bunch and stall it -- barely
+        # observed. Same sample count, so the term costs one more matmul.
+        _, tangent_B1, _ = bspline_basis_matrices(
+            np.linspace(0.0, 1.0, int(self.B0.shape[0])), num_control_points, degree
+        )
+        self.tangent_B1 = jnp.asarray(tangent_B1, dtype=jnp.float32)
+
+    def stabilization_loss(
+        self,
+        control_points: jnp.ndarray,
+        min_tangent_fraction: float = DEFAULT_MIN_TANGENT_FRACTION,
+        smooth_max_beta: float = 20.0,
+    ) -> jnp.ndarray:
+        """The basis's own well-posedness term; see :func:`tangent_floor_loss`.
+
+        The fraction is an argument rather than plan state because the plan is
+        cached per ``(num_control_points, time_scaling)`` and it is a property
+        of the run, not of the basis.
+        """
+        return tangent_floor_loss(
+            self.tangent_B1,
+            self.B1,
+            control_points,
+            min_tangent_fraction=min_tangent_fraction,
+            smooth_max_beta=smooth_max_beta,
+        )
+
+    def tangent_diagnostics(self, control_points: jnp.ndarray) -> dict:
+        """Where this curve sits relative to the guard, in plain numbers.
+
+        Reported on the *time* grid -- the samples that actually become the
+        exported reference states, and the grid the guard's own mean is taken
+        on -- so ``guarded_samples`` is the count of exported poses whose
+        heading is the fallback tangent rather than the curve's.
+        """
+        control_points = jnp.asarray(control_points, dtype=jnp.float32)
+        tangent = jnp.matmul(self.B1, control_points, precision=HIGHEST_PRECISION)
+        tangent_norm = jnp.sqrt(jnp.sum(tangent**2, axis=1) + 1e-12)
+        rms = rms_tangent_norm(self.B1, control_points)
+        threshold = GUARD_TANGENT_FRACTION * rms
+        return {
+            "min_tangent_norm": float(jnp.min(tangent_norm)),
+            "rms_tangent_norm": float(rms),
+            "guard_threshold": float(threshold),
+            "guarded_samples": int(jnp.sum(tangent_norm <= threshold)),
+            "num_samples": int(tangent_norm.shape[0]),
+        }
 
     def evaluate(self, control_points: jnp.ndarray):
         # precision=HIGHEST: XLA's default lowers these matmuls to a reduced

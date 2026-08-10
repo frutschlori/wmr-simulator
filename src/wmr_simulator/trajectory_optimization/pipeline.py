@@ -49,6 +49,7 @@ from wmr_simulator.trajectory_optimization.objectives import (
 )
 from wmr_simulator.trajectory_optimization.optimizers import optimize_control_points
 from wmr_simulator.trajectory_optimization.bspline import (
+    DEFAULT_MIN_TANGENT_FRACTION,
     BSplinePlan,
     clamp_control_points,
     compute_bspline_reference,
@@ -326,8 +327,14 @@ class TrajectoryOptimizationPipeline:
         offset_displacement_step_factor: float = 1.0,
         offset_heading_step_factor: float = 1.0,
         divergence_tolerance: float = DEFAULT_DIVERGENCE_TOLERANCE,
+        min_tangent_fraction: float = DEFAULT_MIN_TANGENT_FRACTION,
     ):
         self.problem = ProblemDefinition(problem_path)
+        # See stabilization_loss_from_control_points: the floor |dpos/ds| is
+        # held above, as a fraction of the curve's own rms tangent, so the
+        # optimizer cannot buy information by stalling the curve into a cusp and
+        # the bar rescales with the problem. <= 0 disables the term.
+        self.min_tangent_fraction = float(min_tangent_fraction)
         # See realization_divergence_weights: rollouts that leave the reference
         # by more than this are gated out of the FIM, so an untrackable design
         # cannot look informative.
@@ -935,6 +942,84 @@ class TrajectoryOptimizationPipeline:
         self.reference_states = self.reference_states_from_control_points(control_points)
         self._set_closed_loop_log(self.run_closed_loop_deployment(reference_states=self.reference_states))
 
+    def stabilization_loss_from_control_points(
+        self,
+        control_points: jnp.ndarray,
+        constraint_smooth_max_beta: float = 20.0,
+        constraint_violation_tolerance: float = DEFAULT_CONSTRAINT_VIOLATION_TOLERANCE,
+    ) -> jnp.ndarray:
+        """The basis's tangent-floor term, scaled like the motion limits.
+
+        A curve whose ``|dpos/ds|`` collapses somewhere in the interior has no
+        heading there, and the reference it produces is not a trajectory -- but
+        nothing else in the objective can tell. The motion limits cannot,
+        because the guard in ``bspline._reference_from_derivatives`` floors the
+        ``dtheta_ds`` denominator: at a stall that denominator is 5x too large,
+        so the reference reports 0.90x ``alpha_max`` where the geometry demands
+        14x. (Measured by toggling the guard's two halves independently on the
+        6cp design: unfloored, the constraint term is 1868 against 0.048 as
+        shipped, while the fallback heading fed to ``arctan2`` changes it by
+        exactly nothing -- the limits never read ``theta``. The limits would
+        have crushed the stall on their own; the floor is what hides it.) The
+        divergence gate cannot either -- a stalled reference barely moves, so
+        the position deviation stays inside the tolerance.
+
+        Meanwhile the FIM *rewards* it, for the same reason it rewards
+        divergence: the untrackable heading flip makes the rollout enormously
+        sensitive to the gains. Measured on the 2026-08-10 6cp designs,
+        blending a stalled control polygon back to an evenly spread one over
+        the same route costs 7.5x in ``trace(FIM^-1)`` -- 2.0 log units,
+        monotonically. So the term has to be a real constraint, not a nudge:
+        dividing by ``constraint_violation_tolerance`` (0.05 -> weight 20) puts
+        a fully stalled curve at ~20 against that 2.0, and leaves every healthy
+        design at exactly 0.
+        """
+        plan = self._spline_plan(control_points.shape[0], self.time_scaling)
+        return plan.stabilization_loss(
+            control_points,
+            min_tangent_fraction=self.min_tangent_fraction,
+            smooth_max_beta=constraint_smooth_max_beta,
+        ) / constraint_violation_tolerance
+
+    def tangent_diagnostics(self, control_points: jnp.ndarray) -> dict:
+        """Where a curve sits relative to the guard: ``min_tangent_norm``,
+        ``rms_tangent_norm``, ``guard_threshold``, ``guarded_samples``."""
+        control_points = jnp.asarray(control_points, dtype=jnp.float32)
+        plan = self._spline_plan(control_points.shape[0], self.time_scaling)
+        return plan.tangent_diagnostics(control_points)
+
+    def assert_curve_is_exportable(self, control_points: jnp.ndarray, label: str = "") -> dict:
+        """Refuse to export a curve whose heading came from the fallback tangent.
+
+        Wherever ``|dpos/ds|`` falls under the guard's threshold, the exported
+        reference does not carry the curve's heading at those samples -- it
+        carries the constant ``[1, 0]`` fallback, and the step out of it is a
+        ~166 deg discontinuity in a 50 ms sample. Everything downstream then
+        consumes that as a pose command: the gain tuner rolls out against it,
+        and ``pololu/reference_exporter`` puts it on the robot. Nothing further
+        down can recognize it, because the sampled states are all it gets.
+
+        The tangent-floor loss is what keeps the optimizer 2.5x clear of this,
+        so a design tripping the check means the loss was disabled, the
+        fraction is too low for the problem, or the optimizer found a stall the
+        term did not price. Any of those is worth a failed run rather than a
+        silently unusable pickle.
+        """
+        report = self.tangent_diagnostics(control_points)
+        if not report["guarded_samples"]:
+            return report
+        where = f" for {label}" if label else ""
+        raise ValueError(
+            f"Refusing to export a stalled curve{where}: "
+            f"{report['guarded_samples']} of {report['num_samples']} samples have "
+            f"|dpos/ds| <= {report['guard_threshold']:.4g} (the fallback-tangent "
+            f"threshold), min {report['min_tangent_norm']:.4g} against an rms of "
+            f"{report['rms_tangent_norm']:.4g}. Those samples carry a constant "
+            f"fallback heading, not the curve's, so the exported reference is not "
+            f"a drivable trajectory. Raise --min-tangent-fraction (currently "
+            f"{self.min_tangent_fraction:.4g}) and redesign."
+        )
+
     def fim_loss_from_control_points(
         self,
         control_points: jnp.ndarray,
@@ -981,6 +1066,10 @@ class TrajectoryOptimizationPipeline:
             smooth_max_beta=constraint_smooth_max_beta,
             constraint_violation_tolerance=constraint_violation_tolerance,
             criterion=self.criterion if criterion is None else normalize_criterion(criterion),
+        ) + self.stabilization_loss_from_control_points(
+            control_points,
+            constraint_smooth_max_beta=constraint_smooth_max_beta,
+            constraint_violation_tolerance=constraint_violation_tolerance,
         )
 
     def objective_terms_from_control_points(
@@ -997,9 +1086,10 @@ class TrajectoryOptimizationPipeline:
     ) -> dict[str, jnp.ndarray]:
         """The objective's two terms, separately, in the same units it sums them.
 
-        ``fim`` is the raw A-optimality criterion and ``constraints`` the raw
-        weighted penalty; ``log_fim`` and ``constraint_term`` are what
-        :func:`trajectory_objective` actually adds up.
+        ``fim`` is the raw A-optimality criterion, ``constraints`` the raw
+        weighted penalty and ``tangent_floor`` the raw stabilization term;
+        ``log_fim``, ``constraint_term`` and ``tangent_floor_term`` are what
+        :meth:`fim_loss_from_control_points` actually adds up.
         """
         control_points = self.clamp_control_points(control_points)
         reference_states = self.reference_states_from_control_points(control_points)
@@ -1024,13 +1114,20 @@ class TrajectoryOptimizationPipeline:
         )
         log_fim_term = fim_objective_term(fim_factor, criterion)
         scaled_constraint_term = constraint_term / constraint_violation_tolerance
+        tangent_floor_term = self.stabilization_loss_from_control_points(
+            control_points,
+            constraint_smooth_max_beta=constraint_smooth_max_beta,
+            constraint_violation_tolerance=constraint_violation_tolerance,
+        )
         return {
             "criterion": criterion,
             "fim": fim_term,
             "log_fim": log_fim_term,
             "constraints": constraint_term,
             "constraint_term": scaled_constraint_term,
-            "total": log_fim_term + scaled_constraint_term,
+            "tangent_floor": tangent_floor_term * constraint_violation_tolerance,
+            "tangent_floor_term": tangent_floor_term,
+            "total": log_fim_term + scaled_constraint_term + tangent_floor_term,
         }
 
     def constraint_components_from_control_points(
@@ -1524,7 +1621,10 @@ class TrajectoryOptimizationPipeline:
         someone else's states and the pipeline's current curve would then be the
         wrong one. A batch caller passes the matching control points explicitly;
         writing none is better than writing a curve that is not this
-        trajectory's."""
+        trajectory's.
+
+        Exports carrying control points are checked against the fallback-tangent
+        threshold first; see :meth:`assert_curve_is_exportable`."""
         os.makedirs(out_dir, exist_ok=True)
         if control_points is ...:
             control_points = self.control_points if reference_states is None else None
@@ -1535,6 +1635,8 @@ class TrajectoryOptimizationPipeline:
                 if self.objective_mode == OBJECTIVE_MODE_GAIN_TUNING
                 else None
             )
+        if control_points is not None:
+            self.assert_curve_is_exportable(control_points, label=filename_prefix)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"{filename_prefix}_{timestamp}.pkl"
         out_path = os.path.join(out_dir, filename)

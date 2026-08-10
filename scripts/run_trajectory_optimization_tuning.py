@@ -12,6 +12,10 @@ from wmr_simulator.trajectory_optimization.analysis import (
     create_stacked_tracking_surface_trace_gif,
     render_tracking_surface_frames_for_optimization_trace,
 )
+from wmr_simulator.trajectory_optimization.bspline import (
+    DEFAULT_MIN_TANGENT_FRACTION,
+    GUARD_TANGENT_FRACTION,
+)
 from wmr_simulator.trajectory_optimization.start_offsets import START_OFFSET_MODE_RANDOM, START_OFFSET_MODES, START_OFFSET_MODE_OPTIMIZE
 from wmr_simulator.trajectory_optimization.objectives import CRITERIA, DEFAULT_CRITERION
 from wmr_simulator.trajectory_optimization.pipeline import (
@@ -54,7 +58,7 @@ def main():
     # B-spline control points. This is the parametrization's stiffness knob:
     # more of them means finer detail but a curve that reacts harder to each
     # one, so the motion constraints bind sooner (see bspline.py).
-    parser.add_argument("--num-control-points", type=int, default=5)
+    parser.add_argument("--num-control-points", type=int, default=6)
     parser.add_argument("--trajectory-seed", type=int, default=0)
     parser.add_argument("--criterion", choices=list(CRITERIA), default=DEFAULT_CRITERION)
     # What happens to the rollout start offsets the FIM is averaged over:
@@ -70,8 +74,14 @@ def main():
     parser.add_argument("--constraint-a-weight", type=float, default=1.0)
     parser.add_argument("--constraint-lateral-weight", type=float, default=1.0)
     parser.add_argument("--constraint-omega-weight", type=float, default=1.0)
-    parser.add_argument("--constraint-alpha-weight", type=float, default=0.5)
+    parser.add_argument("--constraint-alpha-weight", type=float, default=0.4)
     parser.add_argument("--constraint-smooth-max-beta", type=float, default=10.0) # barrier constant
+    # Floor on |dpos/ds| the curve is held above, as a fraction of the curve's
+    # own rms tangent (see bspline.tangent_floor_loss). Bunched control points
+    # otherwise stall the curve into a cusp, which the FIM rewards and the
+    # motion limits cannot see; 0 disables the term. Relative so it does not
+    # have to be retuned when the environment box or the path length changes.
+    parser.add_argument("--min-tangent-fraction", type=float, default=DEFAULT_MIN_TANGENT_FRACTION)
     # Visualization settings
     parser.add_argument("--save-opt-GIF", action="store_true", default=False)
     parser.add_argument("--opt-trace-stride", type=int, default=500)
@@ -96,6 +106,7 @@ def main():
         start_offset_mode=args.start_offset_mode,
         offset_displacement_step_factor=args.offset_displacement_step_factor,
         offset_heading_step_factor=args.offset_heading_step_factor,
+        min_tangent_fraction=args.min_tangent_fraction,
     )
 
     print(f"Loaded problem: {pipeline.problem.path}")
@@ -114,6 +125,16 @@ def main():
         )
     print(f"Robot: {type(pipeline.robot).__name__}")
     print(f"Time scaling: {pipeline.time_scaling}")
+    print(
+        "Tangent floor: "
+        + (
+            f"|dpos/ds| >= {pipeline.min_tangent_fraction:.4g} x rms|dpos/ds| "
+            f"({pipeline.min_tangent_fraction / GUARD_TANGENT_FRACTION:.3g}x the "
+            "fallback-tangent threshold)"
+            if pipeline.min_tangent_fraction > 0.0
+            else "off"
+        )
+    )
     print(f"Objective mode: {pipeline.objective_mode}")
     print(f"Optimized trajectories: {args.num_trajectories}")
     if args.num_trajectories > 1:
@@ -216,6 +237,7 @@ def main():
             for name in ("v", "a", "lateral", "omega", "alpha"):
                 print(f"    {name:<7}: {float(constraint_components[name]):.8e}")
             print(f"  Constraint term (weighted): {float(objective_terms['constraint_term']):.8f}")
+            print(f"  Tangent floor (weighted):   {float(objective_terms['tangent_floor_term']):.8f}")
             print(f"  Total:       {float(objective_terms['total']):.8f}")
             print(f"  Constraint weight used: {selected_constraint_weight:.8g}")
             print("Optimized FIM:")
@@ -283,6 +305,28 @@ def main():
         else:
             saved_paths = []
             filename_prefix = "bezier_reference_states" if output_stem is None else output_stem
+            # Check the whole batch before writing any of it: the per-export
+            # check would abort partway and leave a half-written directory, and
+            # one stalled design usually means the run's settings are wrong for
+            # every design, which is easier to see listed together.
+            stalled = {}
+            for index, control_points in enumerate(optimized_control_point_batch):
+                report = pipeline.tangent_diagnostics(pipeline.clamp_control_points(control_points))
+                if report["guarded_samples"]:
+                    stalled[index] = report
+            if stalled:
+                detail = "; ".join(
+                    f"{index:02d}: {report['guarded_samples']}/{report['num_samples']} samples, "
+                    f"min |dpos/ds| {report['min_tangent_norm']:.4g} vs threshold "
+                    f"{report['guard_threshold']:.4g}"
+                    for index, report in stalled.items()
+                )
+                raise ValueError(
+                    f"{len(stalled)} of {len(optimized_control_point_batch)} designs stalled onto "
+                    f"the fallback tangent and were not exported -- {detail}. Their heading is the "
+                    f"constant [1, 0] over those samples, not the curve's. Raise "
+                    f"--min-tangent-fraction (currently {args.min_tangent_fraction:.4g}) and rerun."
+                )
             export_dir = os.path.join("trajectory_exports", f"{filename_prefix}_{run_timestamp}")
             os.makedirs(export_dir, exist_ok=True)
             for index, control_points in enumerate(optimized_control_point_batch):

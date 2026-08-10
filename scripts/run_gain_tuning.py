@@ -68,7 +68,7 @@ def save_tuning_result(out_path: str, problem_path: str, result: dict) -> None:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--problem", type=str, default="problems/pololu_gains.yaml")
-    parser.add_argument("--reference-trajectories-dir", type=str, default="trajectory_exports/gain_optimized_current")
+    parser.add_argument("--reference-trajectories-dir", type=str, default="trajectory_exports/gain_optimized_current_6cp")
     parser.add_argument("--validation-split", type=float, default=GAIN_TUNING_DEFAULTS["validation_split"])
     # Optimization hyper-parameters
     parser.add_argument("--num-lhs-points", type=int, default=GAIN_TUNING_DEFAULTS["num_lhs_points"]) # points on initial search grid, 0 to disable

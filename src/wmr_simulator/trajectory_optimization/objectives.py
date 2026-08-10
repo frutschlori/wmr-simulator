@@ -17,7 +17,7 @@ from wmr_simulator.trajectory_optimization.fim import max_inverse_eigenvalue, tr
 # of the FIM term's own scale -- a 2% limit violation doubled the total loss and
 # essentially all of the loss history's choppiness was Adam bouncing off that
 # wall rather than anything about the information content.
-DEFAULT_CONSTRAINT_VIOLATION_TOLERANCE = 0.05
+DEFAULT_CONSTRAINT_VIOLATION_TOLERANCE = 0.03
 
 
 CRITERION_A_OPTIMALITY = "a-optimality"
