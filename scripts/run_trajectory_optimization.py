@@ -12,7 +12,10 @@ from wmr_simulator.trajectory_optimization.analysis import (
     create_stacked_tracking_surface_trace_gif,
     render_tracking_surface_frames_for_optimization_trace,
 )
-from wmr_simulator.trajectory_optimization.pipeline import TrajectoryOptimizationPipeline
+from wmr_simulator.trajectory_optimization.pipeline import (
+    DEFAULT_DIVERGENCE_TOLERANCE,
+    TrajectoryOptimizationPipeline,
+)
 from wmr_simulator.types import PhysicalParams
 
 
@@ -51,6 +54,10 @@ def main():
     # more of them means finer detail but a curve that reacts harder to each
     # one, so the motion constraints bind sooner (see bspline.py).
     parser.add_argument("--num-control-points", type=int, default=6)
+    # Gate rollouts that stray further than this [m] from the reference out of the
+    # design FIM: an untrackable design is informative about instability, not about
+    # the gains, and an ungated FIM reads that as a reward. 0 disables.
+    parser.add_argument("--divergence-tolerance", type=float, default=DEFAULT_DIVERGENCE_TOLERANCE)
     parser.add_argument("--trajectory-seed", type=int, default=0)
     # Constraints
     parser.add_argument("--constraint-weight", type=float, default=1.0)
@@ -80,6 +87,7 @@ def main():
         time_scaling=args.time_scaling,
         objective_mode=args.objective_mode,
         fim_a_slip_max=args.fim_a_slip_max,
+        divergence_tolerance=args.divergence_tolerance,
     )
 
     print(f"Loaded problem: {pipeline.problem.path}")

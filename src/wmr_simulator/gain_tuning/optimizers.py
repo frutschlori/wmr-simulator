@@ -10,9 +10,11 @@ from wmr_simulator.gain_parametrization import num_params as gain_parametrizatio
 from wmr_simulator.gain_parametrization import with_flat_params, zero_params
 from wmr_simulator.gain_tuning.objectives import (
     clip_controller_gains,
+    closed_loop_objective_terms,
     make_realizations,
     scheduled_closed_loop_objective_terms,
     split_realization_keys_by_trajectory,
+    weighted_realization_mean,
 )
 
 OPTIMIZER_ADAM = "adam"
@@ -187,9 +189,16 @@ def _make_terms_for_values(
     reference_trajectories,
     initial_pose_offsets,
     key_namespace=0,
+    realization_weights=None,
 ):
     reference_trajectories = (
         None if reference_trajectories is None else jnp.asarray(reference_trajectories, dtype=jnp.float32)
+    )
+    # (T, R) per-rollout weights, or None for an unweighted mean. Frozen for the
+    # run (see ``rollout_outlier_weights``), so the objective stays a smooth
+    # function of the gains.
+    realization_weights = (
+        None if realization_weights is None else jnp.asarray(realization_weights, dtype=jnp.float32)
     )
     # (R, 3) -- one offset set shared by every trajectory (the tuner's own draw)
     # -- or (T, R, 3), one set per trajectory, as read off the design pickles.
@@ -221,6 +230,7 @@ def _make_terms_for_values(
             robot_keys,
             estimator_keys,
             initial_pose_offsets=initial_pose_offsets,
+            weights=None,
         ):
             return scheduled_closed_loop_objective_terms(
                 pipeline,
@@ -235,30 +245,163 @@ def _make_terms_for_values(
                 gain_delta_weight=gain_delta_weight,
                 reference_states=reference_states,
                 initial_pose_offsets=initial_pose_offsets,
+                realization_weights=weights,
             )
 
         if reference_trajectories is None:
             return terms_for_reference(
-                pipeline.reference_states, replay_robot_keys, replay_estimator_keys
+                pipeline.reference_states,
+                replay_robot_keys,
+                replay_estimator_keys,
+                weights=None if realization_weights is None else realization_weights[0],
             )
-        if per_trajectory_offsets:
-            return jnp.mean(
-                jax.vmap(terms_for_reference)(
-                    reference_trajectories,
-                    replay_robot_keys,
-                    replay_estimator_keys,
-                    initial_pose_offsets,
-                ),
-                axis=0,
-            )
-        return jnp.mean(
-            jax.vmap(terms_for_reference)(
-                reference_trajectories, replay_robot_keys, replay_estimator_keys
-            ),
-            axis=0,
+        # A trajectory whose rollouts were all dropped must not contribute at all,
+        # so the outer mean over trajectories is weighted too -- otherwise
+        # ``weighted_realization_mean``'s all-zero fallback would quietly put it
+        # back in at full strength.
+        trajectory_weights = (
+            None if realization_weights is None else jnp.max(realization_weights, axis=1)
         )
+        if per_trajectory_offsets:
+            per_trajectory_terms = jax.vmap(terms_for_reference)(
+                reference_trajectories,
+                replay_robot_keys,
+                replay_estimator_keys,
+                initial_pose_offsets,
+                realization_weights,
+            )
+        else:
+            per_trajectory_terms = jax.vmap(
+                terms_for_reference, in_axes=(0, 0, 0, None, 0 if realization_weights is not None else None)
+            )(
+                reference_trajectories,
+                replay_robot_keys,
+                replay_estimator_keys,
+                initial_pose_offsets,
+                realization_weights,
+            )
+        return weighted_realization_mean(per_trajectory_terms, trajectory_weights)
 
     return terms_for_values
+
+
+def per_rollout_losses(
+    pipeline,
+    gains,
+    replay_robot_keys,
+    replay_estimator_keys,
+    reference_trajectories,
+    initial_pose_offsets,
+    velocity_tracking_weight=0.0,
+    input_weight=0.0,
+    input_delta_weight=0.0,
+    omega_delta_weight=0.0,
+    key_namespace=0,
+) -> np.ndarray:
+    """``(T, R)`` total loss of every single rollout at one gain vector.
+
+    The objective the optimizer sees is the mean of these; this is the
+    breakdown, used to spot a rollout that has diverged.
+    """
+    reference_trajectories = jnp.asarray(reference_trajectories, dtype=jnp.float32)
+    num_trajectories = int(reference_trajectories.shape[0])
+    robot_keys = split_realization_keys_by_trajectory(
+        replay_robot_keys, num_trajectories, namespace=key_namespace
+    )
+    estimator_keys = split_realization_keys_by_trajectory(
+        replay_estimator_keys, num_trajectories, namespace=key_namespace
+    )
+    offsets = jnp.asarray(initial_pose_offsets, dtype=jnp.float32)
+    if offsets.ndim == 2:
+        offsets = jnp.broadcast_to(offsets, (num_trajectories,) + offsets.shape)
+
+    def one_rollout(reference_states, robot_key, estimator_key, offset):
+        return jnp.sum(
+            closed_loop_objective_terms(
+                pipeline,
+                gains,
+                robot_key[None],
+                estimator_key[None],
+                velocity_tracking_weight=velocity_tracking_weight,
+                input_weight=input_weight,
+                input_delta_weight=input_delta_weight,
+                omega_delta_weight=omega_delta_weight,
+                reference_states=reference_states,
+                initial_pose_offsets=offset[None],
+            )
+        )
+
+    per_trajectory = jax.vmap(
+        lambda ref, rk, ek, off: jax.vmap(one_rollout, in_axes=(None, 0, 0, 0))(ref, rk, ek, off)
+    )
+    return np.asarray(
+        jax.jit(per_trajectory)(reference_trajectories, robot_keys, estimator_keys, offsets)
+    )
+
+
+def rollout_outlier_weights(losses: np.ndarray, outlier_loss_factor: float):
+    """0/1 weights dropping rollouts whose loss dwarfs the median.
+
+    A single diverging rollout is enough to stall the whole BFGS solve: measured
+    on ``gain_optimized_current`` at ``noise_angle`` 0.01 / seed 0, one rollout
+    scored 1.287 against a 0.0075 median and was 86% of the training loss, so it
+    dominated the gradient, the backtracking line search never found a
+    sufficient decrease, and the tuner returned the stock gains untouched. The
+    same rollout tracks at 0.019 pose RMSE under the *tuned* gains, so it is not
+    an impossible trajectory -- the outlier is what blocks the solver from
+    reaching the gains that fix it.
+
+    The mask is computed once, at the initial gains, and then frozen. Deciding
+    per evaluation instead would make the objective discontinuous exactly where
+    a rollout crosses the threshold, which is a worse problem for a line search
+    than the outlier itself.
+
+    ``outlier_loss_factor <= 0`` disables the check. Never drops everything: if
+    the rule would empty the set (all rollouts equally bad), it keeps all of
+    them, since that is a broken configuration rather than an outlier.
+    """
+    losses = np.asarray(losses, dtype=float)
+    weights = np.ones_like(losses)
+    if outlier_loss_factor <= 0.0:
+        return weights, []
+    median = float(np.median(losses))
+    if not np.isfinite(median) or median <= 0.0:
+        return weights, []
+    threshold = outlier_loss_factor * median
+    dropped_mask = ~np.isfinite(losses) | (losses > threshold)
+    if dropped_mask.all():
+        return weights, []
+    weights[dropped_mask] = 0.0
+    dropped = [
+        (int(t), int(r), float(losses[t, r])) for t, r in zip(*np.nonzero(dropped_mask))
+    ]
+    return weights, dropped
+
+
+def _report_rollout_outliers(label, losses, weights, dropped, outlier_loss_factor) -> None:
+    if outlier_loss_factor <= 0.0:
+        return
+    median = float(np.median(losses))
+    if not dropped:
+        print(
+            f"{label}: no diverging rollouts "
+            f"(max {float(losses.max()):.6g} vs {outlier_loss_factor:g}x median "
+            f"{outlier_loss_factor * median:.6g})."
+        )
+        return
+    print(
+        f"{label}: dropping {len(dropped)}/{losses.size} rollouts above "
+        f"{outlier_loss_factor:g}x the median loss ({outlier_loss_factor * median:.6g}):"
+    )
+    for trajectory_index, realization_index, loss in sorted(dropped, key=lambda item: -item[2]):
+        print(
+            f"    trajectory {trajectory_index}, realization {realization_index}: "
+            f"{loss:.6g} ({loss / median:.0f}x median)"
+        )
+    kept = weights.sum(axis=1)
+    emptied = [int(t) for t in np.nonzero(kept == 0)[0]]
+    if emptied:
+        print(f"    trajectories left with no rollouts and excluded entirely: {emptied}")
 
 
 def _select_initial_optimizer_values(
@@ -562,6 +705,7 @@ def optimize_controller_gains(
     training_start_offsets: jax.Array | None = None,
     validation_start_offsets: jax.Array | None = None,
     realizations=None,
+    outlier_loss_factor: float = 0.0,
 ):
     """Single-stage joint optimization of base gains and the gain schedule.
 
@@ -642,7 +786,33 @@ def optimize_controller_gains(
             f"{init_offset_radius:.4g} m / {np.rad2deg(init_offset_angle):.3g} deg of the reference start."
         )
 
-    def make_terms(reference_trajectories, start_offsets, key_namespace):
+    # Drop rollouts that have diverged at the initial gains, before anything is
+    # optimized: one of them is enough to stall the solve outright (see
+    # ``rollout_outlier_weights``). Training only -- a validation score with its
+    # outliers removed would flatter the result, so those are only reported.
+    training_realization_weights = None
+    if outlier_loss_factor > 0.0 and training_reference_trajectories is not None:
+        initial_losses = per_rollout_losses(
+            pipeline,
+            clip_controller_gains(jnp.atleast_2d(jnp.asarray(init_gains, dtype=jnp.float32))[0]),
+            replay_robot_keys,
+            replay_estimator_keys,
+            training_reference_trajectories,
+            realizations.start_offsets if training_start_offsets is None else training_start_offsets,
+            velocity_tracking_weight=velocity_tracking_weight,
+            input_weight=input_weight,
+            input_delta_weight=input_delta_weight,
+            omega_delta_weight=omega_delta_weight,
+            key_namespace=0,
+        )
+        weights, dropped = rollout_outlier_weights(initial_losses, outlier_loss_factor)
+        _report_rollout_outliers(
+            "Training rollouts", initial_losses, weights, dropped, outlier_loss_factor
+        )
+        if dropped:
+            training_realization_weights = jnp.asarray(weights, dtype=jnp.float32)
+
+    def make_terms(reference_trajectories, start_offsets, key_namespace, realization_weights=None):
         initial_pose_offsets = (
             realizations.start_offsets if start_offsets is None else start_offsets
         )
@@ -664,16 +834,42 @@ def optimize_controller_gains(
             reference_trajectories=reference_trajectories,
             initial_pose_offsets=initial_pose_offsets,
             key_namespace=key_namespace,
+            realization_weights=realization_weights,
         )
 
     loss_terms_for_optimizer_values = make_terms(
-        training_reference_trajectories, training_start_offsets, key_namespace=0
+        training_reference_trajectories,
+        training_start_offsets,
+        key_namespace=0,
+        realization_weights=training_realization_weights,
     )
     loss_for_optimizer_values = lambda values: jnp.sum(loss_terms_for_optimizer_values(values))
 
     validation_loss_for_optimizer_values = None
     validation_loss_terms_for_optimizer_values = None
     if validation_reference_trajectories is not None and len(validation_reference_trajectories) > 0:
+        if outlier_loss_factor > 0.0:
+            validation_losses = per_rollout_losses(
+                pipeline,
+                clip_controller_gains(jnp.atleast_2d(jnp.asarray(init_gains, dtype=jnp.float32))[0]),
+                replay_robot_keys,
+                replay_estimator_keys,
+                validation_reference_trajectories,
+                realizations.start_offsets if validation_start_offsets is None else validation_start_offsets,
+                velocity_tracking_weight=velocity_tracking_weight,
+                input_weight=input_weight,
+                input_delta_weight=input_delta_weight,
+                omega_delta_weight=omega_delta_weight,
+                key_namespace=1,
+            )
+            _, validation_dropped = rollout_outlier_weights(validation_losses, outlier_loss_factor)
+            if validation_dropped:
+                # Reported, never excluded: the held-out score has to stay honest.
+                print(
+                    f"Validation rollouts: {len(validation_dropped)}/{validation_losses.size} "
+                    f"diverge at the initial gains (worst "
+                    f"{max(item[2] for item in validation_dropped):.6g}); kept in the held-out score."
+                )
         validation_loss_terms_for_optimizer_values = make_terms(
             validation_reference_trajectories, validation_start_offsets, key_namespace=1
         )

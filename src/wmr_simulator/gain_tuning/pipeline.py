@@ -192,6 +192,7 @@ class ControllerTuningPipeline(SimulationPipeline):
         init_offset_radius: float = 0.0,
         init_offset_angle: float = 0.0,
         realizations=None,
+        outlier_loss_factor: float = 0.0,
     ):
         return optimize_controller_gains(
             pipeline=self,
@@ -217,6 +218,7 @@ class ControllerTuningPipeline(SimulationPipeline):
             init_offset_radius=init_offset_radius,
             init_offset_angle=init_offset_angle,
             realizations=realizations,
+            outlier_loss_factor=outlier_loss_factor,
             training_reference_trajectories=self.training_reference_trajectories,
             validation_reference_trajectories=self.validation_reference_trajectories,
             training_start_offsets=self.training_start_offsets,
@@ -293,6 +295,7 @@ def run_gain_tuning_experiment(
     warm_start_schedule: bool = False,
     init_offset_radius: float = 0.0,
     init_offset_angle: float = 0.0,
+    outlier_loss_factor: float = 0.0,
 ):
     """Tune controller gains (optionally jointly with a gain parametrization).
 
@@ -402,6 +405,7 @@ def run_gain_tuning_experiment(
             warm_start_schedule=warm_start_schedule,
             init_offset_radius=init_offset_radius,
             init_offset_angle=init_offset_angle,
+            outlier_loss_factor=outlier_loss_factor,
         )
 
     static_tune = static_tune and schedule_enabled
