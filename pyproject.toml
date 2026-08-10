@@ -21,11 +21,18 @@ dependencies = [
     "pyqt6>=6.11.0",
     "scipy>=1.16.3",
     "equinox>=0.13.8",
+    "cvxpy>=1.7.4",
+    "optimistix>=0.1.0",
 ]
+
+[project.optional-dependencies]
+# GPU stack for machines with CUDA 13. Not installed by default: the tests and
+# residual training are CPU-pinned, so a plain `uv sync` stays portable.
+# On a CUDA box use `uv sync --extra cuda`.
+cuda = ["jax[cuda13]==0.9.2"]
 
 [dependency-groups]
 dev = [
-    "optimistix>=0.1.0",
     "pytest>=8.0",
 ]
 
@@ -33,5 +40,5 @@ dev = [
 testpaths = ["tests"]
 
 [build-system]
-requires = ["uv_build>=0.9.5,<0.10.0"]
+requires = ["uv_build>=0.11.3,<0.12.0"]
 build-backend = "uv_build"

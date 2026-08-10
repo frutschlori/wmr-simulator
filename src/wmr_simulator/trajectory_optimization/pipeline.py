@@ -154,6 +154,23 @@ KIMOTOR_INDEX = 4
 # 0 and there is no nominal value to scale by: the width of the range the tuner
 # searches it over (gain_tuning.optimizers' sqrt space is [0, k_max_rest]).
 KIMOTOR_FIM_SCALE_FALLBACK = float(GAIN_TUNING_DEFAULTS["k_max_rest"])
+# Max distance [m] a closed-loop rollout may stray from the reference before it
+# stops counting toward the design FIM. 0 disables the gate.
+#
+# This wants to be *tight*, and 0.5 (the first choice, sized to separate healthy
+# rollouts at 0.02-0.08 m from diverged ones at 1-1.6 m) was too loose. A rollout
+# on its way out diverges continuously: its Jacobian w.r.t. the gains grows
+# without bound, so the FIM grows and `log(trace(FIM^-1))` plunges long before
+# the deviation reaches 0.5 m. The optimizer dives into that spurious reward and
+# the gate then closes on top of it, which is exactly the cliff-and-rebound in
+# the loss history -- measured at 0.5: a plunge -10.3 -> -15.3 -> -9.3 inside a
+# few steps. At 0.15 the rollout is gated while its Jacobian is still moderate,
+# there is no spike to fall into, and the run descends smoothly to a *better*
+# objective (-11.9 vs -10.3 over 500 steps, same seed).
+DEFAULT_DIVERGENCE_TOLERANCE = 0.15
+# Floor on the summed realization weights, so an all-diverged design normalizes
+# by something finite instead of dividing by zero.
+_MIN_EFFECTIVE_REALIZATIONS = 1e-3
 OBJECTIVE_MODES = {OBJECTIVE_MODE_IDENTIFICATION, OBJECTIVE_MODE_GAIN_TUNING}
 
 
@@ -308,8 +325,13 @@ class TrajectoryOptimizationPipeline:
         start_offset_mode: str = START_OFFSET_MODE_RANDOM,
         offset_displacement_step_factor: float = 1.0,
         offset_heading_step_factor: float = 1.0,
+        divergence_tolerance: float = DEFAULT_DIVERGENCE_TOLERANCE,
     ):
         self.problem = ProblemDefinition(problem_path)
+        # See realization_divergence_weights: rollouts that leave the reference
+        # by more than this are gated out of the FIM, so an untrackable design
+        # cannot look informative.
+        self.divergence_tolerance = float(divergence_tolerance)
         self.simulation = SimulationPipeline(problem_path=problem_path, seed=0, reference_trajectories_dir=None)
         self.robot = self.simulation.robot
         self.controller = self.simulation.controller
@@ -681,9 +703,51 @@ class TrajectoryOptimizationPipeline:
         measurements = jax.vmap(rollout)(
             realizations.robot_keys, realizations.estimator_keys, realizations.start_offsets
         )
-        # Mean rather than sum, so the criterion keeps the scale of a single
-        # rollout and stays comparable across sample counts.
-        return measurements.reshape(-1, 3) / jnp.sqrt(float(realizations.start_offsets.shape[0]))
+        weights = self.realization_divergence_weights(measurements, reference_states)
+        # FIM = sum_r w_r J_r^T J_r, so the factor's rows for realization r scale
+        # by sqrt(w_r); normalizing by sqrt(sum w) rather than sqrt(R) keeps the
+        # criterion at the scale of a single *surviving* rollout, so gating one
+        # off does not by itself look like a loss of information.
+        measurements = measurements * jnp.sqrt(weights)[:, None, None]
+        normalizer = jnp.sqrt(jnp.maximum(jnp.sum(weights), _MIN_EFFECTIVE_REALIZATIONS))
+        return measurements.reshape(-1, 3) / normalizer
+
+    def realization_divergence_weights(
+        self, measurements: jnp.ndarray, reference_states: jnp.ndarray
+    ) -> jnp.ndarray:
+        """Smooth 1 -> 0 gate per realization on how far it left the reference.
+
+        A rollout the controller cannot track is not informative about the gains,
+        it is informative about instability: its Jacobian w.r.t. the gains is
+        enormous, so an ungated FIM reads divergence as a *reward* and the design
+        optimizer chases it. Measured on the 2026-08-10 10-trajectory run, the
+        three designs that exceeded ``alpha_max`` (1.03-1.37x) are exactly the
+        three whose rollouts diverged, and the loss history shows the signature:
+        a dip to -16 as a rollout goes unstable and looks hugely informative,
+        then a spike to +76 as it blows up.
+
+        The gate is smooth (a logistic in the max deviation) rather than a hard
+        mask so the objective stays continuous for Adam, and it is wrapped in
+        ``stop_gradient``: it decides *whether* a rollout counts, and must not
+        itself become something the optimizer can push on. ``divergence_tolerance
+        <= 0`` disables it.
+        """
+        num_realizations = measurements.shape[0]
+        if self.divergence_tolerance <= 0.0:
+            return jnp.ones((num_realizations,), dtype=jnp.float32)
+        # Rollout poses are at wheel rate, the reference at geometry rate.
+        stride = self.simulation.inner_steps_per_geometry_step
+        sampled = measurements[:, stride - 1 :: stride, :2]
+        reference_xy = reference_states[1 : sampled.shape[1] + 1, :2]
+        deviation = jnp.linalg.norm(sampled[:, : reference_xy.shape[0]] - reference_xy, axis=-1)
+        worst = jnp.max(deviation, axis=1)
+        # Logistic centred on the tolerance; 0.25*tol of softness puts w ~ 0.88 at
+        # half the tolerance and ~ 0.12 at 1.5x it.
+        softness = 0.25 * self.divergence_tolerance
+        weights = jax.nn.sigmoid((self.divergence_tolerance - worst) / softness)
+        # NaN/Inf rollouts (a fully blown-up integration) gate to exactly 0.
+        weights = jnp.where(jnp.isfinite(worst), weights, 0.0)
+        return jax.lax.stop_gradient(weights)
 
     def measurement_vector(
         self,

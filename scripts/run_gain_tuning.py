@@ -84,6 +84,10 @@ def main():
     # the reference start, so the tracking gains have real error to act on.
     parser.add_argument("--init-offset-radius", type=float, default=GAIN_TUNING_DEFAULTS["init_offset_radius"])
     parser.add_argument("--init-offset-angle", type=float, default=GAIN_TUNING_DEFAULTS["init_offset_angle"])
+    # Drop training rollouts whose loss at the initial gains is this many times
+    # the median rollout's; one diverging rollout otherwise stalls the BFGS line
+    # search and the tuner silently returns the stock gains. 0 disables.
+    parser.add_argument("--outlier-loss-factor", type=float, default=GAIN_TUNING_DEFAULTS["outlier_loss_factor"])
     # Matches the active-learning experiment default so the standalone script and
     # the tune-gains stage produce the same result on the same inputs.
     parser.add_argument("--seed", type=int, default=0)
@@ -174,6 +178,7 @@ def main():
         warm_start_schedule=args.warm_start_schedule,
         init_offset_radius=args.init_offset_radius,
         init_offset_angle=args.init_offset_angle,
+        outlier_loss_factor=args.outlier_loss_factor,
     )
     pipeline = result["pipeline"]
     print_physical_params("Robot parameters used for gain tuning:", robot_params)

@@ -33,24 +33,15 @@ def pose_loss_variances(pipeline, target_log: SimulationLog):
 
 def input_pose_variances(pipeline, target_log: SimulationLog):
     estimator = pipeline.estimator
-    pose_time = target_log.pose.time_s
-    wheel_time = target_log.wheel.time_s
-    dt = jnp.diff(pose_time)
     theta = target_log.pose.states[:-1, 2]
-    wheel_indices = jnp.clip(
-        jnp.searchsorted(wheel_time, pose_time[:-1], side="right") - 1,
-        0,
-        target_log.wheel.speeds.shape[0] - 1,
-    )
-    wheel_speeds = target_log.wheel.speeds[wheel_indices]
-    dphi = wheel_speeds * dt[:, None]
+    # Encoder increment noise only, and constant per wheel. The multiplicative
+    # slip term that used to scale this by dphi^2 (with the encoder variance
+    # subtracted off so it was not double counted) went with the random-slippage
+    # model itself, which is no longer in the plant -- weighting residuals for a
+    # disturbance the simulator never generates only mis-scales the fit. Losing
+    # the dphi dependence is why the wheel-speed lookup above is gone too.
     encoder_variance = estimator.enc_angle_noise ** 2
-    wheel_increment_variance = jnp.column_stack(
-        [
-            jnp.maximum(dphi[:, 0] ** 2 - encoder_variance, 0.0) * estimator.slip_r_var + encoder_variance,
-            jnp.maximum(dphi[:, 1] ** 2 - encoder_variance, 0.0) * estimator.slip_l_var + encoder_variance,
-        ]
-    )
+    wheel_increment_variance = jnp.full((theta.shape[0], 2), encoder_variance, dtype=jnp.float32)
     cos_theta = jnp.cos(theta)
     sin_theta = jnp.sin(theta)
     r = estimator.r_est

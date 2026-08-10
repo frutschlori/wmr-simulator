@@ -84,6 +84,29 @@ def _resolve_initial_pose_offsets(initial_pose_offsets, num_realizations: int) -
     return jnp.asarray(initial_pose_offsets, dtype=jnp.float32)
 
 
+def weighted_realization_mean(terms: jax.Array, realization_weights) -> jax.Array:
+    """Mean of the per-realization loss terms, optionally down-weighting some.
+
+    ``terms`` is ``(R, num_terms)``; ``realization_weights`` is ``(R,)`` or None
+    (all ones). The weights exist so a diverging rollout can be dropped from the
+    objective outright -- see ``optimizers.rollout_outlier_weights`` for why one
+    such rollout is enough to stall the whole solve. They are constants of the
+    run, never functions of the gains, so the objective stays smooth.
+    """
+    if realization_weights is None:
+        return jnp.mean(terms, axis=0)
+    weights = jnp.asarray(realization_weights, dtype=jnp.float32)
+    # An all-zero weight vector would divide by zero; fall back to the plain mean
+    # rather than emit NaN, since dropping every rollout is a caller bug and the
+    # caller (rollout_outlier_weights) already refuses to produce it.
+    total = jnp.sum(weights)
+    return jnp.where(
+        total > 0.0,
+        jnp.sum(terms * weights[:, None], axis=0) / jnp.maximum(total, 1e-12),
+        jnp.mean(terms, axis=0),
+    )
+
+
 def _reference_targets(pipeline, reference_states: jax.Array):
     reference_poses = reference_states[1:, :3]
     reference_theta = reference_states[1:, 2]
@@ -190,6 +213,7 @@ def closed_loop_objective_terms(
     omega_delta_weight: float = 0.0,
     reference_states: jax.Array | None = None,
     initial_pose_offsets: jax.Array | None = None,
+    realization_weights: jax.Array | None = None,
 ):
     reference_states = pipeline.reference_states if reference_states is None else reference_states
     reference_poses, reference_velocity, reference_pose_indices = _reference_targets(pipeline, reference_states)
@@ -218,7 +242,7 @@ def closed_loop_objective_terms(
         )
 
     terms = jax.vmap(realization_loss)(replay_robot_keys, replay_estimator_keys, offsets)
-    return jnp.mean(terms, axis=0)
+    return weighted_realization_mean(terms, realization_weights)
 
 
 def scheduled_closed_loop_objective(
@@ -234,6 +258,7 @@ def scheduled_closed_loop_objective(
     gain_delta_weight: float = 0.0,
     reference_states: jax.Array | None = None,
     initial_pose_offsets: jax.Array | None = None,
+    realization_weights: jax.Array | None = None,
 ):
     return jnp.sum(
         scheduled_closed_loop_objective_terms(
@@ -249,6 +274,7 @@ def scheduled_closed_loop_objective(
             gain_delta_weight=gain_delta_weight,
             reference_states=reference_states,
             initial_pose_offsets=initial_pose_offsets,
+            realization_weights=realization_weights,
         )
     )
 
@@ -266,6 +292,7 @@ def scheduled_closed_loop_objective_terms(
     gain_delta_weight: float = 0.0,
     reference_states: jax.Array | None = None,
     initial_pose_offsets: jax.Array | None = None,
+    realization_weights: jax.Array | None = None,
 ):
     """Loss terms for the scheduled controller.
 
@@ -303,8 +330,9 @@ def scheduled_closed_loop_objective_terms(
             omega_delta_weight,
         )
 
-    base_terms = jnp.mean(
-        jax.vmap(realization_loss)(replay_robot_keys, replay_estimator_keys, offsets), axis=0
+    base_terms = weighted_realization_mean(
+        jax.vmap(realization_loss)(replay_robot_keys, replay_estimator_keys, offsets),
+        realization_weights,
     )
 
     outer_gains = outer_gains_over_refs(nominal_gains, schedule_params, reference_states)

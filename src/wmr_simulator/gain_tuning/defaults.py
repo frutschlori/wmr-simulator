@@ -51,6 +51,14 @@ GAIN_TUNING_DEFAULTS: dict = {
     # batch. (Name predates the optimizer being selectable.)
     "num_adam_optimizations": 3,
     "validation_split": 0.2,
+    # Drop a training rollout from the objective when its loss at the initial
+    # gains exceeds this multiple of the median rollout loss. One diverging
+    # rollout out of 32 was measured at 86% of the whole training loss, which
+    # stalls the BFGS line search and makes the tuner return the stock gains
+    # unchanged. Applied to training only (the held-out score keeps its
+    # outliers) and frozen at the initial gains, so the objective stays smooth.
+    # 0 disables.
+    "outlier_loss_factor": 20.0,
     "velocity_tracking_weight": 1.0,
     "input_weight": 0.0,
     "input_delta_weight": 1.0,
