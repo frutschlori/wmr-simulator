@@ -553,9 +553,18 @@ def run_joint_tuning(
         )
         component_vector = jnp.stack([components[name] for name in CONSTRAINT_COMPONENT_NAMES])
         constraint_term = jnp.sum(component_vector)
+        # The stabilization term is part of the objective, not an extra: the
+        # standalone designer adds it inside fim_loss_from_control_points, and
+        # the pinning test compares the two.
+        stabilization_term = trajectory_pipeline.stabilization_loss_from_control_points(
+            trajectory_pipeline.control_points_from_decision_variables(decision_variables),
+            constraint_smooth_max_beta=constraint_smooth_max_beta,
+            constraint_violation_tolerance=constraint_violation_tolerance,
+        )
         total = (
             fim_objective_term(fim_factor, criterion)
             + constraint_term / constraint_violation_tolerance
+            + stabilization_term
         )
         return total, (fim_term, constraint_term, component_vector)
 

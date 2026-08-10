@@ -7,6 +7,8 @@ optimizer relies on hold (partition of unity, convex hull, clamped ends,
 locality).
 """
 
+import os
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -15,6 +17,8 @@ import pytest
 from wmr_simulator.trajectory_optimization.pipeline import TrajectoryOptimizationPipeline
 from wmr_simulator.trajectory_optimization.bspline import (
     BSplinePlan,
+    DEFAULT_MIN_TANGENT_FRACTION,
+    GUARD_TANGENT_FRACTION,
     DEFAULT_SPLINE_DEGREE,
     bspline_basis_matrices,
     clamped_uniform_knots,
@@ -222,22 +226,158 @@ def test_vanishing_tangent_keeps_the_reference_differentiable(gain_tuning_pipeli
 def test_tangent_floor_leaves_ordinary_curves_alone(gain_tuning_pipeline):
     """The floor may not buy its robustness with a biased yaw rate: the
     reference is what the robot is asked to drive."""
-    import wmr_simulator.trajectory_optimization.curves as curves
+    import wmr_simulator.trajectory_optimization.bspline as bspline
 
     angles = np.linspace(0.0, 2.0 * np.pi, 7)
     circle = jnp.asarray(
         np.stack([np.cos(angles), np.sin(angles)], axis=1), dtype=jnp.float32
     )
     floored = gain_tuning_pipeline.reference_states_from_control_points(circle)
-    original = curves.TANGENT_FLOOR_FRACTION
-    curves.TANGENT_FLOOR_FRACTION = 0.0
+    original = bspline.TANGENT_FLOOR_FRACTION
+    bspline.TANGENT_FLOOR_FRACTION = 0.0
     try:
         unfloored = gain_tuning_pipeline.reference_states_from_control_points(circle)
     finally:
-        curves.TANGENT_FLOOR_FRACTION = original
+        bspline.TANGENT_FLOOR_FRACTION = original
 
     omega_scale = float(jnp.max(jnp.abs(unfloored[:, 5])))
     assert float(jnp.max(jnp.abs(floored[:, 5] - unfloored[:, 5]))) < 1e-3 * omega_scale
     np.testing.assert_allclose(
         np.asarray(floored[:, 2], dtype=float), np.asarray(unfloored[:, 2], dtype=float), atol=1e-6
     )
+
+
+def _bunched_control_points():
+    """A design of the shape the tuning optimizer produces: a long route with
+    four control points collapsed into a ~0.15 m cluster, which stalls the
+    curve into a cusp (``gain_optimized_current_6cp`` trajectory 0)."""
+    return jnp.asarray(
+        [[0.686, -0.882], [-0.306, -1.682], [-0.519, -1.840],
+         [-0.378, -1.760], [-0.721, -1.870], [-1.500, -2.500]],
+        dtype=jnp.float32,
+    )
+
+
+def test_tangent_floor_loss_fires_on_a_stalled_curve(gain_tuning_pipeline):
+    """The term exists to make a stall expensive, and the stall is worth ~2 log
+    units of FIM, so "expensive" has to mean an order of magnitude more than
+    that -- see stabilization_loss_from_control_points."""
+    stalled = gain_tuning_pipeline.clamp_control_points(_bunched_control_points())
+    loss = gain_tuning_pipeline.stabilization_loss_from_control_points(stalled)
+    assert float(loss) > 10.0
+
+
+def test_tangent_floor_loss_is_zero_on_an_ordinary_curve(gain_tuning_pipeline):
+    angles = np.linspace(0.0, 2.0 * np.pi, 7)
+    circle = jnp.asarray(
+        np.stack([np.cos(angles), np.sin(angles)], axis=1), dtype=jnp.float32
+    )
+    loss = gain_tuning_pipeline.stabilization_loss_from_control_points(circle)
+    assert float(loss) < 1e-3
+
+
+def test_tangent_floor_loss_is_disabled_by_a_non_positive_fraction():
+    """0 disables, as everywhere else in the configs."""
+    off = TrajectoryOptimizationPipeline(
+        problem_path=PROBLEM, objective_mode="gain-tuning", min_tangent_fraction=0.0
+    )
+    stalled = off.clamp_control_points(_bunched_control_points())
+    assert float(off.stabilization_loss_from_control_points(stalled)) == 0.0
+
+
+def test_tangent_floor_loss_is_differentiable_at_a_stall(gain_tuning_pipeline):
+    """The loss has to survive the configuration it is there to punish: the
+    guard keeps the reference finite, and this term must not reintroduce the
+    NaN by differentiating a norm at zero."""
+    coincident = jnp.zeros((6, 2), dtype=jnp.float32)
+    for control_points in (_bunched_control_points(), coincident):
+        gradient = jax.grad(
+            lambda points: gain_tuning_pipeline.stabilization_loss_from_control_points(points)
+        )(control_points)
+        assert bool(jnp.all(jnp.isfinite(gradient)))
+
+
+def test_tangent_floor_loss_is_sampled_off_the_time_grid(gain_tuning_pipeline):
+    """Uniform in s, not on the warped time grid: the s-curve scaling clusters
+    the time samples at both ends, which is exactly where a stall is not."""
+    plan = gain_tuning_pipeline._spline_plan(6, gain_tuning_pipeline.time_scaling)
+    assert plan.tangent_B1.shape == plan.B1.shape
+    assert not bool(jnp.allclose(plan.tangent_B1, plan.B1))
+
+
+def test_the_floor_clears_the_guard_by_construction():
+    """The whole point of stating the floor as a fraction of the same rms the
+    guard scales by: the margin is a constant of the code, so no environment
+    size or path length can quietly let the optimizer reach the fallback
+    tangent."""
+    assert DEFAULT_MIN_TANGENT_FRACTION > 2.0 * GUARD_TANGENT_FRACTION
+
+
+def test_the_floor_rescales_with_the_curve(gain_tuning_pipeline):
+    """A design scaled up by 10 must get a floor scaled up by 10, so the same
+    fraction means the same thing on a bigger environment."""
+    small = _bunched_control_points()
+    reports = [
+        gain_tuning_pipeline.tangent_diagnostics(small),
+        gain_tuning_pipeline.tangent_diagnostics(small * 10.0),
+    ]
+    ratio = reports[1]["guard_threshold"] / reports[0]["guard_threshold"]
+    assert 9.9 < ratio < 10.1
+    # ... and the loss is scale-invariant, so the verdict does not change.
+    losses = [
+        float(gain_tuning_pipeline.stabilization_loss_from_control_points(small)),
+        float(gain_tuning_pipeline.stabilization_loss_from_control_points(small * 10.0)),
+    ]
+    assert abs(losses[0] - losses[1]) < 0.05 * losses[0]
+
+
+def test_the_floor_cannot_be_satisfied_by_shrinking_the_curve(gain_tuning_pipeline):
+    """The floor is stop_gradient'd: a shorter, duller path must not be a way
+    to pay off the term."""
+    stalled = _bunched_control_points()
+    gradient = jax.grad(
+        lambda points: gain_tuning_pipeline.stabilization_loss_from_control_points(points)
+    )(stalled)
+    # A gradient that ran through the floor would push every control point
+    # inward, toward the centroid; the real one pushes the cluster apart.
+    inward = jnp.sum(gradient * (stalled - jnp.mean(stalled, axis=0)))
+    assert bool(jnp.all(jnp.isfinite(gradient)))
+    assert float(inward) < 0.0
+
+
+def test_a_stalled_curve_is_refused_at_export(gain_tuning_pipeline, tmp_path):
+    """A stalled design must fail the run, not ship a pickle whose heading is
+    the constant fallback tangent."""
+    off = TrajectoryOptimizationPipeline(
+        problem_path=PROBLEM, objective_mode="gain-tuning", min_tangent_fraction=0.0
+    )
+    coincident = jnp.asarray(
+        [[0.0, 0.0], [0.5, 0.5], [1.0, 1.0], [1.0, 1.0], [1.0, 1.0], [0.0, 1.0]],
+        dtype=jnp.float32,
+    )
+    report = off.tangent_diagnostics(coincident)
+    assert report["guarded_samples"] > 0, "fixture no longer stalls the curve"
+    with pytest.raises(ValueError, match="Refusing to export a stalled curve"):
+        off.save_reference_states_pickle(
+            out_dir=str(tmp_path),
+            filename_prefix="stalled",
+            reference_states=off.reference_states_from_control_points(coincident),
+            control_points=coincident,
+            start_offsets=None,
+        )
+    assert not list(tmp_path.glob("*.pkl"))
+
+
+def test_a_healthy_curve_still_exports(gain_tuning_pipeline, tmp_path):
+    angles = np.linspace(0.0, 2.0 * np.pi, 7)
+    circle = jnp.asarray(
+        np.stack([np.cos(angles), np.sin(angles)], axis=1), dtype=jnp.float32
+    )
+    path = gain_tuning_pipeline.save_reference_states_pickle(
+        out_dir=str(tmp_path),
+        filename_prefix="healthy",
+        reference_states=gain_tuning_pipeline.reference_states_from_control_points(circle),
+        control_points=circle,
+        start_offsets=None,
+    )
+    assert os.path.exists(path)
