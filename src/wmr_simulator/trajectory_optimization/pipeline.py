@@ -310,6 +310,7 @@ class TrajectoryOptimizationPipeline:
         offset_displacement_step_factor: float = 1.0,
         offset_heading_step_factor: float = 1.0,
         min_tangent_fraction: float = DEFAULT_MIN_TANGENT_FRACTION,
+        kimotor_fim_scale: float | None = None,
     ):
         self.problem = ProblemDefinition(problem_path)
         # See stabilization_loss_from_control_points: the floor |dpos/ds| is
@@ -321,12 +322,24 @@ class TrajectoryOptimizationPipeline:
         self.robot = self.simulation.robot
         self.controller = self.simulation.controller
         self.controller_gains = self.simulation.gains
-        # kimotor's FIM scale: constant, and pinned to the problem's *nominal*
+        # kimotor's FIM scale: constant, and by default the problem's *nominal*
         # kimotor. See fim_parameter_scaling for why it cannot track the value.
+        #
+        # ``kimotor_fim_scale`` pins it instead, which is what makes a design
+        # point of kimotor = 0 usable: that is where the gain tuner reliably
+        # lands, and active learning writes the tuned gains into the next
+        # iteration's problem yaml, so the criterion has to work there. Tying
+        # the scale to the design point instead falls back to the search range
+        # and leaves the column contributing nothing.
         nominal_kimotor = float(self.controller_gains[KIMOTOR_INDEX])
-        self.kimotor_fim_scale = (
-            nominal_kimotor if nominal_kimotor > 0.0 else KIMOTOR_FIM_SCALE_FALLBACK
-        )
+        if kimotor_fim_scale is None:
+            self.kimotor_fim_scale = (
+                nominal_kimotor if nominal_kimotor > 0.0 else KIMOTOR_FIM_SCALE_FALLBACK
+            )
+        else:
+            self.kimotor_fim_scale = float(kimotor_fim_scale)
+            if self.kimotor_fim_scale <= 0.0:
+                raise ValueError("kimotor_fim_scale must be positive.")
         self.estimator = self.simulation.estimator
         # The encoder low-pass is part of the plant the designed trajectory will
         # be driven on: the firmware filters the raw wheel speeds with

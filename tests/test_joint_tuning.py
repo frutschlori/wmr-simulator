@@ -362,6 +362,68 @@ def test_warm_start_rejects_incomplete_exports(tmp_path, payload_kwargs, message
         )
 
 
+def test_pinned_kimotor_scale_keeps_a_zero_design_point_informative(tmp_path, realizations):
+    """Active learning inherits the tuned gains, and the tuner reliably returns
+    kimotor = 0. Tied to the design point, the scale has no nominal value to use
+    there and falls back to the search range, which leaves kimotor contributing
+    almost nothing to trace(FIM^-1) -- the share that buys curvature, so the
+    designs come out dull. Pinning the scale is what fixes that; the gain itself
+    is never touched."""
+    import yaml
+
+    from wmr_simulator.trajectory_optimization.pipeline import (
+        KIMOTOR_FIM_SCALE_FALLBACK,
+        KIMOTOR_INDEX,
+    )
+
+    with open(PROBLEM, "r", encoding="utf-8") as file:
+        problem_cfg = yaml.safe_load(file)
+    nominal = float(problem_cfg["controller"]["gains"][KIMOTOR_INDEX])
+    problem_cfg["controller"]["gains"][KIMOTOR_INDEX] = 0.0
+    zeroed_problem = tmp_path / "kimotor_zero.yaml"
+    with zeroed_problem.open("w", encoding="utf-8") as file:
+        yaml.safe_dump(problem_cfg, file, sort_keys=False)
+
+    tied = TrajectoryOptimizationPipeline(
+        str(zeroed_problem), objective_mode="gain-tuning", realizations=realizations
+    )
+    assert tied.kimotor_fim_scale == pytest.approx(KIMOTOR_FIM_SCALE_FALLBACK)
+
+    pinned = TrajectoryOptimizationPipeline(
+        str(zeroed_problem),
+        objective_mode="gain-tuning",
+        realizations=realizations,
+        kimotor_fim_scale=nominal,
+    )
+    assert pinned.kimotor_fim_scale == pytest.approx(nominal)
+    # The scale is a property of the criterion, not of the plant: both design
+    # against the problem's own gains, kimotor = 0 included.
+    np.testing.assert_allclose(
+        np.asarray(pinned.controller_gains), np.asarray(tied.controller_gains)
+    )
+    assert float(pinned.controller_gains[KIMOTOR_INDEX]) == 0.0
+
+    def kimotor_share(pipeline):
+        factor = pipeline.compute_fim_factor(reference_states=pipeline.reference_states)
+        variances = np.diag(
+            np.linalg.inv(np.asarray(factor).T @ np.asarray(factor) + 1e-6 * np.eye(factor.shape[1]))
+        )
+        return variances[KIMOTOR_INDEX] / variances.sum()
+
+    # Measured at the stock problem with kimotor zeroed: 0.16% tied against
+    # 3.1% pinned, i.e. ~19x. Not the ~38% a plant actually running kimotor = 5
+    # gives -- the column is the sensitivity at 0 either way -- but the design
+    # can see the gain again.
+    tied_share, pinned_share = kimotor_share(tied), kimotor_share(pinned)
+    assert tied_share < 0.005
+    assert pinned_share > 10.0 * tied_share
+
+    with pytest.raises(ValueError, match="positive"):
+        TrajectoryOptimizationPipeline(
+            PROBLEM, objective_mode="gain-tuning", realizations=realizations, kimotor_fim_scale=0.0
+        )
+
+
 def test_kimotor_fim_column_survives_zero(trajectory_pipeline):
     """kimotor is the one gain allowed to be exactly 0, so its FIM scale is a
     constant -- the problem's nominal kimotor -- not its own value. Relative

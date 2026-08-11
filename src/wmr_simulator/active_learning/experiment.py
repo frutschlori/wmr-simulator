@@ -134,6 +134,17 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         "time_scaling": "s-curve",
         "constraint_weight_jitter": 0.3,
         "window_length": 50,
+        # The constant scaling kimotor's FIM column in the tuning design
+        # (trajectory_optimization.pipeline kimotor_fim_scale). Pinned rather
+        # than tied to the design point because the tuner reliably returns
+        # kimotor = 0 and finalize carries that into the next iteration's
+        # problem.yaml: a scale tied to the gain would fall back to the search
+        # range there and leave the design blind to kimotor, which shows up as
+        # dull trajectories. Held at the stock problem's nominal, so every
+        # iteration designs like the first. Affects the design only -- what
+        # ships to the robot (robot_config.yaml, ROBOTCFG.CFG, GAINMLP.JSN)
+        # keeps the tuned kimotor.
+        "kimotor_fim_scale": 5.0,
     },
     # Gain-tuning hyperparameters come from the standalone script's defaults
     # (gain_tuning.defaults.GAIN_TUNING_DEFAULTS), so there is a single place to

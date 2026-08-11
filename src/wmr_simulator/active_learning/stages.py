@@ -265,10 +265,17 @@ def stage_plan_tuning_trajectories(experiment: Experiment, iteration: int) -> li
 
     from wmr_simulator.trajectory_optimization.pipeline import TrajectoryOptimizationPipeline
 
+    # kimotor's FIM column is scaled by a pinned constant rather than by the
+    # design point (see tuning_trajectories.kimotor_fim_scale): the tuned gains
+    # this iteration inherits usually have kimotor = 0, where a tied scale
+    # leaves the design blind to it and the trajectories dull. The gains
+    # themselves are untouched -- the iteration's problem.yaml, the tune-gains
+    # stage and everything exported to the robot keep the tuned kimotor.
     pipeline = TrajectoryOptimizationPipeline(
         str(problem_path),
         time_scaling=config["time_scaling"],
         objective_mode="gain-tuning",
+        kimotor_fim_scale=float(config["kimotor_fim_scale"]),
     )
     num_control_points = int(config["num_control_points"])
     pipeline.set_control_points(pipeline.initial_control_points(num_control_points))
