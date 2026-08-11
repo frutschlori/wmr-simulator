@@ -167,6 +167,18 @@ def main():
             )
             print("Sampled constraint factors:")
             print(sampled_constraint_factors)
+            # Each trajectory ships the best iterate it visited; a kept step far
+            # from the end means the run recovered from a cliff after it, not
+            # that the tail was wasted.
+            step_losses = np.asarray(loss_history, dtype=float)
+            if step_losses.size:
+                kept_steps = np.argmin(step_losses, axis=0)
+                print(f"Kept iterate per trajectory (of {step_losses.shape[0]} steps):")
+                print(kept_steps)
+                print("  kept loss:")
+                print(step_losses[kept_steps, np.arange(step_losses.shape[1])])
+                print("  last loss:")
+                print(step_losses[-1])
         if args.num_trajectories == 1:
             selected_constraint_weight = args.constraint_weight
             objective_terms = pipeline.objective_terms_from_control_points(
@@ -182,8 +194,15 @@ def main():
                 constraint_component_weights=constraint_component_weights,
                 constraint_smooth_max_beta=args.constraint_smooth_max_beta,
             )
-            print("Final optimization loss:")
-            print(loss_history[-1])
+            # The optimizer ships the best iterate it visited, not its last, so
+            # the last loss disagrees with the objective terms below (evaluated
+            # at the kept point) whenever Adam ends above its own best -- which
+            # it routinely does on this objective, and dramatically so when a
+            # stiff constraint term throws a cliff into the history.
+            kept_step = int(np.argmin(np.asarray(loss_history, dtype=float)))
+            print(f"Kept iterate: after {kept_step} of {len(loss_history)} steps")
+            print(f"Optimization loss (kept / last): "
+                  f"{loss_history[kept_step]:.8f} / {loss_history[-1]:.8f}")
             print("Final objective terms:")
             print(f"  FIM:         {float(objective_terms['fim']):.8e}")
             print(f"  log(FIM):    {float(objective_terms['log_fim']):.8f}")

@@ -32,7 +32,7 @@ def main():
     parser.add_argument("--problem", type=str, default="problems/pololu_gains.yaml")
     parser.add_argument("--mode", choices=list(MODES), default=MODE_ALTERNATING)
     parser.add_argument("--rounds", type=int, default=250)
-    parser.add_argument("--warm-start-rounds", type=int, default=500)
+    parser.add_argument("--warm-start-rounds", type=int, default=0)
     # The trajectory block steps slower than the gain block on purpose: it is
     # the one that runs away, and every step it takes changes the problem the
     # gain block is solving.
@@ -46,7 +46,7 @@ def main():
     parser.add_argument("--trust-stall-rounds", type=int, default=10,
                         help="Stop after this many consecutive rejections at the minimum radius; "
                              "0 lets the loop spin instead.")
-    parser.add_argument("--gain-steps-per-round", type=int, default=40,
+    parser.add_argument("--gain-steps-per-round", type=int, default=20,
                         help="Inner budget for the gain block: a cap on a bounded BFGS solve, "
                              "whose steps are line-search trials rather than accepted updates. "
                              "40 reaches the conditional optimum; below 15 is refused.")
@@ -54,7 +54,7 @@ def main():
 # balance knob (raising both equally is a no-op, 5/5 reproduces 1/1
 # step-for-step), and this asymmetry is what keeps the trajectory block
 # from outrunning the gains. Every measured run used 40/1.
-    parser.add_argument("--trajectory-steps-per-round", type=int, default=1)
+    parser.add_argument("--trajectory-steps-per-round", type=int, default=10)
     parser.add_argument("--validation-trajectories", type=str,
                         default="trajectory_exports/validation_trajectories",
                         help="Held-out trajectories the shipped gains are selected on. "
@@ -72,7 +72,7 @@ def main():
     # warm-start rounds entirely. Without it the loop designs its own from
     # scratch, which is what --warm-start-rounds pays for.
     parser.add_argument("--warm-start-trajectories", type=str,
-                        default="trajectory_exports/gain_optimized_current",
+                        default="trajectory_exports/gain_optimized_current_5cp",
                         help="Empty string designs the trajectories from scratch instead, which "
                              "is what --warm-start-rounds pays for.")
     parser.add_argument("--seed", type=int, default=0)
