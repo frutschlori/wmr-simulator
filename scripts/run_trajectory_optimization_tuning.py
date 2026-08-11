@@ -19,6 +19,7 @@ from wmr_simulator.trajectory_optimization.bspline import (
 from wmr_simulator.trajectory_optimization.start_offsets import START_OFFSET_MODE_RANDOM, START_OFFSET_MODES, START_OFFSET_MODE_OPTIMIZE
 from wmr_simulator.trajectory_optimization.objectives import CRITERIA, DEFAULT_CRITERION
 from wmr_simulator.trajectory_optimization.pipeline import (
+    KIMOTOR_INDEX,
     OBJECTIVE_MODE_GAIN_TUNING,
     TrajectoryOptimizationPipeline,
 )
@@ -46,7 +47,7 @@ def main():
     parser.add_argument("--opt-steps", type=int, default=500)
     parser.add_argument("--objective-mode", choices=["identification", "gain-tuning"],
                         default="gain-tuning")
-    parser.add_argument("--fim-a-slip-max", action=argparse.BooleanOptionalAction, default=True,
+    parser.add_argument("--fim-a-slip-max", action=argparse.BooleanOptionalAction, default=False,
                         help="Include a_slip_max in the FIM parameters (identification mode); "
                              "--no-fim-a-slip-max drops it when its low sensitivity makes the FIM stiff.")
     # Settings for multiple trajectory synthesis
@@ -68,6 +69,12 @@ def main():
     parser.add_argument("--start-offset-mode", choices=sorted(START_OFFSET_MODES), default=START_OFFSET_MODE_OPTIMIZE)
     parser.add_argument("--offset-displacement-step-factor", type=float, default=1.0)
     parser.add_argument("--offset-heading-step-factor", type=float, default=1.0)
+    # The constant kimotor's FIM column is scaled by (negative = tie it to the
+    # design point, the pipeline default). Pinning it is what makes a design
+    # point of kimotor = 0 -- what the gain tuner reliably returns -- usable:
+    # tied, the scale falls back to the search range there and the column stops
+    # contributing. Changes the design only; nothing exported carries it.
+    parser.add_argument("--kimotor-fim-scale", type=float, default=5.0)
     # Constraints
     parser.add_argument("--constraint-weight", type=float, default=1.0)
     parser.add_argument("--constraint-v-weight", type=float, default=1.0)
@@ -107,6 +114,7 @@ def main():
         offset_displacement_step_factor=args.offset_displacement_step_factor,
         offset_heading_step_factor=args.offset_heading_step_factor,
         min_tangent_fraction=args.min_tangent_fraction,
+        kimotor_fim_scale=(args.kimotor_fim_scale if args.kimotor_fim_scale > 0.0 else None),
     )
 
     print(f"Loaded problem: {pipeline.problem.path}")
@@ -136,6 +144,10 @@ def main():
         )
     )
     print(f"Objective mode: {pipeline.objective_mode}")
+    print(
+        f"kimotor: design point {float(pipeline.controller_gains[KIMOTOR_INDEX]):.4g}, "
+        f"FIM scale {pipeline.kimotor_fim_scale:.4g}"
+    )
     print(f"Optimized trajectories: {args.num_trajectories}")
     if args.num_trajectories > 1:
         print(f"B-spline control points: {args.num_control_points}")
