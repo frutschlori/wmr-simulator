@@ -1,0 +1,162 @@
+<mujoco model="pololu_calibrated">
+  <!--
+    Calibrated hidden plant for the MuJoCo deployment studies (2026-08-10).
+    Derived from models/pololu.xml (colleague's original, kept unmodified).
+
+    THIS FILE IS THE HIDDEN GROUND TRUTH. The active-learning pipeline must
+    never read it: it only ever sees ROBOTCFG.CFG / robot_config.yaml, exactly
+    like the real robot.
+
+    Changes vs. the original, all measured (see docs/mujoco_deployment_plan.md):
+
+    1. CASTER FRICTION (bug fix). The original declares friction="0 0 0" on the
+       caster, intending a frictionless slider. MuJoCo combines friction as the
+       ELEMENTWISE MAXIMUM of the two geoms, so it actually ran at the floor's
+       mu = 1.0: a skid plate carrying ~27% of the weight. Effects measured:
+       open-loop speed 39% low, and a differential wheel command produced almost
+       NO yaw (the skid resists rotation on a 41 mm lever). Fixed with an
+       explicit <contact><pair>, which overrides the max rule.
+
+    2. CASTER CONTACT SOFTNESS. The caster sat 0.5 mm off the floor and the
+       motor's reaction torque pitched the chassis nose-up into it, producing a
+       13 N impulse (7x the robot's weight) every ~30 ms and launching the robot
+       (8 steps grounded / 7 airborne). solref="-300 -3" on the pair removes it.
+       NOT a solver artifact: timestep, integrator, solver iterations, friction
+       cone, wheel shape and mass all change essentially nothing.
+
+    3. MOTOR. The original kv=0.5 gives a 78 N-m stall torque on a 0.187 kg
+       robot, and armature=0.005 is ~200x the physical reflected inertia
+       (rotor 1.5e-8 * 15.25^2 + wheel 4.1e-7). Both were placeholders. Now
+       parametrized by three physical quantities:
+           omega_max = 240 rad/s   (wheel speed at duty = 1)
+           T_stall   = 0.150 N-m   (torque at duty = 1, zero speed)
+           tau       = 0.18 s      (free wheel-speed time constant)
+       giving  kv = T_stall/omega_max = 6.25e-4,  armature = kv*tau = 1.125e-4.
+       Joint damping is 0 because back-EMF is already the kv term; the original
+       damping=0.2 was what made steady-state wheel speed only 0.714*ctrl.
+
+    4. FRICTION mu 1.0/0.7 -> 0.7 on floor and wheels, so a_slip = mu*g =
+       6.87 m/s^2 clears the problem yaml's a_max 3.0 and a_max_lateral 6.0.
+       At mu = 0.28 the designed trajectories were not executable.
+
+    The duty -> ctrl mapping used by the firmware port is  ctrl = duty * 240.
+    A velocity actuator applies torque = kv*(ctrl - qvel), which is algebraically
+    a DC motor's torque = (kt/R)*(V - ke*omega), so this is physically founded.
+
+    EMERGENT (not set here, and deliberately different from the nominal yaml):
+      effective rolling radius ~16.00 mm   (contact penetration)
+      effective wheelbase      ~0.085 m    (geometric 0.089, scrub)
+    Recovering these is the point of the identification benchmark.
+
+    KNOWN OPEN ITEM: hard cornering (a_lat >~ 4 m/s^2) and fast spin-in-place
+    still lose ground contact open loop - realistic oversteer for a rear-caster
+    robot. Every test so far was OPEN LOOP, where a differential drive has no
+    heading feedback and is unstable by construction. Re-evaluate closed loop.
+  -->
+  <compiler angle="radian" inertiafromgeom="true"/>
+
+  <option timestep="0.002" integrator="implicit" gravity="0 0 -9.81"/>
+
+  <visual>
+    <global azimuth="45" elevation="-30" offwidth="1920" offheight="1080"/>
+    <headlight ambient="0.3 0.3 0.3" diffuse="0.6 0.6 0.6"/>
+  </visual>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512" height="3072"/>
+    <texture type="2d" name="groundplane" builtin="checker" mark="edge"
+             rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3" markrgb="0.8 0.8 0.8"
+             width="300" height="300"/>
+    <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="10 10" reflectance="0"/>
+    <texture name="wheel_tex" type="2d" builtin="checker"
+            rgb1="0.05 0.05 0.05" rgb2="0.9 0.9 0.9"
+            width="256" height="256"/>
+    <material name="wheel_mat" texture="wheel_tex"
+              texrepeat="6 1" texuniform="true" reflectance="0.0"/>
+  </asset>
+
+  <worldbody>
+    <!-- friction 1.0 -> 0.7 (see note 4) -->
+    <geom name="floor" type="plane" size="0 0 0.05" material="groundplane"
+          friction="0.7 0.005 0.0001"
+          solref="0.002 1" solimp="0.95 0.99 0.001"/>
+
+    <light pos="0 0 1.5" dir="0 0 -1" directional="true"/>
+
+    <body name="chassis" pos="-0.0445 0 0.0161">
+      <freejoint name="root"/>
+      <camera name="track_cam" mode="track" pos="0 -0.6 0.25" xyaxes="1 0 0 0 0.6 1"/>
+
+      <geom name="body" type="cylinder"
+            size="0.0445 0.01"
+            pos="-0.006 0 0.0"
+            rgba="1.0 1.0 1.0 1.0"
+            mass="0.140"/>
+
+      <geom name="rear_mass" type="box"
+            size="0.018 0.020 0.008"
+            pos="-0.030 0 0.006"
+            rgba="0.2 0.2 0.2 0.0"
+            mass="0.040"/>
+
+      <!-- damping 0.2 -> 0, armature 0.005 -> 1.125e-4, frictionloss 0.02 -> 2e-6 (note 3) -->
+      <body name="left_wheel" pos="0.0 0.0445 0.0">
+        <joint name="left_wheel_joint" type="hinge" axis="0 1 0"
+               damping="0.0" armature="1.125e-4" frictionloss="2e-6"/>
+        <geom name="left_wheel_geom" type="cylinder" size="0.016 0.002"
+              rgba="1 1 1 1" euler="1.5708 0 0"
+              material="wheel_mat"
+              friction="0.7 0.001 0.0001"
+              />
+        <geom name="left_wheel_marker" type="box"
+              size="0.0015 0.0006 0.0015"
+              pos="0 0 0.016"
+              rgba="1 0 0 1"
+              contype="0" conaffinity="0"/>
+      </body>
+
+      <body name="right_wheel" pos="0.0 -0.0445 0.0">
+        <joint name="right_wheel_joint" type="hinge" axis="0 1 0"
+               damping="0.0" armature="1.125e-4" frictionloss="2e-6"/>
+        <geom name="right_wheel_geom" type="cylinder" size="0.016 0.002"
+              rgba="1 1 1 1" euler="1.5708 0 0"
+              material="wheel_mat"
+              friction="0.7 0.001 0.0001"
+              />
+          <geom name="right_wheel_marker" type="box"
+            size="0.0015 0.0006 0.0015"
+            pos="0 0 0.016"
+            rgba="1 0 0 1"
+            contype="0" conaffinity="0"/>
+      </body>
+
+      <body name="caster" pos="-0.041 0.0 -0.01">
+        <geom name="caster_geom" type="sphere" size="0.0055"
+              rgba="0.5 0.5 0.5 1"
+              friction="0.0 0.0 0.0"
+              />
+      </body>
+
+    </body>
+  </worldbody>
+
+  <!--
+    The whole point of this block: an explicit pair overrides MuJoCo's
+    elementwise-max friction combination, so the caster is genuinely a
+    low-friction ball (0.05 ~ a real ball caster) instead of inheriting the
+    floor's 0.7. solref="-300 -3" is explicit stiffness/damping (N/m, N-s/m)
+    and is what stops the 13 N hammer impacts.
+  -->
+  <contact>
+    <pair geom1="floor" geom2="caster_geom"
+          friction="0.05 0.05 0.0001 0.0001 0.0001"
+          solref="-300 -3"/>
+  </contact>
+
+  <actuator>
+    <!-- kv = T_stall/omega_max = 0.150/240 = 6.25e-4; ctrlrange = +-1.2*omega_max -->
+    <velocity name="left_motor"  joint="left_wheel_joint"  kv="6.25e-4" ctrlrange="-288 288"/>
+    <velocity name="right_motor" joint="right_wheel_joint" kv="6.25e-4" ctrlrange="-288 288"/>
+  </actuator>
+
+</mujoco>
