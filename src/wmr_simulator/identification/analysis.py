@@ -122,6 +122,13 @@ def make_surface_pipeline(
         reference_trajectories_dir=None,
         window_length=window_length,
         target_log=target_log,
+        # The surface sweeps (wheel_radius, base_diameter) only, by evaluation --
+        # nothing here differentiates a_slip_max, and build_physical_parameter_surface
+        # leaves it at the PhysicalParams default of 0, which disables the traction
+        # limit outright. The smooth saturation is therefore not merely unnecessary
+        # but numerically inert: soft_clip still gets evaluated (both branches of a
+        # `where` do), it just cannot affect the result. Turning it off is exact.
+        identify_a_slip_max=False,
     )
 
 

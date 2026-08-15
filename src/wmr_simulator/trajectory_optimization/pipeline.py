@@ -604,6 +604,11 @@ class TrajectoryOptimizationPipeline:
             target_log=target_log,
             robot_params=self.physical_params_from_vector(params),
             replay_segment_plan=self.replay_segment_plan(target_log, window_length),
+            # Always smooth here, including when fim_a_slip_max is off: the
+            # designer's plant must not depend on which parameters the criterion
+            # happens to score, or two runs of the same problem design against
+            # different robots. This is the consumer the soft clip exists for.
+            smooth_traction_limit=True,
         )
 
     def replay_rollout(

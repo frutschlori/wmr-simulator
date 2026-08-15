@@ -174,12 +174,17 @@ class DiffDrive:
         a_slip_max=None,
         dt=None,
         wheel_speed_cmd=None,
+        smooth_traction_limit: bool = True,
     ):
         """Propagates the robot state from measured (motor-side) wheel speeds
         without motor dynamics (used by replay-based identification).
 
         The traction limit (a_slip_max) is applied so that replay-based
         identification and FIM computations are sensitive to it.
+
+        ``smooth_traction_limit=False`` drops the smooth saturation for a plain
+        clip. Only pass it when a_slip_max is held fixed -- the smooth version
+        is what makes it differentiable at all (burnout.traction_limited_ground_speeds).
         """
         wheel_speeds = np.array(wheel_speeds, dtype=np.float32)
         if wheel_speed_cmd is None:
@@ -190,7 +195,7 @@ class DiffDrive:
         dt = self.dt if dt is None else dt
 
         ground_speeds = traction_limited_ground_speeds(
-            state.ground_wheel_speeds, wheel_speeds, a_slip_max, r, dt
+            state.ground_wheel_speeds, wheel_speeds, a_slip_max, r, dt, smooth=smooth_traction_limit
         )
         v, w = body_velocities(ground_speeds, r, L)
         next_pose = integrate_planar_pose(state.pose, v, w, dt)

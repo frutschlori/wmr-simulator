@@ -30,6 +30,7 @@ class SystemIdentificationPipeline(SimulationPipeline):
         window_length: int | None = None,
         target_log: SimulationLog | None = None,
         replay_wheel_speed_source: str = "estimated",
+        identify_a_slip_max: bool = True,
     ):
         super().__init__(
             problem_path=problem_path,
@@ -39,6 +40,15 @@ class SystemIdentificationPipeline(SimulationPipeline):
         )
         self.initial_params = initial_params
         self.replay_wheel_speed_source = replay_wheel_speed_source
+        # The replay's traction limit only has to be *smoothly* saturated when
+        # a_slip_max is one of the fitted parameters; that smoothness exists for
+        # the trajectory designer's FIM and costs ~30x in this scan, whose body
+        # is otherwise just the kinematics (burnout.traction_limited_ground_speeds).
+        # Must agree with the identify_a_slip_max the optimizer is given, which
+        # `optimize` guarantees by reading it back off here: a hard clip's
+        # derivative w.r.t. a_slip_max is nonzero only on the saturated set, so
+        # fitting it through one is the staircase the soft clip was added to avoid.
+        self.identify_a_slip_max = bool(identify_a_slip_max)
         self.uses_external_target_log = target_log is not None
         self.target_log = target_log if target_log is not None else self.run_closed_loop(
             initial_params,
@@ -118,6 +128,7 @@ class SystemIdentificationPipeline(SimulationPipeline):
             target_log=target_log,
             robot_params=robot_params,
             replay_segment_plan=replay_segment_plan,
+            smooth_traction_limit=self.identify_a_slip_max,
         )
 
     def make_replay_segment_plan(self, target_log: SimulationLog, window_length: int | None = None):
@@ -148,6 +159,7 @@ class SystemIdentificationPipeline(SimulationPipeline):
             init_params=init_params,
             num_steps=num_steps,
             learning_rate=learning_rate,
+            identify_a_slip_max=self.identify_a_slip_max,
         )
 
 
@@ -178,6 +190,7 @@ def run_multi_log_identification(
             window_length=window_length,
             target_log=target_log,
             replay_wheel_speed_source=replay_wheel_speed_source,
+            identify_a_slip_max=identify_a_slip_max,
         )
         for target_log in target_logs
     ]
@@ -224,6 +237,7 @@ def run_single_experiment_identification(
     target_log: SimulationLog | None = None,
     bootstrap_samples: int | None = None,
     replay_wheel_speed_source: str = "estimated",
+    identify_a_slip_max: bool = True,
 ):
     pipeline = SystemIdentificationPipeline(
         problem_path=problem_path,
@@ -233,6 +247,7 @@ def run_single_experiment_identification(
         window_length=window_length,
         target_log=target_log,
         replay_wheel_speed_source=replay_wheel_speed_source,
+        identify_a_slip_max=identify_a_slip_max,
     )
     init_target_log = pipeline.target_log
     init_replay_log = pipeline.replay_rollout(initial_params, target_log=pipeline.target_log, window_length=window_length)
@@ -240,6 +255,11 @@ def run_single_experiment_identification(
     if bootstrap_samples is not None and bootstrap_samples > 0:
         if pipeline.uses_external_target_log:
             raise ValueError("Bootstrap identification is only supported for simulated target logs.")
+        if not identify_a_slip_max:
+            # The bootstrap optimizer has no parameter mask, so it would fit
+            # a_slip_max regardless -- through a replay whose traction limit is
+            # a hard clip, because the pipeline was built expecting it held.
+            raise ValueError("Bootstrap identification cannot hold a_slip_max fixed.")
         bootstrap = bootstrap_identification_adam(
             pipeline=pipeline,
             initial_params=initial_params,
