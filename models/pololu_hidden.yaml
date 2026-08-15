@@ -1,0 +1,62 @@
+# HIDDEN GROUND TRUTH for the MuJoCo deployment studies.
+#
+# The active-learning pipeline must NEVER read this file, exactly as it never
+# gets to read the real robot's true parameters. Only wmr_simulator.mujoco_sim
+# loads it; the firmware port inside that package gets its geometry and gains
+# from ROBOTCFG.CFG / robot_config.yaml, like the real firmware does. Closing
+# the gap between the two is what the system identification is for.
+#
+# Everything listed here OVERRIDES models/pololu_calibrated.xml, which is why
+# this yaml is the one place to change them: the XML's own attributes are the
+# untuned baseline and are patched out at load time. Anything not listed -
+# masses, chassis geometry, contact softness, integrator - lives in the XML
+# only.
+#
+# Not listed on purpose: the effective rolling radius (~0.0160 m, contact
+# penetration under load) and the effective wheelbase (~0.0833 m, geometric
+# 0.0842 minus scrub). Those are emergent, and recovering them is the benchmark.
+
+model_path: models/pololu_calibrated.xml
+
+motor:
+  # ctrl = duty * omega_max on a MuJoCo velocity actuator, which applies
+  # torque = kv * (ctrl - qvel): algebraically a DC motor's (kt/R)(V - ke w).
+  omega_max: 230.0        # rad/s at duty = 1        (nominal belief: 223)
+  stall_torque: 0.150     # N-m at duty = 1, w = 0
+  time_constant: 0.1     # s, free wheel-speed rise (nominal belief: 0.155)
+
+geometry:
+  wheel_radius: 0.016     # geom size; the ROLLING radius is smaller, see above
+  wheel_width: 0.002      # cylinder half-length
+  half_track: 0.0421      # wheel body offset; geometric wheelbase 0.0842
+
+friction:
+  floor: 0.7              # a_slip = mu*g = 6.87 m/s^2, clears a_max_lateral 4.0
+  wheel: 0.7
+  caster: 0.05            # via an explicit <pair>; see the XML header for why
+
+encoder:
+  # Signed, and identical to the firmware's `encoder_cpr` key: the count->rad/s
+  # conversion is exact on the real robot too (12 CPR motor * 15.25 gear), so
+  # this is deliberately NOT one of the parameters identification has to find.
+  # The sign is the wiring convention; counts = round(cpr * angle / 2pi).
+  counts_per_revolution: -183.0
+
+imu:
+  site_pos: [0.0, 0.0, 0.01]      # body frame, on the chassis deck
+  site_euler: [0.0, 0.0, 0.0]     # chip axes aligned with the body axes
+  accel_lsb_g: 6.1e-5             # LSM6DSO, 0.061 mg/LSB at +-2 g
+  gyro_lsb_dps: 0.007             # LSM6DSO, 70 mdps/LSB at +-2000 dps
+  accel_noise_g: 0.005            # stationary scatter in the real logs
+  gyro_noise_dps: 0.5
+  accel_bias_g: [0.0, 0.0, 0.022] # real logs rest at acc_z ~ 1.022 g
+  gyro_bias_dps: [0.0, 0.0, 0.0]
+
+mocap:
+  offset_xyz: [0.0, 0.0, 0.0]     # marker frame vs. the wheel-axle midpoint
+  position_noise_std: 0.0001       # m,   measured off the exp04/exp05 tracks
+  angle_noise_std: 0.001          # rad, likewise
+
+# Seconds of zero-duty physics before a run, so the chassis has settled onto
+# the caster and the contact penetration is at its steady value.
+settle_time: 0.5

@@ -1,0 +1,28 @@
+robot:
+  wheel_radius: 0.016
+  base_diameter: 0.0825
+  max_wheel_speed: 223.0
+  time_constant: 0.155
+  a_slip_max: 3.0
+controller:
+  gains:
+  - 4.5
+  - 6.0
+  - 12.0
+  - 2.5
+  - 5.0
+  gain_parametrization:
+    kind: error_mlp
+    enabled: false
+    hidden_sizes:
+    - 16
+    seed: 0
+    scheduled_indices:
+    - 0
+    - 1
+    - 2
+    - 3
+    - 4
+    bound: 3.0
+    learn_bound: false
+    spectral_norm_cap: 1.5

@@ -8,6 +8,11 @@ interruptions needed to collect robot data from the SD card. Stage order:
          -> decode-logs -> identify -> train-residual
          -> plan-tuning-trajectories -> tune-gains -> finalize (next iteration)
 
+The bracketed step is the only one that is not a stage, because on the real
+robot it is a person with an SD card. simulate-deployment replaces it with a
+MuJoCo run of the same trajectory (mujoco_sim), which is what lets `run` carry
+an experiment through several iterations on its own.
+
 Heavy imports (jax, the pipelines) happen inside the stage functions so the
 CLI stays responsive for bookkeeping commands like status.
 """
@@ -323,8 +328,105 @@ def stage_plan_tuning_trajectories(experiment: Experiment, iteration: int) -> li
 
 
 # ---------------------------------------------------------------------------
-# data handling
+# data collection: the robot, or MuJoCo standing in for it
 # ---------------------------------------------------------------------------
+
+
+def stage_simulate_deployment(
+    experiment: Experiment,
+    iteration: int,
+    num_logs: int | None = None,
+) -> list[Path]:
+    """Stand in for the robot: drive this iteration's identification trajectory
+    in the MuJoCo plant and write binary ``TRxx`` logs into ``data/``.
+
+    Replaces "copy the JSN and ROBOTCFG.CFG to the SD card, run the robot, copy
+    the logs back". Nothing downstream can tell the difference: the logs are in
+    the firmware's own binary format, in the directory decode-logs already
+    reads, and the plant's true parameters stay inside ``mujoco_sim`` -- so
+    identification still has something to find.
+
+    The runs are consecutive, as they are on the robot. What is driven is the
+    **bridged** JSN -- the trajectory, a wait, then a planned path back to the
+    start -- so only the first run is placed by hand and every later one begins
+    wherever the previous one's bridge left the robot. That reproduces the real
+    repeat procedure, including the fact that the placement of run 5 is
+    whatever four bridges accumulated to. The log loader clips the bridge back
+    off again (``log_loading.clip_after_first_trajectory``, which keys on the
+    wait's zero setpoint), so identification sees the trajectory alone.
+
+    The ground truth the deployment does know -- tracking error against the
+    reference, duty saturation, where the robot started and ended -- is printed
+    and *not* written next to the log: decode-logs tries to decode every
+    non-csv file in ``data/``, and it would leak the hidden truth into the
+    pipeline besides.
+    """
+    from wmr_simulator.mujoco_sim.deploy import run_deployment
+
+    paths = experiment.paths(iteration)
+    paths.create_directories()
+    config = experiment.config["mujoco_deployment"]
+    trajectory = _identification_trajectory_jsn(paths)
+    count = int(config["num_logs"] if num_logs is None else num_logs)
+
+    print(
+        f"MuJoCo deployment: {count} consecutive run(s) of {trajectory.name} "
+        f"under {paths.robotcfg_cfg.name}"
+        f"{' + ' + paths.gainmlp_jsn.name if paths.gainmlp_jsn.is_file() else ''} "
+        f"-> {paths.data_dir}"
+    )
+    written: list[Path] = []
+    start_pose = None
+    for index in range(count):
+        seed = _deployment_seed(experiment, iteration, index)
+        result = run_deployment(
+            paths.robotcfg_cfg,
+            trajectory,
+            paths.data_dir,
+            seed=seed,
+            start_pose=start_pose,
+            start_offset_radius=float(config["start_offset_radius"]),
+            start_offset_angle=float(config["start_offset_angle"]),
+        )
+        written.append(result.log_path)
+        start_pose = result.final_pose
+        offset = result.start_offset
+        placement = "placed by hand" if index == 0 else "left by the bridge"
+        print(
+            f"  {result.log_path.name}  seed {seed}  {placement} "
+            f"{1000 * offset[0]:+.0f}/{1000 * offset[1]:+.0f} mm, {offset[2]:+.3f} rad  "
+            f"| truth: RMSE {result.tracking_rmse:.3f} m, final {result.final_pose_error:.3f} m, "
+            f"duty saturated {100 * result.duty_saturated_fraction:.0f}%"
+        )
+    return written
+
+
+def _identification_trajectory_jsn(paths: IterationPaths) -> Path:
+    """The reference the deployment drives: this iteration's *bridged* JSN.
+
+    The bridge is what makes a repeat run possible without touching the robot,
+    which is what lets the deployments be chained; the unbridged variant is
+    only exported because the bridged one is derived from it.
+    """
+    candidates = sorted(paths.identification_trajectory_dir.glob("*_bridge.JSN"))
+    if not candidates:
+        raise FileNotFoundError(
+            f"No bridged reference JSN (*_bridge.JSN) in {paths.identification_trajectory_dir}; "
+            "run the plan-id-trajectory stage first."
+        )
+    if len(candidates) > 1:
+        names = ", ".join(path.name for path in candidates)
+        raise ValueError(
+            f"Several bridged reference JSNs in {paths.identification_trajectory_dir} ({names}); "
+            "leave exactly one so the deployment is unambiguous."
+        )
+    return candidates[0]
+
+
+def _deployment_seed(experiment: Experiment, iteration: int, index: int) -> int:
+    """Distinct per (iteration, run) and unchanged across reruns, so a repeated
+    deployment reproduces the same placements and sensor noise."""
+    return 1_000_000 * int(experiment.config["seed"]) + 1_000 * int(iteration) + int(index)
 
 
 def stage_decode_logs(experiment: Experiment, iteration: int) -> list[Path]:
@@ -797,6 +899,8 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
         k_max_rest=float(config["k_max_rest"]),
         num_lhs_points=int(config["num_lhs_points"]),
         num_adam_optimizations=int(config["num_adam_optimizations"]),
+        optimizer=str(config["optimizer"]),
+        outlier_loss_factor=float(config["outlier_loss_factor"]),
         schedule_enabled=config.get("gain_parametrization", config.get("gain_schedule")),
         gain_delta_weight=float(config["gain_delta_weight"]),
         static_tune=bool(config["static_tune"]),
@@ -959,6 +1063,20 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
 # ---------------------------------------------------------------------------
 
 
+# The stages an iteration has to get through, with the output that marks each
+# one done. simulate-deployment is not in here: it is one of two ways to fill
+# data/ (the other being the SD card), and decode-logs is what records that the
+# data arrived either way.
+REQUIRED_STAGE_OUTPUTS: tuple[tuple[str, str], ...] = (
+    ("plan-id-trajectory", "identification_trajectory/*.pkl + .JSN"),
+    ("decode-logs", "data/*.csv"),
+    ("identify", "results/identification.yaml"),
+    ("train-residual", "results/residual_model.pkl"),
+    ("plan-tuning-trajectories", "tuning_trajectories/*.pkl"),
+    ("tune-gains", "results/gains.yaml"),
+)
+
+
 def iteration_status(experiment: Experiment, iteration: int) -> dict[str, bool]:
     paths = experiment.paths(iteration)
     has_id_trajectory = any(paths.identification_trajectory_dir.glob("*.pkl")) and any(
@@ -975,9 +1093,22 @@ def iteration_status(experiment: Experiment, iteration: int) -> dict[str, bool]:
 
 
 def stage_status(experiment: Experiment) -> None:
+    deployment = experiment.config["mujoco_deployment"]
     print(f"Experiment: {experiment.root}")
     print(f"  residual model:          {'enabled' if experiment.config['use_residual_model'] else 'disabled'}")
     print(f"  trajectory optimization: {'enabled' if experiment.config['optimize_trajectories'] else 'disabled (baselines)'}")
+    print(
+        "  data collection:         "
+        + (
+            f"MuJoCo deployment, {int(deployment['num_logs'])} log(s) per iteration"
+            if deployment["enabled"]
+            else "robot (SD card)"
+        )
+    )
+    print(
+        f"  iterations:              {len(experiment.iteration_indices())} of "
+        f"{int(experiment.config['num_iterations'])} targeted"
+    )
     for iteration in experiment.iteration_indices():
         print(f"iteration_{iteration:02d}:")
         status = iteration_status(experiment, iteration)
@@ -988,13 +1119,65 @@ def stage_status(experiment: Experiment) -> None:
 
 def stage_run(
     experiment: Experiment,
+    iteration: int | None = None,
+    log: str | None = None,
+    simulate_deployment: bool = False,
+    num_iterations: int | None = None,
+) -> int:
+    """Run the loop from ``iteration`` on, and return the last iteration finalized.
+
+    One iteration at a time by default. ``num_iterations`` (or the experiment's
+    own ``num_iterations``) is a *target total*: the loop keeps going until that
+    iteration has been finalized, and refuses to start one past it, so rerunning
+    on a finished experiment is a no-op rather than another iteration's work.
+    Getting anywhere unattended needs the logs to appear without a human, i.e.
+    ``simulate_deployment`` or ``mujoco_deployment.enabled``; otherwise the loop
+    stops at the first iteration that needs robot data.
+
+    Naming an ``iteration`` past the target raises the target to it: an explicit
+    request is the more specific instruction.
+    """
+    target = int(experiment.config["num_iterations"] if num_iterations is None else num_iterations)
+    if iteration is not None:
+        target = max(target, int(iteration))
+    iteration = experiment.resolve_iteration(iteration)
+    if iteration > target:
+        print(f"Experiment already has its {target} iteration(s); "
+              f"{experiment.paths(iteration).root} holds the final model and gains.")
+        print("Raise num_iterations in experiment.yaml (or pass --iterations) to continue the loop.")
+        return iteration - 1
+
+    while True:
+        if not _run_iteration(
+            experiment,
+            iteration,
+            # --log names one file in one data/ directory, so it can only mean
+            # the iteration the command was pointed at.
+            log=log,
+            simulate_deployment=simulate_deployment,
+        ):
+            return iteration - 1
+        log = None
+        if iteration >= target:
+            if target > 1:
+                print()
+                print(f"Reached the {target}-iteration target; "
+                      f"{experiment.paths(iteration + 1).root} holds the final model and gains.")
+            return iteration
+        iteration += 1
+
+
+def _run_iteration(
+    experiment: Experiment,
     iteration: int,
     log: str | None = None,
-) -> None:
-    """Run every stage of the iteration that can proceed, in order.
+    simulate_deployment: bool = False,
+) -> bool:
+    """Run every stage of one iteration that can proceed, in order.
 
-    Stops with instructions when robot data is required, and finalizes the
-    iteration (creating the next one) once gains are tuned.
+    Returns whether the iteration was finalized (and the next one created).
+    Stops with instructions, returning False, when robot data is required and
+    no deployment stands in for it.
     """
     paths = experiment.paths(iteration)
     status = iteration_status(experiment, iteration)
@@ -1004,6 +1187,8 @@ def stage_run(
         status = iteration_status(experiment, iteration)
 
     if not status["decode-logs"]:
+        if simulate_deployment or experiment.config["mujoco_deployment"]["enabled"]:
+            stage_simulate_deployment(experiment, iteration)
         stage_decode_logs(experiment, iteration)
         status = iteration_status(experiment, iteration)
     if not status["decode-logs"]:
@@ -1014,7 +1199,8 @@ def stage_run(
         print("  2. Run the experiment(s) on the robot.")
         print(f"  3. Copy the SD-card logs into {paths.data_dir}.")
         print("  4. Re-run this command.")
-        return
+        print("  (or run it with --simulate-deployment to have MuJoCo stand in for the robot.)")
+        return False
 
     if not status["identify"]:
         stage_identify(experiment, iteration, log=log)
@@ -1025,6 +1211,7 @@ def stage_run(
     if not iteration_status(experiment, iteration)["tune-gains"]:
         stage_tune_gains(experiment, iteration)
     stage_finalize(experiment, iteration)
+    return True
 
 
 def _identified_problem(paths: IterationPaths) -> Path:

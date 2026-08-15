@@ -15,7 +15,7 @@ part of this set.
 from __future__ import annotations
 
 GAIN_TUNING_DEFAULTS: dict = {
-    "steps": 500,
+    "steps": 160,
     "learning_rate": 3e-4,
     # Noise realizations averaged into every objective evaluation. Each
     # trajectory receives independent child keys from the run's frozen bundle,
@@ -64,16 +64,16 @@ GAIN_TUNING_DEFAULTS: dict = {
     "input_delta_weight": 1.0,
     # Penalty on step-to-step change in the robot yaw rate (normalized by
     # omega_max); discourages gains that oscillate omega. 0 disables.
-    "omega_delta_weight": 1.5,
+    "omega_delta_weight": 1.0,
     "gain_delta_weight": 0.0,
-    "k_min_stab": 1e-3,
+    "k_min_stab": 1e-2,
     "k_max_stab": 50.0,
     "k_max_rest": 20.0,
     "gain_parametrization": None,  # None -> follow problem yaml
     # Run an independent static-gain tuning (LHS + multistart Adam, no
     # parametrization) next to the parametrized one, as a comparison baseline.
     "static_tune": True,
-    "static_tune_steps": 500,
+    "static_tune_steps": 160,
     "static_tune_learning_rate": 3e-4,
     # Narrow each run's LHS presearch to a +/- band around its init gains
     # (0 -> full [k_min_stab, k_max_stab] range); refines across iterations.

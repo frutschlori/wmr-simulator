@@ -7,7 +7,20 @@
     never read it: it only ever sees ROBOTCFG.CFG / robot_config.yaml, exactly
     like the real robot.
 
-    Changes vs. the original, all measured (see docs/mujoco_deployment_plan.md):
+    models/pololu_hidden.yaml IS AUTHORITATIVE for every value it lists - the
+    motor, wheel geometry, frictions, encoder, IMU and mocap. wmr_simulator's
+    build_plant_xml patches them into this file before compiling it, so editing
+    an attribute here that the yaml also carries changes nothing. Change it in
+    the yaml; the numbers below are kept in step so this file reads true on its
+    own.
+
+    The wheel geometry is the real robot's DIRECTLY MEASURED geometry (16 mm
+    radius, 84.2 mm wheelbase) rather than anything fitted, because those are
+    the two numbers a caliper can reach on the hardware. What identification
+    recovers is the *effective* pair below, so the same geometric-to-effective
+    gap is present here and on the robot and the two are comparable.
+
+    Changes vs. the original, all measured:
 
     1. CASTER FRICTION (bug fix). The original declares friction="0 0 0" on the
        caster, intending a frictionless slider. MuJoCo combines friction as the
@@ -28,25 +41,26 @@
        robot, and armature=0.005 is ~200x the physical reflected inertia
        (rotor 1.5e-8 * 15.25^2 + wheel 4.1e-7). Both were placeholders. Now
        parametrized by three physical quantities:
-           omega_max = 240 rad/s   (wheel speed at duty = 1)
+           omega_max = 230 rad/s   (wheel speed at duty = 1)
            T_stall   = 0.150 N-m   (torque at duty = 1, zero speed)
-           tau       = 0.18 s      (free wheel-speed time constant)
-       giving  kv = T_stall/omega_max = 6.25e-4,  armature = kv*tau = 1.125e-4.
+           tau       = 0.10 s      (free wheel-speed time constant)
+       giving  kv = T_stall/omega_max = 6.5217e-4, armature = kv*tau = 6.5217e-5.
        Joint damping is 0 because back-EMF is already the kv term; the original
        damping=0.2 was what made steady-state wheel speed only 0.714*ctrl.
 
     4. FRICTION mu 1.0/0.7 -> 0.7 on floor and wheels, so a_slip = mu*g =
-       6.87 m/s^2 clears the problem yaml's a_max 3.0 and a_max_lateral 6.0.
+       6.87 m/s^2 clears the problem yaml's a_max 3.0 and a_max_lateral 4.0.
        At mu = 0.28 the designed trajectories were not executable.
 
-    The duty -> ctrl mapping used by the firmware port is  ctrl = duty * 240.
+    The duty -> ctrl mapping used by the firmware port is  ctrl = duty * 230.
     A velocity actuator applies torque = kv*(ctrl - qvel), which is algebraically
     a DC motor's torque = (kt/R)*(V - ke*omega), so this is physically founded.
 
     EMERGENT (not set here, and deliberately different from the nominal yaml):
-      effective rolling radius ~16.00 mm   (contact penetration)
-      effective wheelbase      ~0.085 m    (geometric 0.089, scrub)
-    Recovering these is the point of the identification benchmark.
+      effective rolling radius ~15.97 mm   (contact penetration, geometric 16.00)
+      effective wheelbase      ~0.0833 m   (scrub, geometric 0.0842)
+    Recovering these is the point of the identification benchmark; the current
+    measured values live in mujoco_sim.truth and are pinned by its test.
 
     KNOWN OPEN ITEM: hard cornering (a_lat >~ 4 m/s^2) and fast spin-in-place
     still lose ground contact open loop - realistic oversteer for a rear-caster
@@ -99,10 +113,10 @@
             rgba="0.2 0.2 0.2 0.0"
             mass="0.040"/>
 
-      <!-- damping 0.2 -> 0, armature 0.005 -> 1.125e-4, frictionloss 0.02 -> 2e-6 (note 3) -->
-      <body name="left_wheel" pos="0.0 0.0445 0.0">
+      <!-- damping 0.2 -> 0, armature 0.005 -> 6.5217e-5, frictionloss 0.02 -> 2e-6 (note 3) -->
+      <body name="left_wheel" pos="0.0 0.0421 0.0">
         <joint name="left_wheel_joint" type="hinge" axis="0 1 0"
-               damping="0.0" armature="1.125e-4" frictionloss="2e-6"/>
+               damping="0.0" armature="6.5217e-5" frictionloss="2e-6"/>
         <geom name="left_wheel_geom" type="cylinder" size="0.016 0.002"
               rgba="1 1 1 1" euler="1.5708 0 0"
               material="wheel_mat"
@@ -115,9 +129,9 @@
               contype="0" conaffinity="0"/>
       </body>
 
-      <body name="right_wheel" pos="0.0 -0.0445 0.0">
+      <body name="right_wheel" pos="0.0 -0.0421 0.0">
         <joint name="right_wheel_joint" type="hinge" axis="0 1 0"
-               damping="0.0" armature="1.125e-4" frictionloss="2e-6"/>
+               damping="0.0" armature="6.5217e-5" frictionloss="2e-6"/>
         <geom name="right_wheel_geom" type="cylinder" size="0.016 0.002"
               rgba="1 1 1 1" euler="1.5708 0 0"
               material="wheel_mat"
@@ -154,9 +168,9 @@
   </contact>
 
   <actuator>
-    <!-- kv = T_stall/omega_max = 0.150/240 = 6.25e-4; ctrlrange = +-1.2*omega_max -->
-    <velocity name="left_motor"  joint="left_wheel_joint"  kv="6.25e-4" ctrlrange="-288 288"/>
-    <velocity name="right_motor" joint="right_wheel_joint" kv="6.25e-4" ctrlrange="-288 288"/>
+    <!-- kv = T_stall/omega_max = 0.150/230 = 6.5217e-4; ctrlrange = +-1.2*omega_max -->
+    <velocity name="left_motor"  joint="left_wheel_joint"  kv="6.5217e-4" ctrlrange="-276 276"/>
+    <velocity name="right_motor" joint="right_wheel_joint" kv="6.5217e-4" ctrlrange="-276 276"/>
   </actuator>
 
 </mujoco>
