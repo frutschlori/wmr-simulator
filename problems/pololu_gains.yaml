@@ -1,4 +1,4 @@
-sim_time: 5.0 # seconds
+sim_time: 8.0 # seconds
 geometry_controller_dt: 0.05 # seconds
 wheel_controller_dt: 0.01 # seconds
 environment:
@@ -16,7 +16,7 @@ controller:
   # Motor gains are dimensionless here, but in duty / (rad/s) in pololu firmware -> divide gains by motor gain for conversion
   # gains: [5.0, 5.0, 3.5, 5.0, 0.0] # [kx, ky, kth, kpmotor, kimotor]
   gains: [4.5, 6.0, 12.0, 2.5, 5.0] # stock pololu firmware gains
-  # gains: [2.32, 7.90, 9.46, 3.10, 0.0] # 1 round tuned gains
+  # gains: [2.0, 6.0, 8.0, 2.5, 0.0] # 1 round tuned gains
   # gains: [5.0, 5.0, 3.0, 0.4, 0.2] # stock wmr simulator gains
 
   # Bounded multiplicative gain schedule for the outer tracking gains:
@@ -42,7 +42,7 @@ controller:
   # network's Lipschitz constant so the factors stay smooth on noisy/unseen inputs.
   gain_parametrization:
     kind: error_mlp
-    enabled: true
+    enabled: false
     hidden_sizes: [16]
     seed: 0
     scheduled_indices: [0, 1, 2, 3, 4] # kx, ky, kth; motor PI gains stay static ([0,1,2,3,4] schedules all)
@@ -56,11 +56,11 @@ robot:
   max_wheel_speed: 223  # rad/s
   time_constant:  0.155  # time constant for first-order wheel dynamics (set to 0 for ideal actuation)
   a_slip_max:  3.0    # traction limit ~ mu*g in m/s^2, 0 to disable (burnout model, Wong 2008)
-  v_max: 2.5          # m/s
+  v_max: 2.0          # m/s
   a_max: 3.0         # m/s^2
-  a_max_lateral: 6.0 # m/s^2
-  omega_max: 10.0    # rad/s
-  alpha_max: 20.0    # rad/s^2
+  a_max_lateral: 4.0 # m/s^2
+  omega_max: 5.0    # rad/s
+  alpha_max: 15.0    # rad/s^2
 noise_enabled: true # false zeroes the estimator measurement noise everywhere (sim, gain tuning, traj-opt FIM)
 estimator:
   type: "kf"              # estimator type: "kf" (Kalman Filter) or "dr" (Dead Reckoning)

@@ -21,7 +21,10 @@ An experiment lives in its own directory and holds one folder per iteration:
         data/                       drop SD-card logs here; decode-logs writes .csv
                                     (every log directly in here is identification
                                     data; subdirectories hold baseline comparison
-                                    runs and are skipped by the identify stage)
+                                    runs and are skipped by the identify stage.
+                                    With mujoco_deployment.enabled the logs are
+                                    written here by the simulate-deployment
+                                    stage instead of carried over from the robot)
         results/                    identification.yaml, gains.yaml, residual_model.pkl
         visualize/                  plots of this iteration
       iteration_02/                 created by the finalize stage from iteration_01 results
@@ -48,13 +51,20 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
     # Base problem yaml; robot block and controller gains are overridden per iteration.
     "problem": "problems/pololu_gains.yaml",
     "seed": 0,
+    # How many iterations the experiment should end up with. The `run` stage
+    # keeps going until this one is finalized, so it is a target total rather
+    # than a count of iterations to add: rerunning `run` on a finished
+    # experiment does nothing. Only reachable unattended with
+    # mujoco_deployment.enabled; otherwise `run` stops at the first iteration
+    # that needs robot data.
+    "num_iterations": 1,
     # Flags.
     "use_residual_model": True,
     "optimize_trajectories": True,
     # Tune gains with the standalone run_gain_tuning.py defaults
     # (gain_tuning.defaults.GAIN_TUNING_DEFAULTS) instead of the gain_tuning
     # block below, so the two entry points can share one set of values.
-    "use_standalone_gain_tuning_defaults": False,
+    "use_standalone_gain_tuning_defaults": True,
     # Static baselines, used when optimize_trajectories is false.
     "baseline_identification_trajectory": None,  # reference pickle path
     "baseline_tuning_trajectories_dir": None,    # directory with reference pickles
@@ -63,10 +73,29 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
     "log_loading": {
         "clip_after_first_trajectory": True,
     },
+    # MuJoCo stands in for the real robot: instead of stopping to wait for SD
+    # card logs, the run stage drives the iteration's identification trajectory
+    # in the hidden MuJoCo plant and writes TRxx binary logs into data/, where
+    # decode-logs already looks. The plant parameters stay hidden from the
+    # pipeline, so identification still has something to find -- and, unlike on
+    # the robot, a ground truth to be scored against.
+    "mujoco_deployment": {
+        "enabled": False,
+        # Runs per iteration, i.e. identification logs. They are consecutive
+        # runs of the *bridged* trajectory, exactly how the robot repeats one:
+        # only the first is placed by hand, and each later run starts wherever
+        # the previous run's bridge path left the robot. The identify stage's
+        # outlier screen needs at least 4 logs to mean anything.
+        "num_logs": 5,
+        # Hand-placement spread of the first run's start pose, the deployment
+        # driver's own defaults (mujoco_sim.deploy, measured off exp04/exp05).
+        "start_offset_radius": 0.1,
+        "start_offset_angle": 0.3,
+    },
     "identification_trajectory": {
-        "opt_steps": 1000,
-        "learning_rate": 1e-2,
-        "num_control_points": 8,
+        "opt_steps": 500,
+        "learning_rate": 2e-3,
+        "num_control_points": 6,
         "time_scaling": "s-curve",
         "window_length": 50,
         # Include a_slip_max in the FIM design parameters. Disable when its low
@@ -76,11 +105,11 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         # <name>_bridge.JSN is always exported alongside (same directory): the
         # trajectory plus a wait at the goal and a bridge path back to the
         # start, so the experiment can be repeated without repositioning the robot.
-        "bridge_wait_time": 2.0,
+        "bridge_wait_time": 1.0,
         "bridge_time": 5.0,
     },
     "identification": {
-        "steps": 2000,
+        "steps": 500,
         "learning_rate": 5e-4,
         "window_length": None,
         # Robust deviation (modified z-score) above which a log's own parameter
@@ -127,24 +156,14 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         "pool_previous_iterations": True,
     },
     "tuning_trajectories": {
-        "num_trajectories": 20,
-        "opt_steps": 250,
-        "learning_rate": 1e-2,
-        "num_control_points": 8,
+        "num_trajectories": 10,
+        "opt_steps": 50,
+        "learning_rate": 3e-2,
+        "num_control_points": 6,
         "time_scaling": "s-curve",
-        "constraint_weight_jitter": 0.3,
+        "constraint_weight_jitter": 0.4,
         "window_length": 50,
-        # The constant scaling kimotor's FIM column in the tuning design
-        # (trajectory_optimization.pipeline kimotor_fim_scale). Pinned rather
-        # than tied to the design point because the tuner reliably returns
-        # kimotor = 0 and finalize carries that into the next iteration's
-        # problem.yaml: a scale tied to the gain would fall back to the search
-        # range there and leave the design blind to kimotor, which shows up as
-        # dull trajectories. Held at the stock problem's nominal, so every
-        # iteration designs like the first. Affects the design only -- what
-        # ships to the robot (robot_config.yaml, ROBOTCFG.CFG, GAINMLP.JSN)
-        # keeps the tuned kimotor.
-        "kimotor_fim_scale": 5.0,
+        "kimotor_fim_scale": 1.0,
     },
     # Gain-tuning hyperparameters come from the standalone script's defaults
     # (gain_tuning.defaults.GAIN_TUNING_DEFAULTS), so there is a single place to

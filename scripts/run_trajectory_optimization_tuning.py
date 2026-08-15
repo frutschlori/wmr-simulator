@@ -43,8 +43,8 @@ def main():
     # Optimization Settings
     parser.add_argument("--save-trajectory", action="store_true", default=True)
     parser.add_argument("--window-length", type=int, default=50) # replay window length, only for identification mode
-    parser.add_argument("--learning-rate", type=float, default=2e-3)
-    parser.add_argument("--opt-steps", type=int, default=500)
+    parser.add_argument("--learning-rate", type=float, default=3e-2)
+    parser.add_argument("--opt-steps", type=int, default=50)
     parser.add_argument("--objective-mode", choices=["identification", "gain-tuning"],
                         default="gain-tuning")
     parser.add_argument("--fim-a-slip-max", action=argparse.BooleanOptionalAction, default=False,
@@ -52,7 +52,7 @@ def main():
                              "--no-fim-a-slip-max drops it when its low sensitivity makes the FIM stiff.")
     # Settings for multiple trajectory synthesis
     parser.add_argument("--num-trajectories", type=int, default=10)
-    parser.add_argument("--constraint-weight-jitter", type=float, default=0.3) # factor for diverse constraints
+    parser.add_argument("--constraint-weight-jitter", type=float, default=0.4) # factor for diverse constraints
     parser.add_argument("--vectorize-trajectories", action="store_true", default=True)
     # Path settings
     parser.add_argument("--time-scaling", choices=["s-curve", "linear"], default="s-curve")
@@ -74,7 +74,7 @@ def main():
     # point of kimotor = 0 -- what the gain tuner reliably returns -- usable:
     # tied, the scale falls back to the search range there and the column stops
     # contributing. Changes the design only; nothing exported carries it.
-    parser.add_argument("--kimotor-fim-scale", type=float, default=5.0)
+    parser.add_argument("--kimotor-fim-scale", type=float, default=1.0)
     # Constraints
     parser.add_argument("--constraint-weight", type=float, default=1.0)
     parser.add_argument("--constraint-v-weight", type=float, default=1.0)

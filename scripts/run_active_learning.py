@@ -35,10 +35,20 @@ Typical usage (run all stages that can proceed; stops when robot data is needed)
     python scripts/run_active_learning.py run  --experiment experiments/exp01 --log TR00.csv
     python scripts/run_active_learning.py status --experiment experiments/exp01
 
+MuJoCo instead of the robot: the deployment drives the iteration's
+identification trajectory in the hidden MuJoCo plant and writes binary TRxx
+logs into that iteration's data/, so nothing downstream changes. Either fill the current iteration's data/ on demand:
+    python scripts/run_active_learning.py run --experiment experiments/exp01 --simulate-deployment
+or set the experiment up to collect its own data and run unattended for a fixed
+number of iterations:
+    python scripts/run_active_learning.py init --experiment experiments/exp01 --mujoco --iterations 5
+    python scripts/run_active_learning.py run  --experiment experiments/exp01
+
 Individual stages (all default to the latest iteration; pass --iteration N to
 rerun an earlier one; delete a stage's outputs to force a rerun under `run`):
     python scripts/run_active_learning.py init --experiment experiments/exp01
     python scripts/run_active_learning.py plan-id-trajectory      --experiment experiments/exp01
+    python scripts/run_active_learning.py simulate-deployment     --experiment experiments/exp01
     python scripts/run_active_learning.py decode-logs             --experiment experiments/exp01
     python scripts/run_active_learning.py identify                --experiment experiments/exp01 --log TR00.csv
     python scripts/run_active_learning.py train-residual          --experiment experiments/exp01
@@ -104,9 +114,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="Directory of reference pickles used for gain tuning when optimization is disabled.",
     )
     init_parser.add_argument("--robotcfg-template", default=None, help="Existing ROBOTCFG.CFG used as template for firmware exports.")
+    init_parser.add_argument(
+        "--mujoco",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Collect the identification logs from a MuJoCo deployment instead of the robot, "
+            "so `run` never stops to wait for an SD card (mujoco_deployment in experiment.yaml)."
+        ),
+    )
+    init_parser.add_argument(
+        "--iterations",
+        type=int,
+        default=None,
+        help=(
+            "How many iterations the experiment should end up with; `run` continues until "
+            "that one is finalized. Needs --mujoco to get there unattended."
+        ),
+    )
 
     stage_commands = {
         "plan-id-trajectory": "Optimize (or copy) the identification trajectory and export the Pololu JSN.",
+        "simulate-deployment": (
+            "Stand in for the robot: drive the identification trajectory in the MuJoCo "
+            "plant and write binary TRxx logs into data/."
+        ),
         "decode-logs": "Decode binary SD-card logs in data/ to csv.",
         "identify": (
             "Identify robot parameters from every log in data/: one run per log, "
@@ -136,6 +168,31 @@ def build_parser() -> argparse.ArgumentParser:
                     "default: every log directly in data/, fitted jointly."
                 ),
             )
+        if command == "simulate-deployment":
+            stage_parser.add_argument(
+                "--num-logs",
+                type=int,
+                default=None,
+                help="Deployments to run (default: mujoco_deployment.num_logs in experiment.yaml).",
+            )
+        if command == "run":
+            stage_parser.add_argument(
+                "--simulate-deployment",
+                action="store_true",
+                help=(
+                    "Fill data/ with a MuJoCo deployment instead of stopping to wait for robot "
+                    "logs (always on when mujoco_deployment.enabled)."
+                ),
+            )
+            stage_parser.add_argument(
+                "--iterations",
+                type=int,
+                default=None,
+                help=(
+                    "Keep going until this iteration is finalized (default: num_iterations in "
+                    "experiment.yaml). A target total, not a count of iterations to add."
+                ),
+            )
     return parser
 
 
@@ -160,6 +217,10 @@ def main(argv: list[str] | None = None) -> int:
             overrides["baseline_tuning_trajectories_dir"] = args.baseline_tuning_trajectories_dir
         if args.robotcfg_template is not None:
             overrides["robotcfg_template"] = args.robotcfg_template
+        if args.mujoco is not None:
+            overrides["mujoco_deployment"] = {"enabled": args.mujoco}
+        if args.iterations is not None:
+            overrides["num_iterations"] = args.iterations
         stages.stage_init(args.experiment, overrides)
         return 0
 
@@ -168,9 +229,23 @@ def main(argv: list[str] | None = None) -> int:
         stages.stage_status(experiment)
         return 0
 
+    if args.command == "run":
+        # `run` resolves the iteration itself: whether one was named changes
+        # how it reads the experiment's iteration target.
+        stages.stage_run(
+            experiment,
+            args.iteration,
+            log=args.log,
+            simulate_deployment=args.simulate_deployment,
+            num_iterations=args.iterations,
+        )
+        return 0
+
     iteration = experiment.resolve_iteration(args.iteration)
     if args.command == "plan-id-trajectory":
         stages.stage_plan_identification_trajectory(experiment, iteration)
+    elif args.command == "simulate-deployment":
+        stages.stage_simulate_deployment(experiment, iteration, num_logs=args.num_logs)
     elif args.command == "decode-logs":
         stages.stage_decode_logs(experiment, iteration)
     elif args.command == "identify":
@@ -183,8 +258,6 @@ def main(argv: list[str] | None = None) -> int:
         stages.stage_tune_gains(experiment, iteration)
     elif args.command == "finalize":
         stages.stage_finalize(experiment, iteration)
-    elif args.command == "run":
-        stages.stage_run(experiment, iteration, log=args.log)
     return 0
 
 
