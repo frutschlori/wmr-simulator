@@ -49,6 +49,7 @@ def main():
     # Must be positive to be identified; the default 0 keeps the limit disabled
     # (0 * exp(theta) = 0 in the log-space optimizer).
     parser.add_argument("--init-a-slip-max", type=float, default=5.0)
+    parser.add_argument("--identify-a-slip-max", action=argparse.BooleanOptionalAction, default=False)
 
     # Path to real experiment log
     parser.add_argument("--pololu-log", type=str,
@@ -80,6 +81,7 @@ def main():
         reference_trajectories_dir=None,
         window_length=args.window_length,
         target_log=pololu_log,
+        identify_a_slip_max=args.identify_a_slip_max,
     )
     pipeline = result["pipeline"]
     print_param_block("Initial guess:", init_params)

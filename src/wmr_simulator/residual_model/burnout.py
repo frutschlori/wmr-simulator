@@ -82,15 +82,33 @@ def soft_clip(x, limit, sharpness: int = SOFT_CLIP_SHARPNESS):
     )
 
 
-def traction_limited_ground_speeds(ground_speeds, motor_speeds, a_slip_max, wheel_radius, dt):
+def traction_limited_ground_speeds(
+    ground_speeds, motor_speeds, a_slip_max, wheel_radius, dt, smooth: bool = True
+):
     """Rate-limit the ground-contact wheel speeds toward the motor-side speeds.
 
     The maximum ground-side wheel acceleration is a_slip_max / r (bounded tire
     force, Wong 2008 Ch. 1). ``a_slip_max = 0`` disables the limit: the ground
     speeds follow the motor speeds exactly (ideal traction).
+
+    ``smooth=False`` saturates with a plain ``clip`` instead of :func:`soft_clip`.
+    The soft clip exists only so that ``d/d a_slip_max`` is nonzero below the
+    limit -- see the module docstring -- so it is dead weight wherever nothing
+    differentiates with respect to ``a_slip_max``, and it is not cheap: it is
+    ~25 ops against the clip's 2, evaluated once per step of the replay scan
+    whose body is otherwise just the kinematics. Measured on a real 5 s log,
+    a full 2000-step identification fit goes 4.42 s -> 0.41 s, with the
+    identified parameters moving 3e-4 relative. Callers pass ``False`` exactly
+    when ``a_slip_max`` is held fixed (identification's
+    ``identify_a_slip_max``); the trajectory designer, whose FIM is the reason
+    the soft clip exists, always leaves it on.
     """
     delta = motor_speeds - ground_speeds
     max_step = a_slip_max / wheel_radius * dt
+    if not smooth:
+        return jnp.where(
+            a_slip_max > 0.0, ground_speeds + jnp.clip(delta, -max_step, max_step), motor_speeds
+        )
     # Two separate degenerate cases, and they want opposite answers: a_slip_max
     # of 0 disables the limit (follow the motor exactly), whereas a dt of 0 is a
     # zero-length step and must freeze the ground speeds. Both would divide by

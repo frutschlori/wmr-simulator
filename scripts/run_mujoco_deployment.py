@@ -14,7 +14,7 @@ the bridged trajectory and chains each run's start pose onto the last.
 Examples
 --------
     # one run of the iteration's identification trajectory
-    uv run --extra cuda python scripts/run_mujoco_deployment.py \
+    uv run python scripts/run_mujoco_deployment.py \
         --config experiments/exp01/iteration_00/ROBOTCFG.CFG \
         --trajectory experiments/exp01/iteration_00/identification_trajectory/identification_trajectory.JSN \
         --output-dir experiments/exp01/iteration_00/data

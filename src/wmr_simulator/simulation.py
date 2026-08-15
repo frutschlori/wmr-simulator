@@ -524,6 +524,7 @@ def replay_simulation_log(
     target_log: SimulationLog,
     robot_params: PhysicalParams,
     replay_segment_plan,
+    smooth_traction_limit: bool = True,
 ) -> SimulationLog:
     predicted_poses = replay_pose_states(
         robot=robot,
@@ -535,6 +536,7 @@ def replay_simulation_log(
         duty_cycles=target_log.wheel.duty_cycle,
         robot_params=robot_params,
         replay_segment_plan=replay_segment_plan,
+        smooth_traction_limit=smooth_traction_limit,
     )
     return SimulationLog(
         reference=target_log.reference,
@@ -559,7 +561,15 @@ def replay_pose_states(
     duty_cycles: jax.Array,
     robot_params: PhysicalParams,
     replay_segment_plan,
+    smooth_traction_limit: bool = True,
 ) -> jax.Array:
+    """Integrate the logged wheel speeds forward, re-anchoring at window resets.
+
+    ``smooth_traction_limit=False`` swaps the burnout model's smooth saturation
+    for a plain clip. This scan's body is nothing but the traction limit and the
+    kinematics, so the smooth version costs ~30x here -- pass False whenever
+    a_slip_max is not being differentiated (burnout.traction_limited_ground_speeds).
+    """
     segment_dt, wheel_indices, reset_mask, reset_pose_indices, record_indices = replay_segment_plan
     segment_dt = jnp.asarray(segment_dt, dtype=jnp.float32)
     wheel_indices = jnp.asarray(wheel_indices, dtype=jnp.int32)
@@ -601,6 +611,7 @@ def replay_pose_states(
             base_diameter=robot_params.base_diameter,
             a_slip_max=robot_params.a_slip_max,
             dt=dt,
+            smooth_traction_limit=smooth_traction_limit,
         )
         return next_state, next_state.pose
 

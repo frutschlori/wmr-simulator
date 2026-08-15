@@ -10,12 +10,12 @@ environment variable *before* mujoco is imported:
 Examples
 --------
     # 6 s of driving a 1.2 m radius arc, tracking camera
-    uv run --extra cuda python scripts/render_mujoco_video.py \
+    uv run python scripts/render_mujoco_video.py \
         --duty-left 0.36 --duty-right 0.42 --duration 6 \
         --out visualize/mujoco_arc.mp4
 
     # force software rendering if EGL is unavailable
-    MUJOCO_GL=osmesa uv run --extra cuda python scripts/render_mujoco_video.py
+    MUJOCO_GL=osmesa uv run python scripts/render_mujoco_video.py
 
     # drive it from a wheel-speed callback instead of constant duty
     #   (this is what the firmware port will do in step 4 of the plan)
