@@ -311,9 +311,20 @@ class TrajectoryOptimizationPipeline:
         offset_heading_step_factor: float = 1.0,
         min_tangent_fraction: float = DEFAULT_MIN_TANGENT_FRACTION,
         kimotor_fim_scale: float | None = None,
+        motion_limits: dict | None = None,
         residual_model=None,
     ):
         self.problem = ProblemDefinition(problem_path)
+        # Motion limits the *constraint term* is written against, as a partial
+        # robot-config block (v_max, a_max, a_max_lateral, omega_max,
+        # alpha_max) overriding the problem yaml's. The plant is untouched --
+        # this only moves the bar the designed curve is held under, so one
+        # problem can be designed against a gentler envelope (identification,
+        # which the robot has to drive open loop from a hand placement) than
+        # the one gain tuning designs against.
+        self.motion_limit_overrides = (
+            {} if motion_limits is None else {key: float(value) for key, value in motion_limits.items()}
+        )
         # See stabilization_loss_from_control_points: the floor |dpos/ds| is
         # held above, as a fraction of the curve's own rms tangent, so the
         # optimizer cannot buy information by stalling the curve into a cusp and
@@ -506,7 +517,10 @@ class TrajectoryOptimizationPipeline:
         return default_measurement_variances(self.problem.estimator_cfg)
 
     def motion_limits(self) -> dict[str, jnp.ndarray]:
-        return motion_limits_from_robot_config(self.problem.robot_cfg)
+        robot_cfg = self.problem.robot_cfg
+        if self.motion_limit_overrides:
+            robot_cfg = {**robot_cfg, **self.motion_limit_overrides}
+        return motion_limits_from_robot_config(robot_cfg)
 
     def constraint_weights(self, scale: float = 1.0, component_weights: dict | None = None) -> dict[str, jnp.ndarray]:
         return constraint_weights(scale=scale, component_weights=component_weights)

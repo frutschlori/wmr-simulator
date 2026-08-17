@@ -58,7 +58,7 @@ def main():
     # more of them means finer detail but a curve that reacts harder to each
     # one, so the motion constraints bind sooner (see bspline.py).
     parser.add_argument("--num-control-points", type=int, default=5)
-    parser.add_argument("--trajectory-seed", type=int, default=1)
+    parser.add_argument("--trajectory-seed", type=int, default=0)
     parser.add_argument("--criterion", choices=list(CRITERIA), default=DEFAULT_CRITERION)
     # What happens to the rollout start offsets the FIM is averaged over:
     # 'random' keeps the frozen draw, 'static' a deterministic spread, and the

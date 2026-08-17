@@ -24,6 +24,9 @@ An experiment lives in its own directory and holds one folder per iteration:
                                     earlier iteration's data; subdirectories are for
                                     baseline comparison runs and stay out of the
                                     identification)
+        data/benchmark/             repeat runs of the fixed baseline reference under
+                                    this iteration's controller (benchmark stage);
+                                    the progress plot scores every iteration on them
         results/                    identification.yaml, gains.yaml, residual_model.pkl
         visualize/                  plots of this iteration
       iteration_02/                 created by the finalize stage from iteration_01 results
@@ -37,7 +40,11 @@ Typical usage (run all stages that can proceed; stops when robot data is needed)
 
 MuJoCo instead of the robot: the deployment drives the iteration's
 identification trajectory in the hidden MuJoCo plant and writes binary TRxx
-logs into that iteration's data/, so nothing downstream changes. Either fill the current iteration's data/ on demand:
+logs into that iteration's data/, so nothing downstream changes. It also
+records the benchmark -- repeat runs of one fixed baseline reference, the same
+one in every iteration -- into data/benchmark/, which is what the
+pipeline-progress plot scores each iteration on.
+Either fill the current iteration's data/ on demand:
     python scripts/run_active_learning.py run --experiment experiments/exp01 --simulate-deployment
 or set the experiment up to collect its own data and run unattended for a fixed
 number of iterations:
@@ -49,6 +56,7 @@ rerun an earlier one; delete a stage's outputs to force a rerun under `run`):
     python scripts/run_active_learning.py init --experiment experiments/exp01
     python scripts/run_active_learning.py plan-id-trajectory      --experiment experiments/exp01
     python scripts/run_active_learning.py simulate-deployment     --experiment experiments/exp01
+    python scripts/run_active_learning.py benchmark               --experiment experiments/exp01
     python scripts/run_active_learning.py decode-logs             --experiment experiments/exp01
     python scripts/run_active_learning.py identify                --experiment experiments/exp01 --log TR00.csv
     python scripts/run_active_learning.py train-residual          --experiment experiments/exp01
@@ -139,6 +147,10 @@ def build_parser() -> argparse.ArgumentParser:
             "Stand in for the robot: drive the identification trajectory in the MuJoCo "
             "plant and write binary TRxx logs into data/."
         ),
+        "benchmark": (
+            "Drive the fixed baseline reference (benchmark.trajectory) in the MuJoCo plant "
+            "under this iteration's controller and write the runs into data/benchmark/."
+        ),
         "decode-logs": "Decode binary SD-card logs in data/ to csv.",
         "identify": (
             "Identify robot parameters from every log in data/: one run per log, "
@@ -174,6 +186,13 @@ def build_parser() -> argparse.ArgumentParser:
                 type=int,
                 default=None,
                 help="Deployments to run (default: mujoco_deployment.num_logs in experiment.yaml).",
+            )
+        if command == "benchmark":
+            stage_parser.add_argument(
+                "--num-runs",
+                type=int,
+                default=None,
+                help="Benchmark runs to record (default: benchmark.num_runs in experiment.yaml).",
             )
         if command == "run":
             stage_parser.add_argument(
@@ -246,6 +265,8 @@ def main(argv: list[str] | None = None) -> int:
         stages.stage_plan_identification_trajectory(experiment, iteration)
     elif args.command == "simulate-deployment":
         stages.stage_simulate_deployment(experiment, iteration, num_logs=args.num_logs)
+    elif args.command == "benchmark":
+        stages.stage_run_benchmark(experiment, iteration, num_runs=args.num_runs)
     elif args.command == "decode-logs":
         stages.stage_decode_logs(experiment, iteration)
     elif args.command == "identify":

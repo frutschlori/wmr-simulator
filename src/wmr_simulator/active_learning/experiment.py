@@ -25,6 +25,19 @@ An experiment lives in its own directory and holds one folder per iteration:
                                     With mujoco_deployment.enabled the logs are
                                     written here by the simulate-deployment
                                     stage instead of carried over from the robot)
+        data/benchmark/             repeat runs of the fixed baseline reference,
+                                    recorded by the benchmark stage under this
+                                    iteration's deployed controller; the progress
+                                    plot scores every iteration on them
+        data/benchmark_static/      the same runs under this iteration's
+                                    static-gain controller, so the two
+                                    controller options can be compared --
+                                    ROBOTCFG_static.CFG from iteration 2 on, and
+                                    in iteration 1 the stock ROBOTCFG.CFG, whose
+                                    parametrization is still the identity and
+                                    which is therefore the only set it records
+        benchmark/                  the baseline reference as it was driven
+                                    (bridged when it does not close on itself)
         results/                    identification.yaml, gains.yaml, residual_model.pkl
         visualize/                  plots of this iteration
       iteration_02/                 created by the finalize stage from iteration_01 results
@@ -92,6 +105,33 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         "start_offset_radius": 0.1,
         "start_offset_angle": 0.3,
     },
+    # Fixed baseline reference every iteration is scored on. Unlike the
+    # identification and tuning trajectories this one never changes, so the
+    # progress plot compares like with like across the whole experiment: the
+    # only thing that moved between two iterations' benchmark runs is the
+    # controller that drove them. Needs a plant to drive it, i.e.
+    # mujoco_deployment.enabled (or `run --simulate-deployment`); on the real
+    # robot the equivalent runs are recorded by hand into data/<name>/.
+    "benchmark": {
+        "trajectory": "trajectory_exports/baselines/circle_medium.JSN",
+        # Consecutive runs per iteration, chained the way the robot repeats a
+        # reference: only the first is placed by hand.
+        "num_runs": 5,
+        # A run that ends further than this from the reference's start point
+        # did not come back, so the next one cannot start where it left off --
+        # it is placed by hand again instead, exactly as it would be on the
+        # robot.
+        "divergence_radius": 0.2,
+        # Hand-placement spread, the same distribution the identification
+        # deployment and the gain tuner's start offsets use.
+        "start_offset_radius": 0.1,
+        "start_offset_angle": 0.3,
+        # A reference that does not end where it starts gets a wait + bridge
+        # path back appended (pololu.bridge_exporter), which is what makes
+        # chaining possible at all; a self-closing one is driven as it is.
+        "bridge_wait_time": 1.5,
+        "bridge_time": 8.5,
+    },
     "identification_trajectory": {
         # Design on the residual-augmented plant, using the *previous*
         # iteration's residual -- this stage runs before this iteration has any
@@ -101,7 +141,7 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         # residual corrects a plant that has since been re-identified.
         "use_residual_model": False,
         "opt_steps": 500,
-        "learning_rate": 2e-3,
+        "learning_rate": 1e-2,
         "num_control_points": 6,
         "time_scaling": "s-curve",
         "window_length": 50,
@@ -109,15 +149,30 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         # sensitivity makes the FIM objective stiff; the burnout model then
         # stays at its nominal value during trajectory optimization.
         "fim_a_slip_max": False,
+        # Motion limits the constraint term of *this* design is written against,
+        # overriding the problem yaml's robot block. The plant is untouched --
+        # only the bar the curve is held under moves. Kept separate from the
+        # tuning design because the two are driven under different conditions:
+        # a tuning trajectory is rolled out in sim from a small start offset,
+        # while this one is placed by hand and driven on the robot, so it is
+        # worth designing it inside a gentler envelope than the hardware's
+        # nominal one. Drop a key to fall back to the problem yaml's value.
+        "motion_limits": {
+            "v_max": 1.5,          # m/s
+            "a_max": 2.5,          # m/s^2
+            "a_max_lateral": 2.5,  # m/s^2
+            "omega_max": 5.0,      # rad/s
+            "alpha_max": 15.0,     # rad/s^2
+        },
         # <name>_bridge.JSN is always exported alongside (same directory): the
         # trajectory plus a wait at the goal and a bridge path back to the
         # start, so the experiment can be repeated without repositioning the robot.
-        "bridge_wait_time": 1.0,
-        "bridge_time": 5.0,
+        "bridge_wait_time": 1.5,
+        "bridge_time": 8.5,
     },
     "identification": {
         "steps": 500,
-        "learning_rate": 5e-4,
+        "learning_rate": 1e-3,
         "window_length": None,
         # Robust deviation (modified z-score) above which a log's own parameter
         # estimate counts as disagreeing with the rest of the batch and is left
@@ -125,12 +180,7 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         # 4 logs to be meaningful (identification.outliers).
         "outlier_z_threshold": 3.5,
         # Fit a_slip_max along with the rest. Disable when the recorded
-        # trajectories never approach the traction limit (slow runs): the
-        # parameter is then unobservable, its per-log estimates scatter wildly,
-        # and whichever value wins still lands in problem_identified.yaml. Held
-        # at the robot config's value instead, with the burnout model still
-        # active in the rollout -- the counterpart of
-        # identification_trajectory.fim_a_slip_max.
+        # trajectories never approach the traction limit (slow runs)
         "identify_a_slip_max": False,
         # Traction limit init (m/s^2; burnout model, residual_model.burnout).
         # Used when the current robot config carries a zero value; must be
@@ -144,12 +194,12 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         "num_experts": 4,
         "hidden_sizes": [16, 16],
         # Per-matrix spectral-norm cap on the experts (Lipschitz bound); 0 disables.
-        "spectral_norm_cap": 1.5,
+        "spectral_norm_cap": 1.0,
         # Gaussian gate bandwidth = intra-cluster RMS distance * this (>1 overlaps).
         "gate_bandwidth_scale": 1.0,
         # Null "zero expert" distance in bandwidths; beyond it the residual -> 0.
         "ood_sigma": 3.0,
-        "epochs": 500,
+        "epochs": 1000,
         "batch_size": 16384,
         "learning_rate": 5e-4,
         "validation_split": 0.2,
@@ -170,15 +220,30 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         # trajectory is only informative about the gains under the conditions
         # the tuner scores them under. Falls back to the nominal plant when no
         # model was trained (use_residual_model off).
-        "use_residual_model": True,
+        "use_residual_model": False,
         "num_trajectories": 10,
         "opt_steps": 50,
         "learning_rate": 3e-2,
-        "num_control_points": 6,
+        "num_control_points": 5,
         "time_scaling": "s-curve",
         "constraint_weight_jitter": 0.4,
         "window_length": 50,
-        "kimotor_fim_scale": 1.0,
+        "kimotor_fim_scale": 5.0,
+        "start_offset_mode": "optimize",
+        "constraint_component_weights": {
+            "v": 1.0,
+            "a": 1.0,
+            "lateral": 1.0,
+            "omega": 1.0,
+            "alpha": 0.5,
+        },
+        # Sharpness of the smooth max in the constraint penalty. It is
+        # logsumexp(beta*g)/beta, which overshoots the true max by up to
+        # log(num_samples)/beta -- ~0.50 at beta=10 against ~0.25 at beta=20 --
+        # so a *lower* beta holds the design further inside the limits. At 20
+        # the designs run at up to 0.94x alpha_max, where 0.75x is the measured
+        # edge of what the closed loop tracks.
+        "constraint_smooth_max_beta": 10.0,
     },
     # Gain-tuning hyperparameters come from the standalone script's defaults
     # (gain_tuning.defaults.GAIN_TUNING_DEFAULTS), so there is a single place to
@@ -190,6 +255,14 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
     "gain_tuning": {
         **GAIN_TUNING_DEFAULTS,
         "presearch_relative_range": 0.3,
+        # Roll the gain tuning out on the residual-augmented plant. Separate
+        # from the top-level use_residual_model so the residual can be trained
+        # and inspected every iteration without being allowed to drive the
+        # gains: a residual fitted to logs whose duty saturated carries a large
+        # unexplained yaw term, and the tuner rolls that out as if it were the
+        # robot. Requires the top-level flag as well -- with no model trained
+        # there is nothing to use.
+        "use_residual_model": False,
     },
 }
 
@@ -237,6 +310,28 @@ class IterationPaths:
     @property
     def data_dir(self) -> Path:
         return self.root / "data"
+
+    @property
+    def benchmark_dir(self) -> Path:
+        """The baseline reference as this iteration drove it (bridged or not)."""
+        return self.root / "benchmark"
+
+    @property
+    def benchmark_data_dir(self) -> Path:
+        """Benchmark recordings; a data/ subdirectory, so the identify and
+        residual stages (which only look one level deep) never see them."""
+        return self.data_dir / "benchmark"
+
+    @property
+    def benchmark_static_data_dir(self) -> Path:
+        """Benchmark recordings of the static-gain baseline controller, beside
+        the deployed controller's and equally invisible to the identify and
+        residual stages."""
+        return self.data_dir / "benchmark_static"
+
+    @property
+    def benchmark_result(self) -> Path:
+        return self.results_dir / "benchmark.yaml"
 
     @property
     def results_dir(self) -> Path:

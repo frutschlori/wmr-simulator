@@ -247,6 +247,74 @@ def plot_logged_summary(
     print(f"Log summary PDF saved at: {output_path}")
     return output_path
 
+
+def plot_logged_trajectories(
+    logs,
+    labels,
+    *,
+    out_prefix: str = "logged_trajectories",
+    out_dir: str | Path = "visualize",
+) -> Path:
+    """One XY panel holding every logged trajectory of an iteration, so the set
+    can be judged without opening each per-log summary. ``logs`` is a list of
+    SimulationLogs (pololu.log_loader) with one ``labels`` entry each; each log
+    gets its own color, its reference dashed and its measured pose solid. The
+    legend carries only the two line styles -- the logs are named by an
+    annotation on each measured path, since a per-log legend of a whole
+    iteration is unreadable."""
+    plt = _plot_module()
+    from matplotlib.lines import Line2D
+
+    from wmr_simulator.visualization.trajectories import decimate_path
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    output_path = out_dir / f"{out_prefix}.pdf"
+
+    color_cycle = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+    fig, ax = plt.subplots(figsize=(9, 9))
+    for index, (log, label) in enumerate(zip(logs, labels)):
+        color = color_cycle[index % len(color_cycle)]
+        reference = decimate_path(np.asarray(log.reference.states, dtype=float)[:, :2])
+        measured = decimate_path(np.asarray(log.pose.states, dtype=float)[:, :2])
+        ax.plot(reference[:, 0], reference[:, 1], color=color, linestyle="--", linewidth=1.0, alpha=0.9)
+        ax.plot(measured[:, 0], measured[:, 1], color=color, linewidth=1.0)
+        if not len(measured):
+            continue
+        ax.plot(measured[0, 0], measured[0, 1], marker="o", markersize=4, color=color)
+        # Each name sits at its own fraction along its own path: the runs of one
+        # iteration are chained repeats of the same trajectory, so labels pinned
+        # to the start point all land on top of each other.
+        anchor = measured[int(round((index + 1) / (len(logs) + 1) * (len(measured) - 1)))]
+        ax.annotate(
+            label,
+            xy=(anchor[0], anchor[1]),
+            xytext=(4, 4),
+            textcoords="offset points",
+            color=color,
+            fontsize=8,
+        )
+
+    ax.set_xlabel("x [m]")
+    ax.set_ylabel("y [m]")
+    ax.set_title("Logged Trajectories")
+    ax.set_aspect("equal", adjustable="box")
+    ax.grid(True)
+    ax.legend(
+        handles=[
+            Line2D([], [], color="0.3", linestyle="--", linewidth=1.0, label="Reference"),
+            Line2D([], [], color="0.3", linewidth=1.0, label="Logged"),
+        ],
+        loc="best",
+    )
+
+    fig.tight_layout()
+    fig.savefig(output_path, bbox_inches="tight", transparent=False, facecolor="white")
+    plt.close(fig)
+    print(f"Logged trajectories PDF saved at: {output_path}")
+    return output_path
+
+
 def plot_run_comparison(
     log_groups,
     labels,

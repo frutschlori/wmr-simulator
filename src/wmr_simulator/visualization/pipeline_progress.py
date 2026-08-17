@@ -5,15 +5,18 @@ One figure, three panels:
 - a gain-history line plot (one line per gain: kx, ky, kth, kpmotor,
   kimotor), x = iteration, styled like the joint-tuning gain-history plot
   (``visualization.joint_tuning.plot_joint_tuning_history``, whose gain panel
-  it shares a helper with); gains are the controller gains deployed to record
-  each iteration (see ``evaluate_pipeline_progress``);
+  it shares a helper with); gains are the *static* controller gains deployed to
+  record each iteration -- a gain parametrization scales them per sample, so
+  its base gains are not a number worth plotting (see ``_static_gains``);
 - two loss panels laid out exactly like the gain-tuning loss-history plot,
-  evaluated on Gain-MLP circle benchmark runs (one point = run mean)
+  evaluated on the fixed-baseline benchmark runs (one point = run mean)
   (``visualization.identification.plot_loss_history``): panel 1 carries the
   tracking loss (left) and velocity-tracking loss (right); panel 2 carries the
   total objective (left) and input-delta loss (right). Solid = closed-loop sim
   of the recording controller, dashed = the actual recorded run, one point per
-  iteration.
+  iteration, with a shaded band over the individual runs behind the recorded
+  mean -- the runs are chained, so one of them diverging is a result rather
+  than scatter an average may quietly absorb.
 
 The per-iteration records (gains + sim/real loss terms) are computed by
 ``active_learning.progress.evaluate_pipeline_progress`` and only rendered here.
@@ -34,7 +37,12 @@ from wmr_simulator.visualization.joint_tuning import _plot_gain_lines
 
 def _plot_metric_pair(ax, right_ax, records, left_key, right_key, left_color, right_color, left_label, right_label):
     """Plot one sim/real metric on ``ax`` (left) and another on ``right_ax``
-    (twin), solid for sim and dashed for real, one point per iteration."""
+    (twin), solid for sim and dashed for real, one point per iteration.
+
+    The recorded curve is the mean over an iteration's benchmark runs; the band
+    behind it spans the individual runs, so an iteration whose runs disagree
+    cannot pass for one whose runs agree.
+    """
     handles = []
     xs = [rec["index"] for rec in records]
     for axis, key, color, label in (
@@ -45,6 +53,11 @@ def _plot_metric_pair(ax, right_ax, records, left_key, right_key, left_color, ri
         real = [rec["real"][key] for rec in records]
         handles.append(axis.plot(xs, sim, color=color, linestyle="-", linewidth=1.9, label=f"Sim {label}")[0])
         handles.append(axis.plot(xs, real, color=color, linestyle="--", linewidth=1.7, label=f"Real {label}")[0])
+        runs = [[run[key] for run in rec["real_runs"]] for rec in records]
+        if any(len(values) > 1 for values in runs):
+            lower = [min(values) if values else np.nan for values in runs]
+            upper = [max(values) if values else np.nan for values in runs]
+            axis.fill_between(xs, lower, upper, color=color, alpha=0.15, linewidth=0)
     return handles
 
 
@@ -57,6 +70,7 @@ def plot_pipeline_progress(records, experiment_root, out_path=None, out_prefix="
     ``<experiment_root>/visualize/<out_prefix>.pdf``.
     """
     experiment_root = Path(experiment_root)
+    records = [{**rec, "real_runs": rec.get("real_runs") or []} for rec in records]
     gain_records = [rec for rec in records if rec["gains"] is not None]
     loss_records = [rec for rec in records if rec["sim"] is not None and rec["real"] is not None]
     if not gain_records and not loss_records:
@@ -70,7 +84,7 @@ def plot_pipeline_progress(records, experiment_root, out_path=None, out_prefix="
         os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
 
     fig = plt.figure(figsize=(16, 9))
-    fig.suptitle(f"Pipeline Progress: {experiment_root.name} (circle benchmark)", fontsize=16)
+    fig.suptitle(f"Pipeline Progress: {experiment_root.name} (baseline benchmark)", fontsize=16)
     ax_gains = plt.subplot2grid((2, 2), (0, 0), colspan=2, fig=fig)
     ax_track = plt.subplot2grid((2, 2), (1, 0), fig=fig)
     ax_total = plt.subplot2grid((2, 2), (1, 1), fig=fig)
@@ -85,10 +99,10 @@ def plot_pipeline_progress(records, experiment_root, out_path=None, out_prefix="
         _plot_gain_lines(ax_gains, indices, gains, _GAIN_NAMES, marker="o")
         ax_gains.set_xlabel("iteration")
         ax_gains.set_xticks(indices)
-        ax_gains.set_title("Controller gains over iterations")
+        ax_gains.set_title("Static controller gains over iterations")
     else:
-        ax_gains.text(0.5, 0.5, "no tuned gains", ha="center", va="center", transform=ax_gains.transAxes)
-        ax_gains.set_title("Controller gains over iterations")
+        ax_gains.text(0.5, 0.5, "no static gains", ha="center", va="center", transform=ax_gains.transAxes)
+        ax_gains.set_title("Static controller gains over iterations")
 
     # --- loss panels (sim solid, real dashed) --------------------------------
     if loss_records:
@@ -129,7 +143,7 @@ def plot_pipeline_progress(records, experiment_root, out_path=None, out_prefix="
         ax_total.legend(handles=handles, loc="best", fontsize="small")
     else:
         for ax in (ax_track, ax_total):
-            ax.text(0.5, 0.5, "no recorded runs", ha="center", va="center", transform=ax.transAxes)
+            ax.text(0.5, 0.5, "no benchmark runs", ha="center", va="center", transform=ax.transAxes)
 
     fig.tight_layout(rect=[0, 0, 1, 0.96])
     fig.savefig(out_path, bbox_inches="tight", transparent=False, facecolor="white")

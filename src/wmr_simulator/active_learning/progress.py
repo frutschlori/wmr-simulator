@@ -1,10 +1,22 @@
 """Cross-iteration evaluation of a full active-learning pipeline run.
 
-For every iteration this evaluates every recorded Gain-MLP circle benchmark in
-``data/with gain MLP/circle`` (also accepting the older
-``data/with_gain_MLP/circle`` spelling) against the reference each run
-tracked. It computes the same four gain-tuning loss terms
-(``tracking, velocity_tracking, input, input_delta``) in two ways:
+For every iteration this evaluates its benchmark recordings -- repeat runs of
+one *fixed* baseline reference, recorded under that iteration's controller --
+against the reference each run tracked. The reference never changes across
+iterations, so a difference between two iterations' points is a difference in
+the controller and nothing else; the iteration's own identification and tuning
+trajectories cannot answer that, being redesigned every iteration.
+
+The runs are read from ``data/benchmark`` (written by the ``benchmark`` stage,
+which drives them in the MuJoCo plant) or, for experiments recorded on the real
+robot by hand, from ``data/with gain MLP/circle`` (also accepting the older
+``data/with_gain_MLP/circle`` spelling) -- in both cases the runs of the
+controller the iteration *deployed*, which is what its gains and schedule
+describe. The static-gain baseline's runs beside them
+(``data/benchmark_static``) are a different controller and are compared with
+these in ``visualization.baseline_runs`` instead. It computes the same
+gain-tuning loss terms (``tracking, velocity_tracking, input, input_delta, omega_delta``) in two
+ways:
 
 - ``sim``  — closed-loop simulation of that iteration's *recording* controller
   (the base gains + error-MLP schedule stored in ``problem_identified.yaml``,
@@ -13,20 +25,22 @@ tracked. It computes the same four gain-tuning loss terms
 - ``real`` — the actual recorded mocap/encoder trajectory of the run.
 
 The two are directly comparable (same controller, same reference).  Each
-iteration's plotted point is the mean over all of its available circle runs,
+iteration's plotted point is the mean over all of its available benchmark runs,
 which shows both how the real tracking improves across iterations and how well
-the identified sim predicts reality.
+the identified sim predicts reality; the individual runs come back alongside it
+(``real_runs``) so the plot can show the spread the mean hides -- the runs are
+chained, so a diverging one is a real outcome rather than noise to be averaged
+away silently.
 
 The heavy lifting (building the pipeline, the closed-loop rollout) lives here;
 ``visualization.pipeline_progress`` only renders the returned records.
 """
 
-import contextlib
-import io
-import tempfile
 from pathlib import Path
 
 import numpy as np
+
+from wmr_simulator.active_learning.experiment import load_yaml
 
 TERM_NAMES = ("tracking", "velocity_tracking", "input", "input_delta", "omega_delta")
 
@@ -157,48 +171,49 @@ def _real_run_terms(pipeline, log, weights):
     )
 
 
-def _gain_mlp_circle_directory(paths) -> Path | None:
-    """Return the direct Gain-MLP circle benchmark directory, if recorded."""
-    for directory_name in ("with gain MLP", "with_gain_MLP"):
-        circle_dir = paths.data_dir / directory_name / "circle"
-        if circle_dir.is_dir():
-            return circle_dir
+def _benchmark_directory(paths) -> Path | None:
+    """Where one iteration's benchmark runs were recorded, if anywhere.
+
+    ``data/benchmark`` is what the benchmark stage writes for the *deployed*
+    controller, and ``data/benchmark_static`` for the static-gain baseline; the
+    two Gain-MLP circle spellings are where the hand-recorded runs of the
+    real-robot experiments live. First match wins, which is what makes this the
+    deployed controller's runs in every case: an iteration with a tuned
+    parametrization has both benchmark directories and ``benchmark`` is the one
+    it deployed, while iteration 1 (and any experiment with the parametrization
+    off) deploys the static controller and has only ``benchmark_static``.
+    """
+    for relative in (
+        Path("benchmark"),
+        Path("benchmark_static"),
+        Path("with gain MLP") / "circle",
+        Path("with_gain_MLP") / "circle",
+    ):
+        directory = paths.data_dir / relative
+        if directory.is_dir():
+            return directory
     return None
 
 
-def _load_gain_mlp_circle_logs(paths) -> list:
-    """Decode and load all direct circle benchmark recordings for one iteration.
+def _load_benchmark_logs(paths) -> list:
+    """Decode and load all benchmark recordings for one iteration.
 
-    Benchmark logs are intentionally nested below ``data/`` and normally kept
-    as SD-card binaries.  Decode them in a temporary directory so progress
-    plots remain read-only with respect to the experiment data.
+    Benchmark logs are intentionally nested below ``data/`` and normally kept as
+    SD-card binaries; ``baseline_runs.load_run_logs`` decodes them into a
+    temporary directory, so progress plots stay read-only with respect to the
+    experiment data.
     """
-    from wmr_simulator.pololu.decode_binary import decode_file
-    from wmr_simulator.pololu.log_loader import load_pololu_traj_control_log
+    from wmr_simulator.active_learning.baseline_runs import load_run_logs
 
-    circle_dir = _gain_mlp_circle_directory(paths)
-    if circle_dir is None:
+    benchmark_dir = _benchmark_directory(paths)
+    if benchmark_dir is None:
         return []
-
-    logs = []
-    with tempfile.TemporaryDirectory(prefix="pipeline_progress_circle_") as temp_name:
-        temporary_dir = Path(temp_name)
-        for log_path in sorted(path for path in circle_dir.glob("TR*") if path.is_file()):
-            csv_path = log_path if log_path.suffix.lower() == ".csv" else temporary_dir / f"{log_path.name}.csv"
-            if csv_path != log_path:
-                with contextlib.redirect_stdout(io.StringIO()):
-                    if not decode_file(str(log_path), str(csv_path)):
-                        print(f"Progress evaluation skipped unreadable log: {log_path}")
-                        continue
-            try:
-                logs.append(load_pololu_traj_control_log(csv_path, clip_after_first_trajectory=True))
-            except ValueError as error:
-                print(f"Progress evaluation skipped {log_path}: {error}")
-    return logs
+    return [log for _, log in load_run_logs(benchmark_dir)]
 
 
 def _evaluate_iteration(experiment, index, weights, num_realizations, seed):
-    """Return circle-benchmark sim/real terms averaged over one iteration."""
+    """Benchmark sim/real terms of one iteration: the two run means, plus the
+    per-run real terms behind the second of them."""
     import jax
 
     from wmr_simulator.active_learning.stages import _log_gain_parametrization
@@ -206,7 +221,7 @@ def _evaluate_iteration(experiment, index, weights, num_realizations, seed):
     import jax.numpy as jnp
 
     paths = experiment.paths(index)
-    logs = _load_gain_mlp_circle_logs(paths)
+    logs = _load_benchmark_logs(paths)
     if not logs:
         return None
     problem_path = paths.problem_identified if paths.problem_identified.is_file() else paths.problem
@@ -239,7 +254,11 @@ def _evaluate_iteration(experiment, index, weights, num_realizations, seed):
 
     if not sim_terms:
         return None
-    return np.mean(np.stack(sim_terms), axis=0), np.mean(np.stack(real_terms), axis=0)
+    return (
+        np.mean(np.stack(sim_terms), axis=0),
+        np.mean(np.stack(real_terms), axis=0),
+        np.stack(real_terms),
+    )
 
 
 def _terms_to_dict(terms):
@@ -248,20 +267,39 @@ def _terms_to_dict(terms):
     return record
 
 
+def _static_gains(paths):
+    """The iteration's *static* controller gains, or None when unavailable.
+
+    A deployed controller may run a gain parametrization, whose base gains are
+    not the applied ones (the error MLP scales them per sample) and so cannot
+    be reduced to one number per gain worth plotting. Every iteration created
+    from a tuning run that had a parametrization enabled therefore carries the
+    same tuning's independent static run in ``robot_config_static_gains.yaml``
+    (written by ``finalize``), which is the comparable number and what is
+    plotted. Without that file -- iteration 1, or an experiment with no
+    parametrization, where the deployed gains *are* static -- the iteration's
+    ``problem.yaml`` gains are used.
+    """
+    if paths.robot_config_static.is_file():
+        config = load_yaml(paths.robot_config_static)
+    elif paths.problem.is_file():
+        config = load_yaml(paths.problem)
+    else:
+        return None
+    return np.asarray([float(gain) for gain in config["controller"]["gains"]], dtype=float)
+
+
 def evaluate_pipeline_progress(experiment):
     """Per-iteration gains and sim/real loss terms across the whole pipeline.
 
     Returns a list (sorted by iteration) of dicts with keys ``index``,
-    ``gains`` (the base controller gains deployed to *record* the iteration,
-    from its ``problem.yaml``; iteration 1 is the initial hand-set gains, later
-    iterations are the previous iteration's tuned result) and ``sim`` / ``real``
-    (loss-term dicts, None when the iteration has no Gain-MLP circle benchmark
-    runs). The recording gains are used (rather than the iteration's own tuned
-    ``results/gains.yaml``) so every iteration is represented and the gains line
-    up with the controller the sim/real losses are evaluated under.
+    ``gains`` (the *static* controller gains available to the iteration, see
+    ``_static_gains``), ``sim`` / ``real`` (loss-term dicts, None when the
+    iteration has no benchmark runs) and ``real_runs`` (one loss-term dict per
+    benchmark run, the spread behind ``real``). The gains deployed to *record*
+    the iteration are used (rather than the iteration's own tuned
+    ``results/gains.yaml``) so every iteration is represented.
     """
-    from wmr_simulator.active_learning.stages import _log_gain_parametrization
-
     config = _resolve_gain_tuning_config(experiment)
     weights = (
         float(config["velocity_tracking_weight"]),
@@ -275,17 +313,18 @@ def evaluate_pipeline_progress(experiment):
     records = []
     for index in experiment.iteration_indices():
         paths = experiment.paths(index)
-        gains = None
-        if paths.problem.is_file():
-            base_gains, _ = _log_gain_parametrization(paths)
-            gains = np.asarray(base_gains, dtype=float)
+        gains = _static_gains(paths)
 
         evaluated = _evaluate_iteration(experiment, index, weights, num_realizations, seed)
         sim = real = None
+        real_runs = []
         if evaluated is not None:
-            sim_terms, real_terms = evaluated
+            sim_terms, real_terms, per_run_real_terms = evaluated
             sim = _terms_to_dict(sim_terms)
             real = _terms_to_dict(real_terms)
+            real_runs = [_terms_to_dict(terms) for terms in per_run_real_terms]
 
-        records.append({"index": index, "gains": gains, "sim": sim, "real": real})
+        records.append(
+            {"index": index, "gains": gains, "sim": sim, "real": real, "real_runs": real_runs}
+        )
     return records
