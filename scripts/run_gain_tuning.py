@@ -132,8 +132,8 @@ def main():
     parser.add_argument("--warm-start-schedule", action=argparse.BooleanOptionalAction, default=GAIN_TUNING_DEFAULTS["warm_start_schedule"])
     # Learned residual dynamics checkpoint (scripts/train_residual_model.py); tuning
     # then rolls out the residual-augmented dynamics (model params stay fixed).
-    # parser.add_argument("--residual-model", type=str, default="models/residual_pololu.pkl")
-    parser.add_argument("--residual-model", type=str, default=None)
+    parser.add_argument("--residual-model", type=str, default="models/residual_pololu.pkl")
+    # parser.add_argument("--residual-model", type=str, default=None)
     # Tuning result (gains + trained gain parametrization) is saved here as YAML;
     # the parametrization block drops into the problem yaml's controller section.
     parser.add_argument("--out", type=str, default="models/tuned_gains.yaml")
