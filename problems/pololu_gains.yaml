@@ -1,4 +1,4 @@
-sim_time: 8.0 # seconds
+sim_time: 5.0 # seconds
 geometry_controller_dt: 0.05 # seconds
 wheel_controller_dt: 0.01 # seconds
 environment:
@@ -56,8 +56,8 @@ robot:
   max_wheel_speed: 223  # rad/s
   time_constant:  0.155  # time constant for first-order wheel dynamics (set to 0 for ideal actuation)
   a_slip_max:  3.0    # traction limit ~ mu*g in m/s^2, 0 to disable (burnout model, Wong 2008)
-  v_max: 2.0          # m/s
-  a_max: 3.0         # m/s^2
+  v_max: 2.5          # m/s
+  a_max: 4.0         # m/s^2
   a_max_lateral: 4.0 # m/s^2
   omega_max: 5.0    # rad/s
   alpha_max: 15.0    # rad/s^2
@@ -67,7 +67,7 @@ estimator:
   wheel_radius: 0.016     # estimator's wheel_radius [m]
   base_diameter: 0.0842   # estimator's base_diameter [m]
   noise_pos: 0.001        # position measurement noise [m] (from mocap almost no noise)
-  noise_angle: 0.02       # orientation noise [rad] ~ 1 degrees
+  noise_angle: 0.0175     # orientation noise [rad] ~ 1 degrees
   enc_angle_noise: 0.01   # encoder noise [rad]
   wheel_lp_tau: 0.053     # [s] first-order low-pass on encoder wheel speeds fed to the controller (mirrors firmware; ~30 ms lag). 0 disables.
 

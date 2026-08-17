@@ -64,7 +64,7 @@ GAIN_TUNING_DEFAULTS: dict = {
     "input_delta_weight": 1.0,
     # Penalty on step-to-step change in the robot yaw rate (normalized by
     # omega_max); discourages gains that oscillate omega. 0 disables.
-    "omega_delta_weight": 1.0,
+    "omega_delta_weight": 1.5,
     "gain_delta_weight": 0.0,
     "k_min_stab": 1e-2,
     "k_max_stab": 50.0,

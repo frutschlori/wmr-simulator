@@ -40,9 +40,7 @@ def main():
     parser.add_argument("--opt-steps", type=int, default=500)
     parser.add_argument("--objective-mode", choices=["identification", "gain-tuning"],
                         default="identification")
-    parser.add_argument("--fim-a-slip-max", action=argparse.BooleanOptionalAction, default=False,
-                        help="Include a_slip_max in the FIM parameters (identification mode); "
-                             "--no-fim-a-slip-max drops it when its low sensitivity makes the FIM stiff.")
+    parser.add_argument("--fim-a-slip-max", action=argparse.BooleanOptionalAction, default=False)
     # Settings for multiple trajectory synthesis
     parser.add_argument("--num-trajectories", type=int, default=1)
     parser.add_argument("--constraint-weight-jitter", type=float, default=0.3) # factor for diverse constraints
