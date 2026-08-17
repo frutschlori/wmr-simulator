@@ -7,13 +7,6 @@ pose and encoder body twist -- the same inputs the on-robot controller fed the
 parametrization every geometry step. The result aligns with the log's command
 timestamps so it can overlay the log summary plot like a simulated rollout's
 recorded gains.
-
-Caveat: the replay goes through ``gain_parametrization.apply``, which floors the
-gains at ``k_min_stab`` (``gain_parametrization.limits``). The firmware clamps
-only the *factor* to ``[0, bound]`` and has no such floor, so wherever it binds
-the reconstruction reads high against what the robot actually applied. Mirroring
-the floor firmware-side (as a per-gain minimum factor in ``GAINMLP.JSN``) closes
-the gap.
 """
 
 from __future__ import annotations

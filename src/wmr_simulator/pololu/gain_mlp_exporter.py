@@ -47,7 +47,7 @@ from wmr_simulator.gain_parametrization.error_mlp import (
 # Mirrors firmware/libs/gain_mlp/src/lib.rs (MAX_HIDDEN_LAYERS, MAX_WIDTH, MAX_WEIGHTS).
 FIRMWARE_MAX_HIDDEN_LAYERS = 2
 FIRMWARE_MAX_WIDTH = 32
-FIRMWARE_MAX_WEIGHTS = 1600
+FIRMWARE_MAX_WEIGHTS = 512
 
 
 def gain_mlp_payload(params: ErrorMlpParams) -> dict:
@@ -135,7 +135,7 @@ def reference_forward(payload: dict, ref: list, pose: list, twist: list) -> np.n
 
     factors = np.ones(NUM_GAINS, dtype=np.float32)
     factors[payload["scheduled_indices"]] = np.clip(
-        np.float32(1.0) + h, np.float32(0.0), np.float32(payload["bound"])
+        np.float32(1.0) + h, np.float32(error_mlp.MIN_FACTOR), np.float32(payload["bound"])
     )
     return factors
 

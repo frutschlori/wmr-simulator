@@ -172,6 +172,24 @@ def _export_gain_mlp_if_configured(problem_path: Path, output_path: Path) -> Pat
 # ---------------------------------------------------------------------------
 
 
+def _load_design_residual_model(path: Path):
+    """Residual checkpoint a trajectory-design stage rolls out on, or None.
+
+    A missing checkpoint designs on the nominal plant instead of raising: an
+    experiment with use_residual_model off never trains one at all.
+    """
+    if not path.is_file():
+        print(f"No residual model at {path}; designing on the nominal plant.")
+        return None
+
+    from wmr_simulator.residual_model import load_residual_model
+
+    residual_model, checkpoint = load_residual_model(path)
+    print(f"Designing on the residual-augmented plant: {path}")
+    print(f"  config: {checkpoint['config']}")
+    return residual_model
+
+
 def stage_plan_identification_trajectory(experiment: Experiment, iteration: int) -> Path:
     """Synthesize (or copy) the informative identification trajectory and
     export it as a Pololu reference JSN plus a bridged repeat variant
@@ -194,11 +212,18 @@ def stage_plan_identification_trajectory(experiment: Experiment, iteration: int)
     else:
         from wmr_simulator.trajectory_optimization.pipeline import TrajectoryOptimizationPipeline
 
+        # The previous iteration's residual: this stage runs before the robot
+        # has driven anything for *this* iteration, so its own residual does not
+        # exist yet. Iteration 1 has no previous one either and designs nominal.
+        residual_model = None
+        if config["use_residual_model"] and iteration > 1:
+            residual_model = _load_design_residual_model(experiment.paths(iteration - 1).residual_model)
         pipeline = TrajectoryOptimizationPipeline(
             str(paths.problem),
             time_scaling=config["time_scaling"],
             objective_mode="identification",
             fim_a_slip_max=bool(config["fim_a_slip_max"]),
+            residual_model=residual_model,
         )
         num_control_points = int(config["num_control_points"])
         pipeline.set_control_points(pipeline.initial_control_points(num_control_points))
@@ -276,11 +301,18 @@ def stage_plan_tuning_trajectories(experiment: Experiment, iteration: int) -> li
     # leaves the design blind to it and the trajectories dull. The gains
     # themselves are untouched -- the iteration's problem.yaml, the tune-gains
     # stage and everything exported to the robot keep the tuned kimotor.
+    #
+    # This iteration's own residual: train-residual runs between identify and
+    # this stage, so the model is fitted to the logs recorded for it.
+    residual_model = None
+    if config["use_residual_model"]:
+        residual_model = _load_design_residual_model(paths.residual_model)
     pipeline = TrajectoryOptimizationPipeline(
         str(problem_path),
         time_scaling=config["time_scaling"],
         objective_mode="gain-tuning",
         kimotor_fim_scale=float(config["kimotor_fim_scale"]),
+        residual_model=residual_model,
     )
     num_control_points = int(config["num_control_points"])
     pipeline.set_control_points(pipeline.initial_control_points(num_control_points))
@@ -1099,6 +1131,11 @@ def stage_status(experiment: Experiment) -> None:
     print(f"Experiment: {experiment.root}")
     print(f"  residual model:          {'enabled' if experiment.config['use_residual_model'] else 'disabled'}")
     print(f"  trajectory optimization: {'enabled' if experiment.config['optimize_trajectories'] else 'disabled (baselines)'}")
+    print(
+        "  residual in design:      "
+        f"identification {'on' if experiment.config['identification_trajectory']['use_residual_model'] else 'off'}, "
+        f"tuning {'on' if experiment.config['tuning_trajectories']['use_residual_model'] else 'off'}"
+    )
     print(
         "  data collection:         "
         + (

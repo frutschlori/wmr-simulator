@@ -5,11 +5,7 @@ speed features to one bounded multiplicative factor per *scheduled* controller
 gain (``scheduled_indices``, default all five; gains not listed pass through
 untouched, e.g. ``[0, 1, 2]`` keeps the motor PI gains static):
 
-    gains[i] = max(base_gains[i] * clip(1 + mlp(z)[i], 0, bound), floor[i]),  bound >= 1
-
-where ``floor`` is the base-gain search space's stability bound (see
-:mod:`~wmr_simulator.gain_parametrization.limits`) -- otherwise a factor of 0
-switches a gain off entirely, which the trained MLP does reach.
+    gains[i] = base_gains[i] * clip(1 + mlp(z)[i], MIN_FACTOR, bound),  bound >= 1
 
 The trainable flat vector is a *delta* on a frozen random init whose final
 layer is zero, so a zero delta is exactly the identity parametrization (static
@@ -30,8 +26,6 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
-from wmr_simulator.gain_parametrization.limits import clip_to_stability_floor
-
 KIND = "error_mlp"
 
 # Body-frame tracking errors (as used by the pose controller) plus the
@@ -41,6 +35,7 @@ NUM_FEATURES = len(FEATURE_NAMES)
 NUM_GAINS = 5
 
 _V_D_EPS = 1e-12
+MIN_FACTOR = 0.01
 # Default scales for the pose-error features; velocity features are scaled by
 # the robot limits (v_max, omega_max) like in the bounded scheduler.
 _POS_ERROR_SCALE = 0.5   # m
@@ -175,7 +170,7 @@ def factors(
     z = features(ref_state, pose_est, twist_est, params.feature_scale)
     raw = _forward(effective_layers(params), z)
     bound = jnp.clip(params.bound, min=1.0)
-    return jnp.clip(1.0 + raw, min=0.0, max=bound)
+    return jnp.clip(1.0 + raw, min=MIN_FACTOR, max=bound)
 
 
 def apply(
@@ -188,13 +183,9 @@ def apply(
     """Full parametrized gain vector for one geometry step.
 
     Only the ``scheduled_indices`` entries are scaled; the rest pass through.
-    The result is floored at the stability bound of the base-gain search space
-    (:mod:`~wmr_simulator.gain_parametrization.limits`), so a factor driven to 0
-    cannot switch a gain that must stay positive off entirely.
     """
     scheduled_factors = factors(params, ref_state, pose_est, twist_est)
-    scaled = base_gains.at[params.scheduled_indices].multiply(scheduled_factors, unique_indices=True)
-    return clip_to_stability_floor(scaled)
+    return base_gains.at[params.scheduled_indices].multiply(scheduled_factors, unique_indices=True)
 
 
 def on_reference_gains_over_refs(

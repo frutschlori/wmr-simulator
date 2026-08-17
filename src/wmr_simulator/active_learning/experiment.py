@@ -93,6 +93,13 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         "start_offset_angle": 0.3,
     },
     "identification_trajectory": {
+        # Design on the residual-augmented plant, using the *previous*
+        # iteration's residual -- this stage runs before this iteration has any
+        # data, let alone a residual of its own (iteration 1 has neither and
+        # designs nominal). Off by default: the FIM's design parameters here are
+        # the nominal robot parameters being identified, and the previous
+        # residual corrects a plant that has since been re-identified.
+        "use_residual_model": False,
         "opt_steps": 500,
         "learning_rate": 2e-3,
         "num_control_points": 6,
@@ -156,6 +163,14 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         "pool_previous_iterations": True,
     },
     "tuning_trajectories": {
+        # Design on the residual-augmented plant, using *this* iteration's
+        # residual: training sits between identify and this stage, so the model
+        # is freshly fitted to the logs this iteration recorded. On by default
+        # because tune-gains rolls out that same residual plant, and a
+        # trajectory is only informative about the gains under the conditions
+        # the tuner scores them under. Falls back to the nominal plant when no
+        # model was trained (use_residual_model off).
+        "use_residual_model": True,
         "num_trajectories": 10,
         "opt_steps": 50,
         "learning_rate": 3e-2,
