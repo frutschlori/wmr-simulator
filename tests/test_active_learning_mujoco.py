@@ -55,24 +55,32 @@ def write_reference_jsn(path, duration=2.0, dt=0.05):
     return path
 
 
-@pytest.fixture
-def experiment_with_trajectory(tmp_path):
+def make_experiment(tmp_path, **deployment):
     """An initialized experiment whose iteration 1 has a bridged JSN ready.
 
     Stands in for the plan-id-trajectory stage, which is a full trajectory
     optimization and far too slow for a test. The arc is written as the bridged
     variant because that is the one a deployment drives; it does not actually
-    return to the start, which only matters to how far the chained runs drift.
+    return to the start, so the divergence radius decides outright whether the
+    runs chain -- hence the permissive default here and the explicit override in
+    the test that wants the other branch.
     """
+    config = {"num_logs": 2, "divergence_radius": 100.0}
+    config.update(deployment)
     experiment = stage_init(
         tmp_path / "exp",
-        {"problem": PROBLEM, "use_residual_model": False, "mujoco_deployment": {"num_logs": 2}},
+        {"problem": PROBLEM, "use_residual_model": False, "mujoco_deployment": config},
     )
     paths = experiment.paths(1)
     write_reference_jsn(
         paths.identification_trajectory_dir / "identification_trajectory_bridge.JSN"
     )
     return experiment
+
+
+@pytest.fixture
+def experiment_with_trajectory(tmp_path):
+    return make_experiment(tmp_path)
 
 
 def test_deployment_fills_the_iterations_data_dir(experiment_with_trajectory):
@@ -120,6 +128,28 @@ def test_runs_are_chained_and_reproducible(experiment_with_trajectory, capsys):
         seed=_deployment_seed(experiment, 1, 1), start_pose=replay.final_pose, log_name="REPEAT",
     )
     assert repeat.log_path.read_bytes() == second.read_bytes()
+
+
+def test_a_run_that_did_not_come_back_is_placed_by_hand_again(tmp_path, capsys):
+    """The bridge is what makes a chained repeat possible; a run that ended far
+    from the start did not drive it, so carrying its final pose over would
+    record the next log from wherever the robot happened to stop."""
+    from wmr_simulator.mujoco_sim.deploy import run_deployment
+
+    experiment = make_experiment(tmp_path, divergence_radius=0.0)  # everything diverges
+    paths = experiment.paths(1)
+
+    _, second = stage_simulate_deployment(experiment, 1)
+
+    report = capsys.readouterr().out
+    assert report.count("placed by hand") == 2
+    assert "diverged" in report
+
+    hand_placed = run_deployment(
+        paths.robotcfg_cfg, _identification_trajectory_jsn(paths), paths.data_dir,
+        seed=_deployment_seed(experiment, 1, 1), log_name="REPLACED",
+    )
+    assert hand_placed.log_path.read_bytes() == second.read_bytes()
 
 
 def test_deployment_seeds_are_distinct_per_run_and_stable(experiment_with_trajectory):

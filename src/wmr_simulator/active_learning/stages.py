@@ -436,7 +436,11 @@ def stage_simulate_deployment(
     start -- so only the first run is placed by hand and every later one begins
     wherever the previous one's bridge left the robot. That reproduces the real
     repeat procedure, including the fact that the placement of run 5 is
-    whatever four bridges accumulated to. The log loader clips the bridge back
+    whatever four bridges accumulated to. A run that ends further than
+    ``mujoco_deployment.divergence_radius`` from the trajectory's start point
+    did not come back, so the next one is placed by hand again instead -- the
+    same rule the benchmark stage chains under, and the same thing a person
+    would do standing next to the robot. The log loader clips the bridge back
     off again (``log_loading.clip_after_first_trajectory``, which keys on the
     wait's zero setpoint), so identification sees the trajectory alone.
 
@@ -460,8 +464,11 @@ def stage_simulate_deployment(
         f"{' + ' + paths.gainmlp_jsn.name if paths.gainmlp_jsn.is_file() else ''} "
         f"-> {paths.data_dir}"
     )
+    reference_start = _reference_start_pose(trajectory)
+    divergence_radius = float(config["divergence_radius"])
+
     written: list[Path] = []
-    start_pose = None
+    start_pose = None  # the first run is placed by hand
     for index in range(count):
         seed = _deployment_seed(experiment, iteration, index)
         result = run_deployment(
@@ -474,14 +481,24 @@ def stage_simulate_deployment(
             start_offset_angle=float(config["start_offset_angle"]),
         )
         written.append(result.log_path)
-        start_pose = result.final_pose
+        placement = "placed by hand" if start_pose is None else "left by the bridge"
+        distance_to_start = math.dist(result.final_pose[:2], reference_start[:2])
+        diverged = distance_to_start > divergence_radius
+        # A run the bridge brought back close enough to the start is where the
+        # next one begins; one that did not is a robot standing somewhere else,
+        # so it is picked up and placed again.
+        start_pose = None if diverged else result.final_pose
         offset = result.start_offset
-        placement = "placed by hand" if index == 0 else "left by the bridge"
+        # Tenths of a millimetre, distances in mm alongside them: a bridge that
+        # ends its min-jerk creep on the start point regularly lands inside a
+        # millimetre, and rounding that away reads as an implausible exact zero.
         print(
             f"  {result.log_path.name}  seed {seed}  {placement} "
-            f"{1000 * offset[0]:+.0f}/{1000 * offset[1]:+.0f} mm, {offset[2]:+.3f} rad  "
-            f"| truth: RMSE {result.tracking_rmse:.3f} m, final {result.final_pose_error:.3f} m, "
+            f"{1000 * offset[0]:+.1f}/{1000 * offset[1]:+.1f} mm, {offset[2]:+.3f} rad  "
+            f"| truth: RMSE {result.tracking_rmse:.3f} m, "
+            f"ended {1000 * distance_to_start:.1f} mm from the start, "
             f"duty saturated {100 * result.duty_saturated_fraction:.0f}%"
+            + ("  <- diverged, replacing by hand" if diverged else "")
         )
     return written
 
@@ -767,8 +784,8 @@ def _benchmark_reference(paths: IterationPaths, config: dict) -> Path:
 
 
 def _reference_start_pose(trajectory: Path) -> tuple[float, float, float]:
-    """``(x, y, yaw)`` the benchmark reference starts (and, being chainable,
-    ends) at -- what a run's final pose is measured against."""
+    """``(x, y, yaw)`` a chained reference starts (and, being chainable, ends)
+    at -- what a run's final pose is measured against."""
     from wmr_simulator.pololu.reference_importer import load_pololu_reference
 
     start = load_pololu_reference(trajectory).states[0]
@@ -1236,10 +1253,12 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
     )
     from wmr_simulator.types import print_controller_gains, print_physical_params
     from wmr_simulator.visualization.gain_tuning import (
+        TRAINING_KEY_NAMESPACE,
         plot_controller_tuning_errors,
         plot_gain_tuning_summary,
         plot_training_trajectory_summary,
         plot_validation_trajectory_summary,
+        realization_keys_for_set,
         rollout_realizations,
     )
     from wmr_simulator.visualization.identification import plot_loss_history
@@ -1378,21 +1397,37 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
     print(f"Wrote {paths.gains_result}")
 
     with collect_plots(paths.visualize_dir / "gain tuning"):
+        # Trajectory 0 of the training set, under the keys the objective scored
+        # it with -- split over the whole set, then sliced.
         summary_references = pipeline.training_reference_trajectories[:1]
         summary_offsets = result["summary_start_offsets"][None, ...]
+        summary_robot_keys, summary_estimator_keys = realization_keys_for_set(
+            result["realizations"],
+            int(pipeline.training_reference_trajectories.shape[0]),
+            TRAINING_KEY_NAMESPACE,
+        )
+        summary_robot_keys = summary_robot_keys[:1]
+        summary_estimator_keys = summary_estimator_keys[:1]
         plot_gain_tuning_summary(
             pipeline,
             init_log=result["init_hidden_log"],
             tuned_log=result["final_hidden_log"],
             static_log=result.get("static_hidden_log"),
             init_realization_poses=rollout_realizations(
-                pipeline, robot_params, summary_references, summary_offsets
+                pipeline,
+                robot_params,
+                summary_references,
+                summary_offsets,
+                summary_robot_keys,
+                summary_estimator_keys,
             )[0],
             tuned_realization_poses=rollout_realizations(
                 pipeline,
                 robot_params,
                 summary_references,
                 summary_offsets,
+                summary_robot_keys,
+                summary_estimator_keys,
                 controller_gains=result["optimized_gains"],
                 schedule_params=result["schedule_params"],
             )[0],
@@ -1404,6 +1439,8 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
                     robot_params,
                     summary_references,
                     summary_offsets,
+                    summary_robot_keys,
+                    summary_estimator_keys,
                     controller_gains=result["static_gains"],
                 )[0]
             ),
@@ -1414,6 +1451,7 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
             robot_params=robot_params,
             tuned_gains=result["optimized_gains"],
             start_offsets=result["training_start_offsets"],
+            realizations=result["realizations"],
             schedule_params=result["schedule_params"],
             static_gains=result["static_gains"],
             max_trajectories=None,
@@ -1424,6 +1462,7 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
             robot_params=robot_params,
             tuned_gains=result["optimized_gains"],
             start_offsets=result["validation_start_offsets"],
+            realizations=result["realizations"],
             schedule_params=result["schedule_params"],
             static_gains=result["static_gains"],
             out_prefix="summary_validation",

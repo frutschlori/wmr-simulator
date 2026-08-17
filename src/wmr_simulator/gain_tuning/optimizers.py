@@ -9,6 +9,8 @@ from wmr_simulator.gain_parametrization import flat_params as gain_parametrizati
 from wmr_simulator.gain_parametrization import num_params as gain_parametrization_num_params
 from wmr_simulator.gain_parametrization import with_flat_params, zero_params
 from wmr_simulator.gain_tuning.objectives import (
+    TRAINING_KEY_NAMESPACE,
+    VALIDATION_KEY_NAMESPACE,
     clip_controller_gains,
     closed_loop_objective_terms,
     make_realizations,
@@ -190,7 +192,7 @@ def _make_terms_for_values(
     k_max_rest,
     reference_trajectories,
     initial_pose_offsets,
-    key_namespace=0,
+    key_namespace=TRAINING_KEY_NAMESPACE,
     realization_weights=None,
 ):
     reference_trajectories = (
@@ -302,7 +304,7 @@ def per_rollout_losses(
     input_weight=0.0,
     input_delta_weight=0.0,
     omega_delta_weight=0.0,
-    key_namespace=0,
+    key_namespace=TRAINING_KEY_NAMESPACE,
 ) -> np.ndarray:
     """``(T, R)`` total loss of every single rollout at one gain vector.
 
@@ -815,7 +817,7 @@ def optimize_controller_gains(
             input_weight=input_weight,
             input_delta_weight=input_delta_weight,
             omega_delta_weight=omega_delta_weight,
-            key_namespace=0,
+            key_namespace=TRAINING_KEY_NAMESPACE,
         )
         weights, dropped = rollout_outlier_weights(initial_losses, outlier_loss_factor)
         _report_rollout_outliers(
@@ -854,7 +856,7 @@ def optimize_controller_gains(
     loss_terms_for_optimizer_values = make_terms(
         training_reference_trajectories,
         training_start_offsets,
-        key_namespace=0,
+        key_namespace=TRAINING_KEY_NAMESPACE,
         realization_weights=training_realization_weights,
     )
     loss_for_optimizer_values = lambda values: jnp.sum(loss_terms_for_optimizer_values(values))
@@ -876,7 +878,7 @@ def optimize_controller_gains(
                 input_weight=input_weight,
                 input_delta_weight=input_delta_weight,
                 omega_delta_weight=omega_delta_weight,
-                key_namespace=1,
+                key_namespace=VALIDATION_KEY_NAMESPACE,
             )
             _, validation_dropped = rollout_outlier_weights(validation_losses, outlier_loss_factor)
             if validation_dropped:
@@ -887,7 +889,7 @@ def optimize_controller_gains(
                     f"{max(item[2] for item in validation_dropped):.6g}); kept in the held-out score."
                 )
         validation_loss_terms_for_optimizer_values = make_terms(
-            validation_reference_trajectories, validation_start_offsets, key_namespace=1
+            validation_reference_trajectories, validation_start_offsets, key_namespace=VALIDATION_KEY_NAMESPACE
         )
         validation_loss_for_optimizer_values = (
             lambda values: jnp.sum(validation_loss_terms_for_optimizer_values(values))

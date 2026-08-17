@@ -55,10 +55,17 @@ def make_realizations(
     )
 
 
+# ``namespace`` values for split_realization_keys_by_trajectory. Named because
+# the summary figures have to reproduce the objective's keys exactly, and a
+# literal 0/1 in two places is a silent way for them to drift apart.
+TRAINING_KEY_NAMESPACE = 0
+VALIDATION_KEY_NAMESPACE = 1
+
+
 def split_realization_keys_by_trajectory(
     realization_keys: jax.Array,
     num_trajectories: int,
-    namespace: int = 0,
+    namespace: int = TRAINING_KEY_NAMESPACE,
 ) -> jax.Array:
     """Derive frozen, independent noise keys for every trajectory.
 
