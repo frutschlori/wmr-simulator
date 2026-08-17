@@ -357,6 +357,12 @@ def run_joint_tuning(
     input_weight: float = float(GAIN_TUNING_DEFAULTS["input_weight"]),
     input_delta_weight: float = float(GAIN_TUNING_DEFAULTS["input_delta_weight"]),
     omega_delta_weight: float = float(GAIN_TUNING_DEFAULTS["omega_delta_weight"]),
+    # Optional learned residual dynamics, as loaded by
+    # residual_model.load_residual_model. It goes to *both* blocks: they have to
+    # roll out the same plant, or the trajectories would be designed to be
+    # informative about a robot the gains are not tuned on. None keeps the
+    # nominal dynamics on both sides.
+    residual_model=None,
     verbose: bool = True,
 ) -> JointTuningResult:
     """Alternate gain and trajectory Adam steps on one shared realization bundle.
@@ -465,11 +471,13 @@ def run_joint_tuning(
         objective_mode=OBJECTIVE_MODE_GAIN_TUNING,
         realizations=realizations,
         criterion=criterion,
+        residual_model=residual_model,
     )
     gain_pipeline = ControllerTuningPipeline(
         problem_path,
         robot_params=resolve_gain_robot_params(problem_path, None, None),
         seed=seed,
+        residual_model=residual_model,
     )
     # Build the B-spline basis eagerly: constructing it inside a jit trace would
     # stage the time grid into a tracer (see TrajectoryOptimizationPipeline._spline_plan).
@@ -1133,6 +1141,7 @@ def run_joint_tuning(
             # (the encoder low-pass is always on, read from the problem config).
             "wheel_lp_tau": float(trajectory_pipeline.wheel_lp_tau),
             "gain_wheel_lp_tau": float(gain_pipeline.estimator.wheel_lp_tau),
+            "residual_dynamics": residual_model is not None,
         },
         timing={
             "construct_s": construct_seconds,

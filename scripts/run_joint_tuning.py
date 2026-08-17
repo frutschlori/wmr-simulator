@@ -83,8 +83,20 @@ def main():
                              "snapshot, so it is off by default.")
     parser.add_argument("--round-trace-stride", type=int, default=5,
                         help="Rounds between animation frames (--save-round-GIF only).")
+    # Learned residual dynamics checkpoint (scripts/train_residual_model.py).
+    # Both blocks then roll out the residual-augmented plant (model params stay
+    # fixed); None keeps the nominal dynamics.
+    parser.add_argument("--residual-model", type=str, default=None)
     parser.add_argument("--out", type=str, default="results/joint_tuning")
     args = parser.parse_args()
+
+    residual_model = None
+    if args.residual_model is not None:
+        from wmr_simulator.residual_model import load_residual_model
+
+        residual_model, checkpoint = load_residual_model(args.residual_model)
+        print(f"Loaded residual dynamics model: {args.residual_model}")
+        print(f"  config: {checkpoint['config']}")
 
     result = run_joint_tuning(
         args.problem,
@@ -111,6 +123,7 @@ def main():
         start_offset_mode=args.start_offset_mode,
         criterion=args.criterion,
         seed=args.seed,
+        residual_model=residual_model,
     )
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -122,6 +135,7 @@ def main():
                 "problem": args.problem,
                 "mode": args.mode,
                 "wheel_lp_tau": float(result.config["wheel_lp_tau"]),
+                "residual_model": args.residual_model,
                 "gains": [float(gain) for gain in result.gains],
                 # The last iterate, kept for diagnostics: on a healthy run it is
                 # close to `gains`, and a large gap means the loop was still

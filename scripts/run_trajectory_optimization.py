@@ -63,6 +63,10 @@ def main():
     parser.add_argument("--constraint-omega-weight", type=float, default=1.0)
     parser.add_argument("--constraint-alpha-weight", type=float, default=0.5)
     parser.add_argument("--constraint-smooth-max-beta", type=float, default=10.0) # barrier constant
+    # Learned residual dynamics checkpoint (scripts/train_residual_model.py); the
+    # designed trajectory is then scored on the residual-augmented plant (model
+    # params stay fixed). None keeps the nominal dynamics.
+    parser.add_argument("--residual-model", type=str, default=None)
     # Visualization settings
     parser.add_argument("--save-opt-GIF", action="store_true", default=False)
     parser.add_argument("--opt-trace-stride", type=int, default=500)
@@ -78,17 +82,27 @@ def main():
     if args.num_control_points < 4:
         raise ValueError("--num-control-points must be >= 4 (cubic B-spline).")
 
+    residual_model = None
+    if args.residual_model is not None:
+        from wmr_simulator.residual_model import load_residual_model
+
+        residual_model, checkpoint = load_residual_model(args.residual_model)
+        print(f"Loaded residual dynamics model: {args.residual_model}")
+        print(f"  config: {checkpoint['config']}")
+
     pipeline = TrajectoryOptimizationPipeline(
         args.problem,
         time_scaling=args.time_scaling,
         objective_mode=args.objective_mode,
         fim_a_slip_max=args.fim_a_slip_max,
+        residual_model=residual_model,
     )
 
     print(f"Loaded problem: {pipeline.problem.path}")
     print(f"Robot: {type(pipeline.robot).__name__}")
     print(f"Time scaling: {pipeline.time_scaling}")
     print(f"Objective mode: {pipeline.objective_mode}")
+    print(f"Residual dynamics: {args.residual_model if residual_model is not None else 'nominal (none)'}")
     print(f"Optimized trajectories: {args.num_trajectories}")
     if args.num_trajectories > 1:
         print(f"B-spline control points: {args.num_control_points}")

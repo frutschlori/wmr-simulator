@@ -311,6 +311,7 @@ class TrajectoryOptimizationPipeline:
         offset_heading_step_factor: float = 1.0,
         min_tangent_fraction: float = DEFAULT_MIN_TANGENT_FRACTION,
         kimotor_fim_scale: float | None = None,
+        residual_model=None,
     ):
         self.problem = ProblemDefinition(problem_path)
         # See stabilization_loss_from_control_points: the floor |dpos/ds| is
@@ -318,7 +319,18 @@ class TrajectoryOptimizationPipeline:
         # optimizer cannot buy information by stalling the curve into a cusp and
         # the bar rescales with the problem. <= 0 disables the term.
         self.min_tangent_fraction = float(min_tangent_fraction)
-        self.simulation = SimulationPipeline(problem_path=problem_path, seed=0, reference_trajectories_dir=None)
+        # Optional learned residual dynamics (residual_model.load_residual_model),
+        # exactly as the gain tuner takes it: None keeps the nominal plant. It is
+        # part of the plant the design is scored on -- every closed-loop rollout
+        # in here goes through self.simulation.run_closed_loop, which defaults to
+        # the pipeline's model -- and nothing about it is exported with the curve.
+        self.residual_model = residual_model
+        self.simulation = SimulationPipeline(
+            problem_path=problem_path,
+            seed=0,
+            reference_trajectories_dir=None,
+            residual_model=residual_model,
+        )
         self.robot = self.simulation.robot
         self.controller = self.simulation.controller
         self.controller_gains = self.simulation.gains

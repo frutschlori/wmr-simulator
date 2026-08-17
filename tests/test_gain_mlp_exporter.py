@@ -8,11 +8,7 @@ normalization baked into the weights) reproduces ``error_mlp.factors``.
 The comparison is at the *factor* level, which is the whole firmware contract:
 the factors are unitless, so they apply unchanged to the firmware's inner motor
 gains even though those are in duty/(rad/s) rather than the simulator's
-wheel-speed units. Note ``error_mlp.apply`` additionally floors the gains it
-returns at ``k_min_stab`` (``gain_parametrization.limits``), which the firmware
-does not currently mirror -- that floor is in simulator gain units and would
-have to be exported as the equivalent per-gain minimum factor
-``k_min_stab / base_gains_sim[i]``.
+wheel-speed units.
 """
 
 import os
@@ -30,7 +26,6 @@ from wmr_simulator.gain_parametrization.error_mlp import (
     factors as jax_factors,
     with_flat_params,
 )
-from wmr_simulator.gain_parametrization.limits import clip_to_stability_floor
 from wmr_simulator.pololu.gain_mlp_exporter import (
     firmware_base_gains,
     gain_mlp_payload,
@@ -79,13 +74,8 @@ def test_reference_forward_matches_jax(scheduled):
         expected_factors[scheduled] = np.asarray(jax_factors(params, ref_state, pose_j, twist_j))
         np.testing.assert_allclose(factors, expected_factors, rtol=1e-5, atol=1e-6)
 
-        # Applied to simulator-unit base gains, the same factors reproduce
-        # error_mlp.apply up to its stability floor.
         expected = np.asarray(apply(jnp.asarray(base_gains), params, ref_state, pose_j, twist_j))
-        np.testing.assert_allclose(
-            np.asarray(clip_to_stability_floor(jnp.asarray(base_gains * factors))),
-            expected, rtol=1e-5, atol=1e-6,
-        )
+        np.testing.assert_allclose(base_gains * factors, expected, rtol=1e-5, atol=1e-6)
 
 
 def test_golden_payload_consistent_with_reference_forward():

@@ -87,6 +87,11 @@ def main():
     # motion limits cannot see; 0 disables the term. Relative so it does not
     # have to be retuned when the environment box or the path length changes.
     parser.add_argument("--min-tangent-fraction", type=float, default=DEFAULT_MIN_TANGENT_FRACTION)
+    # Learned residual dynamics checkpoint (scripts/train_residual_model.py); the
+    # designed trajectory is then scored on the residual-augmented plant (model
+    # params stay fixed). None keeps the nominal dynamics.
+    parser.add_argument("--residual-model", type=str, default=None)
+    # parser.add_argument("--residual-model", type=str, default="models/residual_pololu.pkl")
     # Visualization settings
     parser.add_argument("--save-opt-GIF", action="store_true", default=False)
     parser.add_argument("--opt-trace-stride", type=int, default=500)
@@ -102,6 +107,14 @@ def main():
     if args.num_control_points < 4:
         raise ValueError("--num-control-points must be >= 4 (cubic B-spline).")
 
+    residual_model = None
+    if args.residual_model is not None:
+        from wmr_simulator.residual_model import load_residual_model
+
+        residual_model, checkpoint = load_residual_model(args.residual_model)
+        print(f"Loaded residual dynamics model: {args.residual_model}")
+        print(f"  config: {checkpoint['config']}")
+
     pipeline = TrajectoryOptimizationPipeline(
         args.problem,
         time_scaling=args.time_scaling,
@@ -113,10 +126,12 @@ def main():
         offset_heading_step_factor=args.offset_heading_step_factor,
         min_tangent_fraction=args.min_tangent_fraction,
         kimotor_fim_scale=(args.kimotor_fim_scale if args.kimotor_fim_scale > 0.0 else None),
+        residual_model=residual_model,
     )
 
     print(f"Loaded problem: {pipeline.problem.path}")
     print(f"Encoder low-pass: wheel_lp_tau = {pipeline.wheel_lp_tau:.4g} s")
+    print(f"Residual dynamics: {args.residual_model if residual_model is not None else 'nominal (none)'}")
     print(f"Design criterion: {pipeline.criterion}")
     print(
         f"Start offsets: {pipeline.start_offset_mode} "
