@@ -3,7 +3,16 @@
 The numpy ``reference_forward`` mirrors the math of the firmware crate
 ``firmware/libs/gain_mlp`` (pololu-rs); matching it against the JAX
 implementation validates that the exported payload (with spectral
-normalization baked into the weights) reproduces ``error_mlp.apply``.
+normalization baked into the weights) reproduces ``error_mlp.factors``.
+
+The comparison is at the *factor* level, which is the whole firmware contract:
+the factors are unitless, so they apply unchanged to the firmware's inner motor
+gains even though those are in duty/(rad/s) rather than the simulator's
+wheel-speed units. Note ``error_mlp.apply`` additionally floors the gains it
+returns at ``k_min_stab`` (``gain_parametrization.limits``), which the firmware
+does not currently mirror -- that floor is in simulator gain units and would
+have to be exported as the equivalent per-gain minimum factor
+``k_min_stab / base_gains_sim[i]``.
 """
 
 import os
@@ -15,7 +24,13 @@ import numpy as np
 import pytest
 
 from wmr_simulator.gain_parametrization import params_from_cfg
-from wmr_simulator.gain_parametrization.error_mlp import NUM_GAINS, apply, with_flat_params
+from wmr_simulator.gain_parametrization.error_mlp import (
+    NUM_GAINS,
+    apply,
+    factors as jax_factors,
+    with_flat_params,
+)
+from wmr_simulator.gain_parametrization.limits import clip_to_stability_floor
 from wmr_simulator.pololu.gain_mlp_exporter import (
     firmware_base_gains,
     gain_mlp_payload,
@@ -44,7 +59,7 @@ def test_reference_forward_matches_jax(scheduled):
     payload = gain_mlp_payload(params)
 
     rng = np.random.default_rng(3)
-    base_gains = np.asarray([4.5, 6.0, 12.0, 2.5 / 240.0, 5.0 / 240.0], dtype=np.float32)
+    base_gains = np.asarray([4.5, 6.0, 12.0, 2.5, 5.0], dtype=np.float32)
     for _ in range(20):
         ref = [*rng.uniform(-1.0, 1.0, size=2), rng.uniform(-np.pi, np.pi),
                rng.uniform(0.0, 1.0), rng.uniform(-3.0, 3.0)]
@@ -57,11 +72,20 @@ def test_reference_forward_matches_jax(scheduled):
         assert np.all(factors[unscheduled] == 1.0)
 
         ref_state = jnp.asarray([ref[0], ref[1], ref[2], ref[3], 0.0, ref[4], 0.0, 0.0], dtype=jnp.float32)
-        expected = np.asarray(
-            apply(jnp.asarray(base_gains), params, ref_state,
-                  jnp.asarray(pose, dtype=jnp.float32), jnp.asarray(twist, dtype=jnp.float32))
+        pose_j = jnp.asarray(pose, dtype=jnp.float32)
+        twist_j = jnp.asarray(twist, dtype=jnp.float32)
+
+        expected_factors = np.ones(NUM_GAINS, dtype=np.float32)
+        expected_factors[scheduled] = np.asarray(jax_factors(params, ref_state, pose_j, twist_j))
+        np.testing.assert_allclose(factors, expected_factors, rtol=1e-5, atol=1e-6)
+
+        # Applied to simulator-unit base gains, the same factors reproduce
+        # error_mlp.apply up to its stability floor.
+        expected = np.asarray(apply(jnp.asarray(base_gains), params, ref_state, pose_j, twist_j))
+        np.testing.assert_allclose(
+            np.asarray(clip_to_stability_floor(jnp.asarray(base_gains * factors))),
+            expected, rtol=1e-5, atol=1e-6,
         )
-        np.testing.assert_allclose(base_gains * factors, expected, rtol=1e-5, atol=1e-6)
 
 
 def test_golden_payload_consistent_with_reference_forward():

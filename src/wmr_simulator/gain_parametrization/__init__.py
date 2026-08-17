@@ -8,6 +8,11 @@ for closed-loop simulation and gain tuning. Implementations: the reference-only
 bounded multiplicative scheduler (``bounded_reference``) and a tracking-error
 MLP over all gains (``error_mlp``); new parametrizations should add a module
 here and a case in :func:`params_from_cfg` plus the dispatchers below.
+
+Every implementation floors the gains it returns at the stability bound of the
+base-gain search space (``limits.clip_to_stability_floor``): the mappings are
+multiplicative, so nothing else stops a factor of 0 from switching off a gain
+the tuner is only allowed to search over ``[k_min_stab, k_max_stab]``.
 """
 
 from __future__ import annotations
@@ -21,6 +26,10 @@ from wmr_simulator.gain_parametrization.bounded_reference import (
     factors as bounded_reference_factors,
 )
 from wmr_simulator.gain_parametrization.error_mlp import ErrorMlpParams
+from wmr_simulator.gain_parametrization.limits import (
+    GAIN_STABILITY_FLOOR,
+    clip_to_stability_floor,
+)
 
 DEFAULT_KIND = bounded_reference.KIND
 SUPPORTED_KINDS = (bounded_reference.KIND, error_mlp.KIND)

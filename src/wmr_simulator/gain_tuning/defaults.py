@@ -59,12 +59,13 @@ GAIN_TUNING_DEFAULTS: dict = {
     # outliers) and frozen at the initial gains, so the objective stays smooth.
     # 0 disables.
     "outlier_loss_factor": 20.0,
+    # Loss weights
+    "position_tracking_weight": 1.0,
+    "heading_tracking_weight": 1.0,
     "velocity_tracking_weight": 1.0,
     "input_weight": 0.0,
     "input_delta_weight": 1.0,
-    # Penalty on step-to-step change in the robot yaw rate (normalized by
-    # omega_max); discourages gains that oscillate omega. 0 disables.
-    "omega_delta_weight": 1.5,
+    "omega_delta_weight": 1.2, # Penalty on step-to-step change in the robot yaw rate, discourages gains that oscillate omega
     "gain_delta_weight": 0.0,
     "k_min_stab": 1e-2,
     "k_max_stab": 50.0,

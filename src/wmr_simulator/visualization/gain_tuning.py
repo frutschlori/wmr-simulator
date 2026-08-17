@@ -354,6 +354,12 @@ def plot_trajectory_set_summary(
     )
     num_realizations = init_poses.shape[1]
     arrow_length = start_arrow_length(tuned_poses[..., :2])
+    # Same rollout weight as the trajectory designer's batch summary
+    # (visualization.trajectories.plot_trajectory_set): with several
+    # realizations per trajectory the lines overlap, and thin, slightly
+    # transparent strokes read far better than solid ones.
+    rollout_width = 0.9 if num_realizations == 1 else 0.6
+    rollout_alpha = 1.0 if num_realizations == 1 else 0.75
 
     fig, ax = plt.subplots(figsize=(8, 8))
     for index, reference_states in enumerate(plotted_references):
@@ -363,24 +369,27 @@ def plot_trajectory_set_summary(
         for realization in range(num_realizations):
             init_pose = decimate_path(init_poses[index, realization])
             tuned_pose = decimate_path(tuned_poses[index, realization])
-            ax.plot(init_pose[:, 0], init_pose[:, 1], color=color, linestyle=":", linewidth=0.7, alpha=0.8)
+            ax.plot(init_pose[:, 0], init_pose[:, 1], color=color, linestyle=":",
+                    linewidth=rollout_width, alpha=rollout_alpha)
             if static_poses is not None:
                 static_pose = decimate_path(static_poses[index, realization])
-                ax.plot(static_pose[:, 0], static_pose[:, 1], color=color, linestyle="-.", linewidth=0.9, alpha=0.8)
-            ax.plot(tuned_pose[:, 0], tuned_pose[:, 1], color=color, linestyle="-", linewidth=0.9, alpha=0.8)
+                ax.plot(static_pose[:, 0], static_pose[:, 1], color=color, linestyle="-.",
+                        linewidth=rollout_width, alpha=rollout_alpha)
+            ax.plot(tuned_pose[:, 0], tuned_pose[:, 1], color=color, linestyle="-",
+                    linewidth=rollout_width, alpha=rollout_alpha)
             # The start pose is shared by all three rollouts of this realization.
             draw_start_pose_arrow(ax, tuned_poses[index, realization][0, :3], color, arrow_length)
 
     legend_handles = [
         Line2D([0], [0], color="black", linestyle="--", linewidth=0.8, label="Reference"),
-        Line2D([0], [0], color="black", linestyle=":", linewidth=0.7, label="Initial"),
+        Line2D([0], [0], color="black", linestyle=":", linewidth=rollout_width, label="Initial"),
     ]
     if static_gains is not None:
         legend_handles.append(
-            Line2D([0], [0], color="black", linestyle="-.", linewidth=0.9, label="tuned (static)")
+            Line2D([0], [0], color="black", linestyle="-.", linewidth=rollout_width, label="tuned (static)")
         )
     legend_handles.append(
-        Line2D([0], [0], color="black", linestyle="-", linewidth=0.9, label=tuned_label)
+        Line2D([0], [0], color="black", linestyle="-", linewidth=rollout_width, label=tuned_label)
     )
     ax.legend(handles=legend_handles, loc="best")
     ax.set_xlabel("x [m]")

@@ -20,6 +20,7 @@ from wmr_simulator.gain_parametrization import (
     zero_params,
 )
 from wmr_simulator.gain_parametrization.error_mlp import NUM_FEATURES, effective_layers, factors, features
+from wmr_simulator.gain_parametrization.limits import GAIN_STABILITY_FLOOR
 from wmr_simulator.gain_tuning.objectives import (
     closed_loop_objective_terms,
     scheduled_closed_loop_objective_terms,
@@ -349,3 +350,37 @@ def test_gradient_wrt_theta_is_finite_and_nonzero_at_identity():
     grad = np.asarray(jax.grad(loss)(theta0))
     assert np.all(np.isfinite(grad))
     assert np.linalg.norm(grad) > 0.0
+
+
+def test_applied_gains_are_floored_at_k_min_stab():
+    # The MLP factor is bounded to [0, bound], so a trained network can drive a
+    # gain to exactly 0 -- measured on models/tuned_gains.yaml, kth and kpmotor
+    # hit 0 on a few percent of the feature space. The applied gains therefore
+    # carry the same floor the base-gain search space guarantees, except for
+    # kimotor, which is allowed to be exactly 0 (integral action off).
+    template = _params(scheduled_indices=[0, 1, 2, 3, 4], bound=3.0)
+    # A large negative output *bias* saturates every factor at the lower clip;
+    # biases are not spectrally normalized, so this survives effective_layers.
+    num_outputs = int(np.asarray(template.init_layers[-1]).size)
+    theta = np.zeros(num_params(template), dtype=np.float32)
+    theta[-num_outputs:] = -50.0
+    params = with_flat_params(jnp.asarray(theta), template)
+
+    base = jnp.asarray([4.5, 6.0, 12.0, 2.5, 5.0], dtype=jnp.float32)
+    rng = np.random.default_rng(0)
+    for _ in range(20):
+        ref, pose, twist = _random_inputs(rng)
+        assert np.all(np.asarray(factors(params, ref, pose, twist)) == 0.0)
+        gains = np.asarray(apply(base, params, ref, pose, twist))
+        np.testing.assert_allclose(gains, [GAIN_STABILITY_FLOOR] * 4 + [0.0], atol=1e-7)
+
+
+def test_stability_floor_does_not_bind_at_identity():
+    # A zero trainable vector must still reproduce the static controller bit for
+    # bit: every base gain the tuner can produce is already >= k_min_stab.
+    params = _params()
+    base = jnp.asarray([4.5, 6.0, 12.0, 2.5, 5.0], dtype=jnp.float32)
+    rng = np.random.default_rng(1)
+    for _ in range(20):
+        ref, pose, twist = _random_inputs(rng)
+        np.testing.assert_array_equal(np.asarray(apply(base, params, ref, pose, twist)), np.asarray(base))

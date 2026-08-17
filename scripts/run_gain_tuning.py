@@ -92,6 +92,8 @@ def main():
     # the tune-gains stage produce the same result on the same inputs.
     parser.add_argument("--seed", type=int, default=0)
     # Loss weights
+    parser.add_argument("--position-tracking-weight", type=float, default=GAIN_TUNING_DEFAULTS["position_tracking_weight"])
+    parser.add_argument("--heading-tracking-weight", type=float, default=GAIN_TUNING_DEFAULTS["heading_tracking_weight"])
     parser.add_argument("--velocity-tracking-weight", type=float, default=GAIN_TUNING_DEFAULTS["velocity_tracking_weight"])
     parser.add_argument("--input-weight", type=float, default=GAIN_TUNING_DEFAULTS["input_weight"])
     parser.add_argument("--input-delta-weight", type=float, default=GAIN_TUNING_DEFAULTS["input_delta_weight"])
@@ -132,8 +134,8 @@ def main():
     parser.add_argument("--warm-start-schedule", action=argparse.BooleanOptionalAction, default=GAIN_TUNING_DEFAULTS["warm_start_schedule"])
     # Learned residual dynamics checkpoint (scripts/train_residual_model.py); tuning
     # then rolls out the residual-augmented dynamics (model params stay fixed).
-    parser.add_argument("--residual-model", type=str, default="models/residual_pololu.pkl")
-    # parser.add_argument("--residual-model", type=str, default=None)
+    # parser.add_argument("--residual-model", type=str, default="models/residual_pololu.pkl")
+    parser.add_argument("--residual-model", type=str, default=None)
     # Tuning result (gains + trained gain parametrization) is saved here as YAML;
     # the parametrization block drops into the problem yaml's controller section.
     parser.add_argument("--out", type=str, default="models/tuned_gains.yaml")
@@ -157,6 +159,8 @@ def main():
         seed=args.seed,
         reference_trajectories_dir=args.reference_trajectories_dir,
         validation_split=args.validation_split,
+        position_tracking_weight=args.position_tracking_weight,
+        heading_tracking_weight=args.heading_tracking_weight,
         velocity_tracking_weight=args.velocity_tracking_weight,
         input_weight=args.input_weight,
         input_delta_weight=args.input_delta_weight,
@@ -186,6 +190,8 @@ def main():
     if result["static_gains"] is not None:
         print_controller_gains("Static tune gains:", result["static_gains"])
     print_controller_gains("Optimized gains:", result["optimized_gains"])
+    print(f"Position tracking weight: {args.position_tracking_weight:.8g}")
+    print(f"Heading tracking weight: {args.heading_tracking_weight:.8g}")
     print(f"Velocity tracking weight: {args.velocity_tracking_weight:.8g}")
     print(f"Input regularization weight: {args.input_weight:.8g}")
     print(f"Input delta regularization weight: {args.input_delta_weight:.8g}")

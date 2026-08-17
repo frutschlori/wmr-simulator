@@ -5,7 +5,11 @@ speed features to one bounded multiplicative factor per *scheduled* controller
 gain (``scheduled_indices``, default all five; gains not listed pass through
 untouched, e.g. ``[0, 1, 2]`` keeps the motor PI gains static):
 
-    gains[i] = base_gains[i] * clip(1 + mlp(z)[i], 0, bound),  bound >= 1
+    gains[i] = max(base_gains[i] * clip(1 + mlp(z)[i], 0, bound), floor[i]),  bound >= 1
+
+where ``floor`` is the base-gain search space's stability bound (see
+:mod:`~wmr_simulator.gain_parametrization.limits`) -- otherwise a factor of 0
+switches a gain off entirely, which the trained MLP does reach.
 
 The trainable flat vector is a *delta* on a frozen random init whose final
 layer is zero, so a zero delta is exactly the identity parametrization (static
@@ -25,6 +29,8 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+
+from wmr_simulator.gain_parametrization.limits import clip_to_stability_floor
 
 KIND = "error_mlp"
 
@@ -182,9 +188,13 @@ def apply(
     """Full parametrized gain vector for one geometry step.
 
     Only the ``scheduled_indices`` entries are scaled; the rest pass through.
+    The result is floored at the stability bound of the base-gain search space
+    (:mod:`~wmr_simulator.gain_parametrization.limits`), so a factor driven to 0
+    cannot switch a gain that must stay positive off entirely.
     """
     scheduled_factors = factors(params, ref_state, pose_est, twist_est)
-    return base_gains.at[params.scheduled_indices].multiply(scheduled_factors, unique_indices=True)
+    scaled = base_gains.at[params.scheduled_indices].multiply(scheduled_factors, unique_indices=True)
+    return clip_to_stability_floor(scaled)
 
 
 def on_reference_gains_over_refs(
