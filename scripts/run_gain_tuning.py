@@ -7,10 +7,12 @@ from wmr_simulator.gain_tuning.optimizers import OPTIMIZERS, describe_optimizer
 from wmr_simulator.gain_tuning.pipeline import (resolve_gain_robot_params, run_gain_tuning_experiment)
 from wmr_simulator.types import print_controller_gains, print_physical_params
 from wmr_simulator.visualization.gain_tuning import (
+    TRAINING_KEY_NAMESPACE,
     plot_controller_tuning_errors,
     plot_gain_tuning_summary,
     plot_training_trajectory_summary,
     plot_validation_trajectory_summary,
+    realization_keys_for_set,
     rollout_realizations,
 )
 from wmr_simulator.visualization.identification import plot_loss_history
@@ -237,15 +239,26 @@ def main():
     save_tuning_result(args.out, args.problem, result)
 
     # The summary panels show all realizations of the summary trajectory, each
-    # from its own start offset -- the conditions the loss was averaged over.
+    # from its own start offset and under its own noise draw -- the conditions
+    # the loss was averaged over. The keys are split over the whole training set
+    # and then sliced, since that is how the objective derived them.
     summary_offsets = result["summary_start_offsets"][None, ...]
     summary_references = pipeline.training_reference_trajectories[:1]
+    summary_robot_keys, summary_estimator_keys = realization_keys_for_set(
+        result["realizations"],
+        int(pipeline.training_reference_trajectories.shape[0]),
+        TRAINING_KEY_NAMESPACE,
+    )
+    summary_robot_keys = summary_robot_keys[:1]
+    summary_estimator_keys = summary_estimator_keys[:1]
     summary_realization_poses = {
         name: rollout_realizations(
             pipeline,
             robot_params,
             summary_references,
             summary_offsets,
+            summary_robot_keys,
+            summary_estimator_keys,
             controller_gains=gains,
             schedule_params=schedule,
         )[0]
@@ -271,6 +284,7 @@ def main():
         robot_params=robot_params,
         tuned_gains=result["optimized_gains"],
         start_offsets=result["training_start_offsets"],
+        realizations=result["realizations"],
         schedule_params=result["schedule_params"],
         static_gains=result["static_gains"],
         max_trajectories=args.num_summary_training_trajectories,
@@ -281,6 +295,7 @@ def main():
         robot_params=robot_params,
         tuned_gains=result["optimized_gains"],
         start_offsets=result["validation_start_offsets"],
+        realizations=result["realizations"],
         schedule_params=result["schedule_params"],
         static_gains=result["static_gains"],
         out_prefix="summary_validation",

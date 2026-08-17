@@ -100,6 +100,11 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         # the previous run's bridge path left the robot. The identify stage's
         # outlier screen needs at least 4 logs to mean anything.
         "num_logs": 5,
+        # A run that ends further than this from the trajectory's start point
+        # did not come back along its bridge, so the next one cannot start
+        # where it left off -- it is placed by hand again instead, exactly as
+        # it would be on the robot. Same rule as benchmark.divergence_radius.
+        "divergence_radius": 0.2,
         # Hand-placement spread of the first run's start pose, the deployment
         # driver's own defaults (mujoco_sim.deploy, measured off exp04/exp05).
         "start_offset_radius": 0.1,
@@ -113,7 +118,7 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
     # mujoco_deployment.enabled (or `run --simulate-deployment`); on the real
     # robot the equivalent runs are recorded by hand into data/<name>/.
     "benchmark": {
-        "trajectory": "trajectory_exports/baselines/circle_medium.JSN",
+        "trajectory": "trajectory_exports/baselines/circle_slow.JSN",
         # Consecutive runs per iteration, chained the way the robot repeats a
         # reference: only the first is placed by hand.
         "num_runs": 5,

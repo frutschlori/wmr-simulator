@@ -7,6 +7,12 @@ import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 import numpy as np
 
+# The summary figures reproduce the objective's noise keys exactly, so they take
+# the namespaces from the objective rather than restating them.
+from wmr_simulator.gain_tuning.objectives import (
+    TRAINING_KEY_NAMESPACE,
+    VALIDATION_KEY_NAMESPACE,
+)
 from wmr_simulator.visualization.trajectories import (
     decimate_path,
     draw_start_pose_arrow,
@@ -14,15 +20,50 @@ from wmr_simulator.visualization.trajectories import (
 )
 
 
+def realization_keys_for_set(realizations, num_trajectories, key_namespace):
+    """The ``(T, R, 2)`` noise-key pairs the objective scored a trajectory set
+    under, as ``(robot_keys, estimator_keys)``.
+
+    Exactly the split ``optimizers._make_terms_for_values`` does, so a summary
+    figure draws the rollouts that were actually scored rather than a fresh
+    draw: every (trajectory, realization) pair gets its own key, and
+    ``key_namespace`` keeps the training set (0) independent of the validation
+    set (1).
+    """
+    from wmr_simulator.gain_tuning.objectives import split_realization_keys_by_trajectory
+
+    return (
+        split_realization_keys_by_trajectory(
+            realizations.robot_keys, num_trajectories, namespace=key_namespace
+        ),
+        split_realization_keys_by_trajectory(
+            realizations.estimator_keys, num_trajectories, namespace=key_namespace
+        ),
+    )
+
+
 def rollout_realizations(
     pipeline,
     robot_params,
     reference_trajectories,
     start_offsets,
+    robot_keys,
+    estimator_keys,
     controller_gains=None,
     schedule_params=None,
 ):
     """Roll out every (trajectory, start offset) pair: ``(T, R, S, 3)`` poses.
+
+    ``robot_keys`` / ``estimator_keys`` are the ``(T, R, 2)`` noise draws the
+    objective scored these rollouts under (see ``realization_keys_for_set``).
+    They are required: letting ``run_closed_loop`` fall back to the pipeline's
+    single ``target_*_key`` puts the whole family on *one* noise realization,
+    so the figure shows a draw the tuner never scored and the realizations
+    differ only in their start pose. Measured on an active-learning tuning set
+    at the stock gains, one shared key against the objective's own keys: pose
+    RMSE 0.0352 vs 0.0386 m, max deviation 0.103 vs 0.161 m, max heading error
+    0.285 vs 0.476 rad -- i.e. the shared-key figure reads as a controller that
+    tracks visibly better than the one being tuned.
 
     The tuning objective is an average over the start offsets, so a figure that
     draws one rollout per trajectory shows a single sample of what was scored.
@@ -34,19 +75,27 @@ def rollout_realizations(
 
     reference_trajectories = jnp.asarray(reference_trajectories, dtype=jnp.float32)
     start_offsets = jnp.asarray(start_offsets, dtype=jnp.float32)
+    robot_keys = jnp.asarray(robot_keys)
+    estimator_keys = jnp.asarray(estimator_keys)
 
-    def rollout(reference_states, start_offset):
+    def rollout(reference_states, start_offset, robot_key, estimator_key):
         return pipeline.run_closed_loop(
             robot_params,
             use_hidden_robot=True,
             controller_gains=controller_gains,
             schedule_params=schedule_params,
+            robot_key=robot_key,
+            estimator_key=estimator_key,
             reference_states=reference_states,
             initial_pose=reference_states[0, :3] + start_offset,
         ).pose.true_states
 
-    batched = jax.jit(jax.vmap(jax.vmap(rollout, in_axes=(None, 0)), in_axes=(0, 0)))
-    return np.asarray(batched(reference_trajectories, start_offsets), dtype=float)
+    batched = jax.jit(
+        jax.vmap(jax.vmap(rollout, in_axes=(None, 0, 0, 0)), in_axes=(0, 0, 0, 0))
+    )
+    return np.asarray(
+        batched(reference_trajectories, start_offsets, robot_keys, estimator_keys), dtype=float
+    )
 
 
 def plot_gain_tuning_summary(
@@ -296,14 +345,18 @@ def plot_trajectory_set_summary(
     tuned_gains,
     reference_trajectories,
     start_offsets,
+    realizations,
+    key_namespace,
     schedule_params=None,
     static_gains=None,
     max_trajectories: int | None = None,
     title: str = "Trajectories",
     out_prefix="trajectory_summary",
 ):
-    """Every trajectory rolled out under *every* start offset it was tuned on
-    (``start_offsets`` is (T, R, 3)), initial gains against tuned.
+    """Every trajectory rolled out under *every* realization it was tuned on --
+    its own start offset (``start_offsets`` is (T, R, 3)) *and* its own noise
+    draw (from ``realizations`` + ``key_namespace``) -- initial gains against
+    tuned.
 
     Drawing one rollout per trajectory would show one draw out of the R the loss
     averages over, and would start it on the reference -- where the tracking
@@ -330,14 +383,30 @@ def plot_trajectory_set_summary(
     # -- eager per-trajectory calls pay a fresh XLA compile each.
     plotted_references = reference_trajectories[:num_trajectories]
     plotted_offsets = np.asarray(start_offsets, dtype=float)[:num_trajectories]
+    # Split over the whole set before slicing: the keys a trajectory was scored
+    # under depend on how many trajectories the set has, so a `max_trajectories`
+    # figure has to take the first few of the full split, not a fresh split of
+    # the first few.
+    robot_keys, estimator_keys = realization_keys_for_set(
+        realizations, reference_trajectories.shape[0], key_namespace
+    )
+    plotted_robot_keys = robot_keys[:num_trajectories]
+    plotted_estimator_keys = estimator_keys[:num_trajectories]
     init_poses = rollout_realizations(
-        pipeline, robot_params, plotted_references, plotted_offsets
+        pipeline,
+        robot_params,
+        plotted_references,
+        plotted_offsets,
+        plotted_robot_keys,
+        plotted_estimator_keys,
     )
     tuned_poses = rollout_realizations(
         pipeline,
         robot_params,
         plotted_references,
         plotted_offsets,
+        plotted_robot_keys,
+        plotted_estimator_keys,
         controller_gains=tuned_gains,
         schedule_params=schedule_params,
     )
@@ -349,6 +418,8 @@ def plot_trajectory_set_summary(
             robot_params,
             plotted_references,
             plotted_offsets,
+            plotted_robot_keys,
+            plotted_estimator_keys,
             controller_gains=static_gains,
         )
     )
@@ -409,6 +480,7 @@ def plot_training_trajectory_summary(
     robot_params,
     tuned_gains,
     start_offsets,
+    realizations,
     schedule_params=None,
     static_gains=None,
     max_trajectories: int | None = 5,
@@ -420,6 +492,8 @@ def plot_training_trajectory_summary(
         tuned_gains=tuned_gains,
         reference_trajectories=pipeline.training_reference_trajectories,
         start_offsets=start_offsets,
+        realizations=realizations,
+        key_namespace=TRAINING_KEY_NAMESPACE,
         schedule_params=schedule_params,
         static_gains=static_gains,
         max_trajectories=max_trajectories,
@@ -433,6 +507,7 @@ def plot_validation_trajectory_summary(
     robot_params,
     tuned_gains,
     start_offsets,
+    realizations,
     schedule_params=None,
     static_gains=None,
     out_prefix="summary_validation",
@@ -443,6 +518,8 @@ def plot_validation_trajectory_summary(
         tuned_gains=tuned_gains,
         reference_trajectories=pipeline.validation_reference_trajectories,
         start_offsets=start_offsets,
+        realizations=realizations,
+        key_namespace=VALIDATION_KEY_NAMESPACE,
         schedule_params=schedule_params,
         static_gains=static_gains,
         max_trajectories=None,
