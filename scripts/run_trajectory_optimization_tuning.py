@@ -42,25 +42,23 @@ def main():
     parser.add_argument("--title", type=str, default="gain_optimized")
     # Optimization Settings
     parser.add_argument("--save-trajectory", action="store_true", default=True)
-    parser.add_argument("--window-length", type=int, default=500) # replay window length, only for identification mode
-    parser.add_argument("--learning-rate", type=float, default=3e-3)
+    parser.add_argument("--window-length", type=int, default=50) # replay window length, only for identification mode
+    parser.add_argument("--learning-rate", type=float, default=3e-2)
     parser.add_argument("--opt-steps", type=int, default=50)
     parser.add_argument("--objective-mode", choices=["identification", "gain-tuning"],
                         default="gain-tuning")
-    parser.add_argument("--fim-a-slip-max", action=argparse.BooleanOptionalAction, default=False,
-                        help="Include a_slip_max in the FIM parameters (identification mode); "
-                             "--no-fim-a-slip-max drops it when its low sensitivity makes the FIM stiff.")
+    parser.add_argument("--fim-a-slip-max", action=argparse.BooleanOptionalAction, default=False)
     # Settings for multiple trajectory synthesis
     parser.add_argument("--num-trajectories", type=int, default=10)
-    parser.add_argument("--constraint-weight-jitter", type=float, default=0.3) # factor for diverse constraints
+    parser.add_argument("--constraint-weight-jitter", type=float, default=0.4) # factor for diverse constraints
     parser.add_argument("--vectorize-trajectories", action="store_true", default=True)
     # Path settings
     parser.add_argument("--time-scaling", choices=["s-curve", "linear"], default="s-curve")
     # B-spline control points. This is the parametrization's stiffness knob:
     # more of them means finer detail but a curve that reacts harder to each
     # one, so the motion constraints bind sooner (see bspline.py).
-    parser.add_argument("--num-control-points", type=int, default=6)
-    parser.add_argument("--trajectory-seed", type=int, default=0)
+    parser.add_argument("--num-control-points", type=int, default=5)
+    parser.add_argument("--trajectory-seed", type=int, default=1)
     parser.add_argument("--criterion", choices=list(CRITERIA), default=DEFAULT_CRITERION)
     # What happens to the rollout start offsets the FIM is averaged over:
     # 'random' keeps the frozen draw, 'static' a deterministic spread, and the
@@ -74,7 +72,7 @@ def main():
     # point of kimotor = 0 -- what the gain tuner reliably returns -- usable:
     # tied, the scale falls back to the search range there and the column stops
     # contributing. Changes the design only; nothing exported carries it.
-    parser.add_argument("--kimotor-fim-scale", type=float, default=1.0)
+    parser.add_argument("--kimotor-fim-scale", type=float, default=5.0)
     # Constraints
     parser.add_argument("--constraint-weight", type=float, default=1.0)
     parser.add_argument("--constraint-v-weight", type=float, default=1.0)

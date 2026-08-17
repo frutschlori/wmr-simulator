@@ -5,6 +5,8 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
+from wmr_simulator.gain_parametrization.limits import clip_to_stability_floor, floor_at_indices
+
 KIND = "bounded_reference"
 
 # Registry mapping YAML feature names to the column they occupy in ``W``/``z``.
@@ -42,9 +44,15 @@ def factors(params: BoundedReferenceParams, ref_state: jax.Array) -> jax.Array:
 
 
 def apply(base_gains: jax.Array, params: BoundedReferenceParams, ref_state: jax.Array) -> jax.Array:
-    """Full scheduled gain vector for one reference state."""
+    """Full scheduled gain vector for one reference state.
+
+    Floored at the base-gain search space's stability bound, like every
+    parametrization here (:mod:`~wmr_simulator.gain_parametrization.limits`);
+    only ``rho >= 1`` lets a factor reach 0, so it normally does not bind.
+    """
     scheduled_factors = factors(params, ref_state)
-    return base_gains.at[params.scheduled_indices].multiply(scheduled_factors, unique_indices=True)
+    scaled = base_gains.at[params.scheduled_indices].multiply(scheduled_factors, unique_indices=True)
+    return clip_to_stability_floor(scaled)
 
 
 def scheduled_outer_gains_over_refs(
@@ -52,11 +60,15 @@ def scheduled_outer_gains_over_refs(
     params: BoundedReferenceParams,
     reference_states: jax.Array,
 ) -> jax.Array:
-    """Scheduled gains over a reference trajectory for diagnostics/penalties."""
+    """Scheduled gains over a reference trajectory for diagnostics/penalties.
+
+    Same stability floor as :func:`apply`, applied to the scheduled columns only.
+    """
     refs = reference_states[:-1]
     base_outer = base_gains[params.scheduled_indices]
     scheduled_factors = jax.vmap(lambda ref: factors(params, ref))(refs)
-    return base_outer[None, :] * scheduled_factors
+    floor = floor_at_indices(params.scheduled_indices)
+    return jnp.maximum(base_outer[None, :] * scheduled_factors, floor[None, :])
 
 
 def num_params(params: BoundedReferenceParams) -> int:

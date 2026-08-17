@@ -128,19 +128,45 @@ def _reference_targets(pipeline, reference_states: jax.Array):
     return reference_poses, reference_velocity, reference_pose_indices
 
 
+def pose_tracking_loss(
+    predicted_poses: jax.Array,
+    reference_poses: jax.Array,
+    position_tracking_weight: float,
+    heading_tracking_weight: float,
+) -> jax.Array:
+    """Pose-tracking loss with position and heading weighted separately.
+
+    Same two residuals as ``SimulationPipeline.pose_mse`` (squared position
+    error and the SO(2) heading error ``2 - 2cos``), but each carries its own
+    weight """
+
+    pos_error = predicted_poses[:, :2] - reference_poses[:, :2]
+    angle_error = predicted_poses[:, 2] - reference_poses[:, 2]
+    position_loss = jnp.mean(jnp.sum(pos_error**2, axis=1))
+    heading_loss = jnp.mean(2.0 - 2.0 * jnp.cos(angle_error))
+    return position_tracking_weight * position_loss + heading_tracking_weight * heading_loss
+
+
 def _base_loss_terms(
     pipeline,
     predicted_log,
     reference_poses,
     reference_velocity,
     reference_pose_indices,
+    position_tracking_weight: float,
+    heading_tracking_weight: float,
     velocity_tracking_weight: float,
     input_weight: float,
     input_delta_weight: float,
     omega_delta_weight: float,
 ) -> jax.Array:
     predicted_poses = predicted_log.pose.states[reference_pose_indices]
-    tracking_loss = pipeline.pose_mse(predicted_poses, reference_poses)
+    tracking_loss = pose_tracking_loss(
+        predicted_poses,
+        reference_poses,
+        position_tracking_weight,
+        heading_tracking_weight,
+    )
     predicted_velocity = predicted_log.wheel.vel_omega[reference_pose_indices]
     # Normalize [v, omega] by their limits so the two channels are commensurate
     # (raw omega ~10 would otherwise swamp v ~1) and velocity_tracking_weight is an
@@ -179,6 +205,8 @@ def closed_loop_objective(
     gains: jax.Array,
     replay_robot_keys: jax.Array,
     replay_estimator_keys: jax.Array,
+    position_tracking_weight: float = 1.0,
+    heading_tracking_weight: float = 1.0,
     velocity_tracking_weight: float = 0.0,
     input_weight: float = 0.0,
     input_delta_weight: float = 0.0,
@@ -192,6 +220,8 @@ def closed_loop_objective(
             gains,
             replay_robot_keys,
             replay_estimator_keys,
+            position_tracking_weight=position_tracking_weight,
+            heading_tracking_weight=heading_tracking_weight,
             velocity_tracking_weight=velocity_tracking_weight,
             input_weight=input_weight,
             input_delta_weight=input_delta_weight,
@@ -207,6 +237,8 @@ def closed_loop_objective_terms(
     gains: jax.Array,
     replay_robot_keys: jax.Array,
     replay_estimator_keys: jax.Array,
+    position_tracking_weight: float = 1.0,
+    heading_tracking_weight: float = 1.0,
     velocity_tracking_weight: float = 0.0,
     input_weight: float = 0.0,
     input_delta_weight: float = 0.0,
@@ -235,6 +267,8 @@ def closed_loop_objective_terms(
             reference_poses,
             reference_velocity,
             reference_pose_indices,
+            position_tracking_weight,
+            heading_tracking_weight,
             velocity_tracking_weight,
             input_weight,
             input_delta_weight,
@@ -251,6 +285,8 @@ def scheduled_closed_loop_objective(
     schedule_params,
     replay_robot_keys: jax.Array,
     replay_estimator_keys: jax.Array,
+    position_tracking_weight: float = 1.0,
+    heading_tracking_weight: float = 1.0,
     velocity_tracking_weight: float = 0.0,
     input_weight: float = 0.0,
     input_delta_weight: float = 0.0,
@@ -267,6 +303,8 @@ def scheduled_closed_loop_objective(
             schedule_params,
             replay_robot_keys,
             replay_estimator_keys,
+            position_tracking_weight=position_tracking_weight,
+            heading_tracking_weight=heading_tracking_weight,
             velocity_tracking_weight=velocity_tracking_weight,
             input_weight=input_weight,
             input_delta_weight=input_delta_weight,
@@ -285,6 +323,8 @@ def scheduled_closed_loop_objective_terms(
     schedule_params,
     replay_robot_keys: jax.Array,
     replay_estimator_keys: jax.Array,
+    position_tracking_weight: float = 1.0,
+    heading_tracking_weight: float = 1.0,
     velocity_tracking_weight: float = 0.0,
     input_weight: float = 0.0,
     input_delta_weight: float = 0.0,
@@ -324,6 +364,8 @@ def scheduled_closed_loop_objective_terms(
             reference_poses,
             reference_velocity,
             reference_pose_indices,
+            position_tracking_weight,
+            heading_tracking_weight,
             velocity_tracking_weight,
             input_weight,
             input_delta_weight,

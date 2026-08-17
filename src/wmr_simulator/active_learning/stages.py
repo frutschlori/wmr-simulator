@@ -890,6 +890,8 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
         seed=int(experiment.config["seed"]),
         reference_trajectories_dir=str(paths.tuning_trajectories_dir),
         validation_split=float(config["validation_split"]),
+        position_tracking_weight=float(config.get("position_tracking_weight", 1.0)),
+        heading_tracking_weight=float(config.get("heading_tracking_weight", 1.0)),
         velocity_tracking_weight=float(config["velocity_tracking_weight"]),
         input_weight=float(config["input_weight"]),
         input_delta_weight=float(config["input_delta_weight"]),
