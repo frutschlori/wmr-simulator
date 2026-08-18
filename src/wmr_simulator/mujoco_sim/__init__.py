@@ -7,26 +7,40 @@ reads ``models/pololu_hidden.yaml`` and ``models/pololu_calibrated.xml``.
 from wmr_simulator.mujoco_sim.binlog import BinaryLogWriter, LogTag
 from wmr_simulator.mujoco_sim.deploy import DeploymentResult, run_deployment
 from wmr_simulator.mujoco_sim.firmware import Firmware, FirmwareClock, FirmwareConfig
-from wmr_simulator.mujoco_sim.truth import PlantTruth, measure_plant_truth
 from wmr_simulator.mujoco_sim.plant import (
     HiddenPlantConfig,
     MujocoPlant,
     build_plant_xml,
     load_hidden_plant_config,
 )
+from wmr_simulator.mujoco_sim.render import (
+    DeploymentVideoRecorder,
+    FrameObserver,
+    VariantRun,
+    record_pose_track,
+    render_deployment,
+    render_deployment_comparison,
+)
+from wmr_simulator.mujoco_sim.truth import PlantTruth, measure_plant_truth
 
 __all__ = [
     "BinaryLogWriter",
     "DeploymentResult",
+    "DeploymentVideoRecorder",
     "Firmware",
     "FirmwareClock",
     "FirmwareConfig",
+    "FrameObserver",
     "HiddenPlantConfig",
     "LogTag",
     "MujocoPlant",
     "PlantTruth",
+    "VariantRun",
     "build_plant_xml",
     "load_hidden_plant_config",
     "measure_plant_truth",
+    "record_pose_track",
+    "render_deployment",
+    "render_deployment_comparison",
     "run_deployment",
 ]

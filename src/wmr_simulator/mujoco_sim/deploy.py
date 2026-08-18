@@ -4,7 +4,7 @@ This is the piece that stands in for carrying the SD card to the robot and
 back. It wires the three halves together and does nothing else of its own:
 
     ROBOTCFG.CFG / robot_config.yaml -> firmware.FirmwareConfig
-    trajectory .JSN                  -> pololu.reference_importer
+    trajectory .JSN / .pkl           -> pololu.reference_importer
     plant.MujocoPlant  <-> firmware.Firmware  -> binlog.BinaryLogWriter
 
 The only randomization is the start pose: the plant's parameters stay fixed so
@@ -27,7 +27,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Callable, Sequence
 
 import numpy as np
 
@@ -42,8 +42,8 @@ DEFAULT_BOOT_TIME_MS = 15_000
 
 # gain_tuning.defaults: measured across the exp04/exp05 logs, where the robot
 # was placed 31-100 mm and up to 9.5 deg off the reference start.
-DEFAULT_START_OFFSET_RADIUS = 0.1
-DEFAULT_START_OFFSET_ANGLE = 0.3
+DEFAULT_START_OFFSET_RADIUS = 0.05
+DEFAULT_START_OFFSET_ANGLE = 0.2
 
 MAX_LOG_INDEX = 100  # sdlog.rs::open_new_file tries TR00..TR99
 
@@ -80,6 +80,7 @@ def run_deployment(
     start_offset_angle: float = DEFAULT_START_OFFSET_ANGLE,
     plant_config: HiddenPlantConfig | None = None,
     boot_time_ms: int = DEFAULT_BOOT_TIME_MS,
+    observer: Callable[["object", MujocoPlant], None] | None = None,
 ) -> DeploymentResult:
     """Execute ``trajectory`` under ``robot_config`` and write a ``TRxx`` log.
 
@@ -88,11 +89,16 @@ def run_deployment(
     previous one's bridge path left the robot. The reported ``start_offset`` is
     then how far off the trajectory's start that happened to be, which is the
     same quantity as a drawn offset and comparable with it.
+
+    ``observer`` is called with ``(tick, plant)`` after every physics step. It
+    is how the video renderer gets at the run without a second copy of this
+    loop; it may read the plant's ground truth, which is why it is a caller's
+    hook and not something the log ever sees.
     """
-    from wmr_simulator.pololu.reference_importer import load_pololu_reference
+    from wmr_simulator.pololu.reference_importer import load_reference
 
     config = FirmwareConfig.from_file(robot_config)
-    reference = load_pololu_reference(trajectory)
+    reference = load_reference(trajectory)
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -148,6 +154,8 @@ def run_deployment(
                 true_pose = plant.pose()
                 errors.append(math.hypot(setpoint.x_des - true_pose[0], setpoint.y_des - true_pose[1]))
             plant.step()
+            if observer is not None:
+                observer(tick, plant)
         num_records = writer.num_records
 
     error_array = np.asarray(errors)

@@ -39,7 +39,10 @@ An experiment lives in its own directory and holds one folder per iteration:
         benchmark/                  the baseline reference as it was driven
                                     (bridged when it does not close on itself)
         results/                    identification.yaml, gains.yaml, residual_model.pkl
-        visualize/                  plots of this iteration
+        visualize/                  plots of this iteration, plus the
+                                    cross-iteration figures regenerated as it
+                                    runs (identified_parameters.pdf,
+                                    pipeline_progress.pdf, baseline_runs_*.pdf)
       iteration_02/                 created by the finalize stage from iteration_01 results
 
 All stage results are plain files, so the loop can be interrupted at any point
@@ -118,7 +121,7 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
     # mujoco_deployment.enabled (or `run --simulate-deployment`); on the real
     # robot the equivalent runs are recorded by hand into data/<name>/.
     "benchmark": {
-        "trajectory": "trajectory_exports/baselines/circle_slow.JSN",
+        "trajectory": "trajectory_exports/baselines/circle_medium.JSN",
         # Consecutive runs per iteration, chained the way the robot repeats a
         # reference: only the first is placed by hand.
         "num_runs": 5,
@@ -126,10 +129,10 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         # did not come back, so the next one cannot start where it left off --
         # it is placed by hand again instead, exactly as it would be on the
         # robot.
-        "divergence_radius": 0.2,
+        "divergence_radius": 0.15,
         # Hand-placement spread, the same distribution the identification
         # deployment and the gain tuner's start offsets use.
-        "start_offset_radius": 0.1,
+        "start_offset_radius": 0.05,
         "start_offset_angle": 0.3,
         # A reference that does not end where it starts gets a wait + bridge
         # path back appended (pololu.bridge_exporter), which is what makes

@@ -24,6 +24,12 @@ dependencies = [
     "cvxpy>=1.7.4",
     "optimistix>=0.1.0",
     "mujoco>=3.2",
+    # The deployment video renderer: imageio(+ffmpeg) writes the mp4, pillow
+    # composites its legend onto the rendered frames. All three arrive
+    # transitively via matplotlib/moviepy, but package code imports them.
+    "imageio>=2.31",
+    "imageio-ffmpeg>=0.4.9",
+    "pillow>=10.1",
 ]
 
 [dependency-groups]

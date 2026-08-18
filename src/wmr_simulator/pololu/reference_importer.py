@@ -23,11 +23,32 @@ class PololuReference:
     metadata: dict[str, Any]
 
 
+def load_reference(path: str | Path, *, result_index: int = 0) -> PololuReference:
+    """A reference from either a Pololu ``.JSN`` or a simulator reference pickle.
+
+    The pickle route goes through ``reference_exporter.format_pololu_reference``,
+    i.e. builds the exact payload the robot would have been handed, so a
+    designed trajectory is driven identically whether it is given as the pickle
+    it was designed in or as the JSN exported from it.
+    """
+    path = Path(path)
+    if path.suffix.lower() != ".pkl":
+        return load_pololu_reference(path, result_index=result_index)
+
+    from wmr_simulator.pololu.reference_exporter import format_pololu_reference, load_reference_trajectory
+
+    payload = format_pololu_reference(load_reference_trajectory(path))
+    return _reference_from_payload(path, payload, result_index)
+
+
 def load_pololu_reference(path: str | Path, *, result_index: int = 0) -> PololuReference:
     path = Path(path)
     with path.open("r", encoding="utf-8") as file:
         payload = json.load(file)
+    return _reference_from_payload(path, payload, result_index)
 
+
+def _reference_from_payload(path: Path, payload: Any, result_index: int) -> PololuReference:
     if not isinstance(payload, dict) or "result" not in payload:
         raise ValueError(f"{path} must contain a top-level 'result' field.")
     results = payload["result"]
