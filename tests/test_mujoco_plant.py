@@ -36,7 +36,12 @@ def test_hidden_config_values_reach_the_compiled_model(config, plant):
     assert model.actuator_ctrlrange[left, 1] == pytest.approx(config.motor.ctrl_limit)
 
     joint = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "left_wheel_joint")
-    assert model.dof_armature[model.jnt_dofadr[joint]] == pytest.approx(config.motor.armature)
+    # `armature` is EXTRA inertia, so what has to match the spec is the TOTAL
+    # about the hinge: the patched armature plus the wheel geom's own share.
+    from wmr_simulator.mujoco_sim.plant import _wheel_spin_inertia
+
+    total = model.dof_armature[model.jnt_dofadr[joint]] + _wheel_spin_inertia(config.geometry)
+    assert total == pytest.approx(config.motor.armature)
 
     body = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "left_wheel")
     assert model.body_pos[body, 1] == pytest.approx(config.geometry.half_track)
@@ -61,7 +66,9 @@ def test_patching_keeps_the_non_sliding_friction_components(config):
     assert [float(value) for value in floor] == [config.friction.floor, 0.005, 0.0001]
     pair = [float(value) for value in root.find(".//pair").get("friction").split()]
     assert pair[:2] == [config.friction.caster] * 2
-    assert pair[2:] == [0.0001, 0.0001, 0.0001]
+    # Torsional then the two rolling terms. The rolling terms must stay small:
+    # they are what let the ball caster roll instead of skid.
+    assert pair[2:] == [0.001, 0.0001, 0.0001]
 
 
 def test_reset_places_the_robot_at_rest(plant):
@@ -87,8 +94,9 @@ def test_encoder_counts_invert_to_the_true_wheel_speed(plant):
     after = plant.encoder_counts()
 
     firmware = [TWO_PI * (after[i] - before[i]) / (cpr * dt) for i in range(2)]
-    # One count is 2*pi/183 = 0.034 rad, i.e. 3.4 rad/s of quantization at 100 Hz.
-    assert firmware == pytest.approx(truth, abs=4.0)
+    # One count is 2*pi/183 = 0.034 rad, i.e. 3.4 rad/s at 100 Hz - and the count
+    # is rounded at BOTH ends of the window, so the bound is two counts, not one.
+    assert firmware == pytest.approx(truth, abs=7.0)
     assert firmware[0] > firmware[1] > 0.0
 
 
@@ -179,15 +187,27 @@ def test_measured_plant_truth_still_matches_the_benchmark_reference(config):
     from wmr_simulator.mujoco_sim.truth import measure_plant_truth
 
     truth = measure_plant_truth(MujocoPlant(config, seed=0))
+    # Re-pinned 2026-08-18 for the rolling-ball caster, the datasheet motor
+    # (0.0245 N-m stall) and the 135 g chassis with a centred battery pack.
     # Emergent, not declared: contact penetration, not the 16 mm geom size.
-    assert truth.wheel_radius == pytest.approx(0.01597, abs=2e-4)
-    # Scrub: the geometric wheelbase is 84.2 mm and both regimes sit just under it.
-    assert truth.wheel_base_arc == pytest.approx(0.0833, abs=1e-3)
-    assert truth.wheel_base_spin == pytest.approx(0.0836, abs=2e-3)
-    # Loaded, so a little under the hidden yaml's 230 rad/s free speed.
-    assert truth.max_wheel_speed == pytest.approx(229.3, abs=1.0)
+    assert truth.wheel_radius == pytest.approx(0.01596, abs=2e-4)
+    # Scrub, against a geometric 84.2 mm. The two regimes agreeing to 0.2 mm is
+    # itself the check that nothing drifted in yaw during the open-loop window;
+    # they read 79.9 vs 84.8 while the CoM still sat behind the drive axle.
+    assert truth.wheel_base_arc == pytest.approx(0.0842, abs=1e-3)
+    assert truth.wheel_base_spin == pytest.approx(0.0840, abs=2e-3)
+    # Barely loaded: the rolling ball costs almost no drag, where the old rigid
+    # skid dragged the steady speed well below the yaml's 230 rad/s.
+    assert truth.max_wheel_speed == pytest.approx(229.8, abs=1.5)
     # The logged signal is behind the firmware's 3 Hz low-pass, which is what
     # identification is fitted to - score it against this one, not the other.
-    assert truth.time_constant_mechanical == pytest.approx(0.110, abs=0.02)
-    assert truth.time_constant_logged == pytest.approx(0.180, abs=0.02)
+    # Which of these to score identification against is NOT settled. log_loader
+    # advances the encoder series by DEFAULT_ENCODER_LP_TAU_S = 0.027 s, so the
+    # low-pass group delay is already compensated and the fitted value should be
+    # the true PT1 tau, i.e. the mechanical one. But the mechanical rise is
+    # measured at duty 0.6, where the wheel spins up partly by slipping, so it
+    # reads faster than the vehicle actually responds. Real-robot fits span
+    # 0.12-0.25 s, which brackets the logged number and not the mechanical one.
+    assert truth.time_constant_mechanical == pytest.approx(0.070, abs=0.02)
+    assert truth.time_constant_logged == pytest.approx(0.200, abs=0.03)
     assert truth.time_constant_logged > truth.time_constant_mechanical

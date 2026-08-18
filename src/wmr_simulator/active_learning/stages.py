@@ -1110,7 +1110,31 @@ def stage_identify(
             is_outlier=report.is_outlier,
             z_threshold=float(config["outlier_z_threshold"]),
         )
+
+    _plot_identified_parameters(experiment, paths)
     return payload
+
+
+def _plot_identified_parameters(experiment: Experiment, paths: IterationPaths) -> str | None:
+    """Cross-iteration history of the identified parameters, regenerated from
+    every iteration up to this one and written straight into *this* iteration's
+    visualize dir -- not through collect_plots, since it never touches the
+    shared repo-root visualize/. Best-effort for the same reason the progress
+    plot is: a plotting failure must not abort the stage that just produced this
+    iteration's parameters."""
+    try:
+        from wmr_simulator.active_learning.identified_parameters import collect_identified_parameters
+        from wmr_simulator.visualization.identified_parameters import plot_identified_parameters
+
+        records = collect_identified_parameters(experiment)
+        plot_path = plot_identified_parameters(
+            records, experiment.root, out_path=paths.visualize_dir / "identified_parameters.pdf"
+        )
+        print(f"Wrote {plot_path}")
+        return plot_path
+    except Exception as error:
+        print(f"Identified parameters plot skipped ({error}).")
+        return None
 
 
 def _estimated_params_dict(params) -> dict:

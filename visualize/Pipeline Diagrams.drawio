@@ -1,6 +1,6 @@
-<mxfile host="app.diagrams.net">
+<mxfile host="Electron">
   <diagram name="Seite-1" id="HJwQtXovJtv1yMYH1tw3">
-    <mxGraphModel dx="1428" dy="1246" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="827" pageHeight="1169" math="0" shadow="0">
+    <mxGraphModel dx="790" dy="629" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="827" pageHeight="1169" math="0" shadow="0">
       <root>
         <mxCell id="0" />
         <mxCell id="1" parent="0" />
@@ -19,8 +19,8 @@
         <mxCell id="txZr0xzXQO3-vxK8XCI8-6" edge="1" parent="1" source="txZr0xzXQO3-vxK8XCI8-3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="txZr0xzXQO3-vxK8XCI8-5" value="">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="txZr0xzXQO3-vxK8XCI8-3" parent="1" style="rounded=1;whiteSpace=wrap;html=1;" value="&lt;div&gt;Data Collection&amp;nbsp;&lt;/div&gt;&lt;div&gt;from real Robot&lt;/div&gt;" vertex="1">
-          <mxGeometry height="40" width="120" x="240" y="470" as="geometry" />
+        <mxCell id="txZr0xzXQO3-vxK8XCI8-3" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" value="&lt;div&gt;Data Collection&amp;nbsp;&lt;/div&gt;&lt;div&gt;from Mujoco deployment&lt;/div&gt;" vertex="1">
+          <mxGeometry height="40" width="139" x="230.5" y="470" as="geometry" />
         </mxCell>
         <mxCell id="txZr0xzXQO3-vxK8XCI8-8" edge="1" parent="1" source="txZr0xzXQO3-vxK8XCI8-5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="txZr0xzXQO3-vxK8XCI8-7" value="">
           <mxGeometry relative="1" as="geometry" />
@@ -37,58 +37,61 @@
         <mxCell id="txZr0xzXQO3-vxK8XCI8-15" edge="1" parent="1" source="txZr0xzXQO3-vxK8XCI8-11" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.333;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;exitPerimeter=0;" target="pUScIhfee34EBn6S-gnS-1">
           <mxGeometry relative="1" as="geometry">
             <Array as="points">
-              <mxPoint x="360" y="720" />
-              <mxPoint x="430" y="720" />
-              <mxPoint x="430" y="420" />
+              <mxPoint x="360" y="719.97" />
+              <mxPoint x="450" y="719.97" />
+              <mxPoint x="450" y="420.03" />
             </Array>
             <mxPoint x="360" y="750" as="sourcePoint" />
             <mxPoint x="360" y="400" as="targetPoint" />
           </mxGeometry>
         </mxCell>
-        <mxCell id="txZr0xzXQO3-vxK8XCI8-11" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" value="&lt;div&gt;Controller Tuning&lt;/div&gt;&lt;div&gt;in simulation&lt;/div&gt;" vertex="1">
+        <mxCell id="txZr0xzXQO3-vxK8XCI8-11" parent="1" style="rounded=1;whiteSpace=wrap;html=1;" value="&lt;div&gt;Controller Tuning&lt;/div&gt;&lt;div&gt;in simulation&lt;/div&gt;" vertex="1">
           <mxGeometry height="40" width="120" x="240" y="700" as="geometry" />
         </mxCell>
-        <mxCell id="PP8zKayx7DsA15F6XY1E-3" edge="1" parent="1" source="PP8zKayx7DsA15F6XY1E-1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" target="txZr0xzXQO3-vxK8XCI8-11" value="">
+        <mxCell id="PP8zKayx7DsA15F6XY1E-3" edge="1" parent="1" source="PP8zKayx7DsA15F6XY1E-1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="txZr0xzXQO3-vxK8XCI8-11" value="">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="PP8zKayx7DsA15F6XY1E-1" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" value="Trajectory Optimization for Controller Tuning" vertex="1">
+        <mxCell id="PP8zKayx7DsA15F6XY1E-1" parent="1" style="rounded=1;whiteSpace=wrap;html=1;" value="Trajectory Optimization for Controller Tuning" vertex="1">
           <mxGeometry height="50" width="120" x="240" y="630" as="geometry" />
         </mxCell>
         <mxCell id="1UZJHnCoDdJsGCaBaxEJ-3" edge="1" parent="1" source="1UZJHnCoDdJsGCaBaxEJ-1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="1UZJHnCoDdJsGCaBaxEJ-2" value="">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
         <mxCell id="1UZJHnCoDdJsGCaBaxEJ-1" parent="1" style="rounded=1;whiteSpace=wrap;html=1;" value="Initial Trajectory Optimization (as usual)" vertex="1">
-          <mxGeometry height="60" width="120" x="470" y="390" as="geometry" />
+          <mxGeometry height="60" width="120" x="430" y="70" as="geometry" />
         </mxCell>
         <mxCell id="1UZJHnCoDdJsGCaBaxEJ-5" edge="1" parent="1" source="1UZJHnCoDdJsGCaBaxEJ-2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="1UZJHnCoDdJsGCaBaxEJ-4" value="">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
         <mxCell id="1UZJHnCoDdJsGCaBaxEJ-2" parent="1" style="rounded=1;whiteSpace=wrap;html=1;" value="Adam-Step Gains (minimizing gain tuning objective)" vertex="1">
-          <mxGeometry height="60" width="120" x="629" y="390" as="geometry" />
+          <mxGeometry height="60" width="120" x="589" y="70" as="geometry" />
         </mxCell>
         <mxCell id="1UZJHnCoDdJsGCaBaxEJ-7" edge="1" parent="1" source="1UZJHnCoDdJsGCaBaxEJ-4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="1UZJHnCoDdJsGCaBaxEJ-6" value="">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
         <mxCell id="1UZJHnCoDdJsGCaBaxEJ-4" parent="1" style="rounded=1;whiteSpace=wrap;html=1;" value="Compute FIM at stepped gains" vertex="1">
-          <mxGeometry height="60" width="120" x="629" y="470" as="geometry" />
+          <mxGeometry height="60" width="120" x="589" y="150" as="geometry" />
         </mxCell>
         <mxCell id="1UZJHnCoDdJsGCaBaxEJ-9" edge="1" parent="1" source="1UZJHnCoDdJsGCaBaxEJ-6" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" target="1UZJHnCoDdJsGCaBaxEJ-2">
           <mxGeometry relative="1" as="geometry">
             <Array as="points">
-              <mxPoint x="789" y="580" />
-              <mxPoint x="789" y="420" />
+              <mxPoint x="749" y="260" />
+              <mxPoint x="749" y="100" />
             </Array>
-            <mxPoint x="799" y="420" as="targetPoint" />
+            <mxPoint x="759" y="100" as="targetPoint" />
           </mxGeometry>
         </mxCell>
         <mxCell id="1UZJHnCoDdJsGCaBaxEJ-6" parent="1" style="rounded=1;whiteSpace=wrap;html=1;" value="Adam-Step Trajectory Control Points and Offsets (minimizing FIM objective)" vertex="1">
-          <mxGeometry height="60" width="120" x="629" y="550" as="geometry" />
+          <mxGeometry height="60" width="120" x="589" y="230" as="geometry" />
         </mxCell>
         <mxCell id="1UZJHnCoDdJsGCaBaxEJ-10" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="&lt;b&gt;New Tuning Idea&lt;/b&gt;" vertex="1">
-          <mxGeometry height="30" width="160" x="609" y="350" as="geometry" />
+          <mxGeometry height="30" width="160" x="569" y="30" as="geometry" />
         </mxCell>
         <mxCell id="1UZJHnCoDdJsGCaBaxEJ-12" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="&lt;b&gt;Full Pipeline (tuning parts highligted)&lt;/b&gt;" vertex="1">
-          <mxGeometry height="30" width="215" x="192.5" y="350" as="geometry" />
+          <mxGeometry height="30" width="215" x="192.5" y="320" as="geometry" />
+        </mxCell>
+        <mxCell id="RleNPJH7PmQ9FwaSAx81-1" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" value="&lt;div&gt;Record closed-loop performance along some static benchmark trajectory with Mujoco&lt;/div&gt;" vertex="1">
+          <mxGeometry height="90" width="140" x="379" y="524" as="geometry" />
         </mxCell>
       </root>
     </mxGraphModel>

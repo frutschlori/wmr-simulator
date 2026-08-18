@@ -21,9 +21,39 @@ model_path: models/pololu_calibrated.xml
 motor:
   # ctrl = duty * omega_max on a MuJoCo velocity actuator, which applies
   # torque = kv * (ctrl - qvel): algebraically a DC motor's (kt/R)(V - ke w).
-  omega_max: 230.0        # rad/s at duty = 1        (nominal belief: 223)
-  stall_torque: 0.150     # N-m at duty = 1, w = 0
-  time_constant: 0.1     # s, free wheel-speed rise (nominal belief: 0.155)
+  omega_max: 230.0        # rad/s at duty = 1        (nominal belief: 250)
+  # 0.150 -> 0.0245 (2026-08-18). The 3pi+ hyper's 15:1 HPCB 6V gearmotor is
+  # specified at 0.25 kg-cm = 0.0245 N-m stall and 2100 rpm = 220 rad/s no-load
+  # at the gearbox output, which drives the wheel directly. 0.150 was a
+  # placeholder worth 6.1x that: it could command 100 m/s^2 (15x the traction
+  # limit mu*g = 6.87, 33x the problem's a_max = 3.0) and its reaction torque
+  # was 5.5x what it takes to rotate the robot back onto the caster and lift the
+  # drive wheels (0.055 N-m), so every duty step was a wheelie.
+  #
+  # This could only be lowered once the caster became a rolling ball. As a rigid
+  # skid it cost ~780 mm/s of sideways drag through every turn, which the
+  # oversized motor was silently paying for; with the real motor and the old
+  # skid, wheel speeds collapsed to 58/12 rad/s against a commanded 92/46 and
+  # broke into a 10 Hz limit cycle. Do not raise the skid back.
+  stall_torque: 0.0245    # N-m at duty = 1, w = 0   (0.25 kg-cm, datasheet)
+  # The FREE wheel-speed rise (armature/kv) - a construction knob, not the
+  # observable lag: it exists only to set armature = kv * time_constant, and
+  # `build_plant_xml` subtracts the wheel geom's own inertia from it.
+  #
+  # 0.0366 is the PHYSICAL value at the datasheet motor, not a fit: the rotor
+  # reflected through the 15:1 gearbox is 1.5e-8 * 15.25^2 = 3.49e-6 kg-m^2 and
+  # the wheel cylinder adds 4.12e-7, so the total 3.90e-6 over kv = 1.065e-4
+  # gives 0.0366 s. Do not set this much lower - at 0.005 the wheel is
+  # effectively massless, spins up inside one inner tick and simply slips, which
+  # makes the measured mechanical rise time read 0.
+  #
+  # What identification sees is the LOADED rise: this PLUS a floor of
+  # (m*r^2/2)/kv = 0.227 s set by the vehicle's own inertia reflected through
+  # the wheel, so ~0.263 s in total. The floor DOMINATES, so this knob barely
+  # moves the observable lag - mass and stall torque set it. Measured PT1 time
+  # constants on the real robot span 0.12-0.25 s, so 0.263 s sits just above
+  # that band; reducing chassis mass is the way to come down into it.
+  time_constant: 0.0366   # s, free wheel-speed rise (physical, see above)
 
 geometry:
   wheel_radius: 0.016     # geom size; the ROLLING radius is smaller, see above
@@ -33,7 +63,11 @@ geometry:
 friction:
   floor: 0.7              # a_slip = mu*g = 6.87 m/s^2, clears a_max_lateral 4.0
   wheel: 0.7
-  caster: 0.05            # via an explicit <pair>; see the XML header for why
+  # The caster is a ROLLING BALL on a ball joint (2026-08-18), not a skid, so
+  # this is now real grip that makes it roll instead of slide - it went UP,
+  # 0.05 -> 0.4. Rolling resistance lives in the <pair>'s rolling terms and
+  # the socket drag in the ball joint's frictionloss, both in the XML.
+  caster: 0.4             # via an explicit <pair>; see the XML header for why
 
 encoder:
   # Signed, and identical to the firmware's `encoder_cpr` key: the count->rad/s
@@ -54,7 +88,7 @@ imu:
 
 mocap:
   offset_xyz: [0.0, 0.0, 0.0]     # marker frame vs. the wheel-axle midpoint
-  position_noise_std: 0.0001       # m,   measured off the exp04/exp05 tracks
+  position_noise_std: 0.0001      # m,   measured off the exp04/exp05 tracks
   angle_noise_std: 0.001          # rad, likewise
 
 # Seconds of zero-duty physics before a run, so the chassis has settled onto

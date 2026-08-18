@@ -91,9 +91,21 @@
 
   <worldbody>
     <!-- friction 1.0 -> 0.7 (see note 4) -->
+    <!--
+      solref 0.002 1 -> 0.008 2 (2026-08-18). The experiments are run on rolled
+      PVC sheet ~5 mm thick: compliant and lossy, not a rigid slab. A near-rigid,
+      critically damped contact (0.002 1) let the tripod stance rock. Raising the
+      damping ratio is what helps; the time constant must stay SMALL, because the
+      binding constraint is penetration - it sets the effective rolling radius,
+      which is the thing identification has to recover. Measured penetration:
+      0.005 mm at 0.008 2, but 3.1 mm at 0.015 5, which collapsed the effective
+      radius 16.0 -> 12.9 mm and the wheelbase 84 -> 68 mm. Check r_eff in
+      mujoco_sim.truth before accepting any softer floor. Phenomenological, not
+      derived from PVC material data.
+    -->
     <geom name="floor" type="plane" size="0 0 0.05" material="groundplane"
           friction="0.7 0.005 0.0001"
-          solref="0.002 1" solimp="0.95 0.99 0.001"/>
+          solref="0.008 2" solimp="0.95 0.99 0.001"/>
 
     <light pos="0 0 1.5" dir="0 0 -1" directional="true"/>
 
@@ -101,17 +113,45 @@
       <freejoint name="root"/>
       <camera name="track_cam" mode="track" pos="0 -0.6 0.25" xyaxes="1 0 0 0 0.6 1"/>
 
+      <!--
+        MASS AND CoM (2026-08-18). Total was 0.188 kg with the battery pack
+        modelled at the rear (x = -30 mm), putting the CoM 11.3 mm behind the
+        drive axle. Both were wrong: a 3pi+ 32mm is ~83 g of robot plus ~52 g of
+        4x AAA NiMH, and the cells sit SYMMETRICALLY about the chassis, so the
+        pack is concentric with the body cylinder rather than hung off the back.
+
+        This matters far more than any contact parameter. A trailing-caster
+        differential drive is directionally unstable open loop exactly when the
+        CoM is behind the drive axle - the shopping-trolley arrangement - and the
+        CoM offset IS the stability margin. Measured, straight line, time until
+        heading error exceeds 5 deg, at duty 0.4 / 0.5 / 0.6:
+
+          CoM -15.4 mm (135 g, pack at rear)   3.68 s / 2.26 s / 1.46 s
+          CoM -11.3 mm (188 g, as shipped)      stable / 3.02 s / 2.23 s
+          CoM  -8.5 mm                          stable / stable / 5.38 s
+          CoM  -6.2 mm (this file)              stable / stable / stable
+
+        Open-loop wheel-unload during a gentle arc falls the same way:
+        27.8% -> 18.1% -> 23.7% -> 15.7%.
+
+        CAUTION, the trade is forward tipping. There is no front support in this
+        model, so the deceleration that lifts the robot over its wheel contacts
+        is g * |CoM_x| / h: 6.43 m/s^2 at the old CoM but only 3.37 here, against
+        the problem's a_max = 3.0 - a 12% margin. If the real robot has a front
+        ball caster, model it; the CoM could then go further forward still (with
+        the pack over the axle the arc unload measures 0.0%) at no tipping cost.
+      -->
       <geom name="body" type="cylinder"
             size="0.0445 0.01"
             pos="-0.006 0 0.0"
             rgba="1.0 1.0 1.0 1.0"
-            mass="0.140"/>
+            mass="0.075"/>
 
-      <geom name="rear_mass" type="box"
+      <geom name="battery_pack" type="box"
             size="0.018 0.020 0.008"
-            pos="-0.030 0 0.006"
+            pos="-0.006 0 0.006"
             rgba="0.2 0.2 0.2 0.0"
-            mass="0.040"/>
+            mass="0.052"/>
 
       <!-- damping 0.2 -> 0, armature 0.005 -> 6.5217e-5, frictionloss 0.02 -> 2e-6 (note 3) -->
       <body name="left_wheel" pos="0.0 0.0421 0.0">
@@ -144,10 +184,28 @@
             contype="0" conaffinity="0"/>
       </body>
 
+      <!--
+        ROLLING BALL CASTER (2026-08-18). Until now this sphere was rigidly
+        fixed to the chassis, i.e. a skid plate, and the low mu=0.05 was what
+        kept the skid cheap. That is not the hardware: the 3pi+ carries a ball
+        caster that spins freely in its socket. As a skid it dragged sideways at
+        ~780 mm/s through every turn, and that parasitic drag is what the old
+        6x-oversized motor was silently paying for.
+
+        The free joint here is a BALL joint: the ball rotates in its socket but
+        does not translate relative to the chassis, which is what a caster is.
+        `frictionloss` is the socket drag - the only thing resisting rotation -
+        and it is deliberately tiny. The contact friction is now a REAL friction
+        (see friction.caster in the hidden yaml): a ball caster needs enough
+        grip to roll rather than skid, which is the opposite of what the old
+        skid model wanted.
+      -->
       <body name="caster" pos="-0.041 0.0 -0.01">
+        <joint name="caster_ball" type="ball" frictionloss="2e-7" damping="0"/>
         <geom name="caster_geom" type="sphere" size="0.0055"
               rgba="0.5 0.5 0.5 1"
-              friction="0.0 0.0 0.0"
+              friction="0.4 0.001 0.0001"
+              mass="0.002"
               />
       </body>
 
@@ -155,16 +213,27 @@
   </worldbody>
 
   <!--
-    The whole point of this block: an explicit pair overrides MuJoCo's
-    elementwise-max friction combination, so the caster is genuinely a
-    low-friction ball (0.05 ~ a real ball caster) instead of inheriting the
-    floor's 0.7. solref="-300 -3" is explicit stiffness/damping (N/m, N-s/m)
-    and is what stops the 13 N hammer impacts.
+    An explicit pair overrides MuJoCo's elementwise-max friction combination, so
+    the caster's own friction is what acts, not the floor's 0.7 imposed on it.
+    solref="-300 -10" is explicit stiffness/damping (N/m, N-s/m) and is what
+    stops the 13 N hammer impacts the 0.5 mm caster gap otherwise produces.
+
+    The damping was -3 until 2026-08-18, which stopped the impacts but left the
+    contact badly UNDERDAMPED: k=300 N/m against the 0.187 kg chassis is
+    zeta ~ 0.2, f ~ 6.4 Hz, and the robot never settled. Measured at -3: a 1 deg
+    peak-to-peak pitch limit cycle at 5.6 Hz standing still at zero duty, and
+    driving circle_medium it pitched to -13 deg at 7.1 Hz with BOTH drive wheels
+    under 5% of body weight for 25% of ticks - hopping, not driving. At -10
+    (zeta ~ 0.6) the pitch excursion and the tracking error both fall and the
+    peak caster force stays ~2x body weight, i.e. the impacts do not come back.
+
+    The rolling friction (4th/5th components) must stay small: that is what lets
+    the ball roll. The sliding friction is now high, not low - see the body.
   -->
   <contact>
     <pair geom1="floor" geom2="caster_geom"
-          friction="0.05 0.05 0.0001 0.0001 0.0001"
-          solref="-300 -3"/>
+          friction="0.4 0.4 0.001 0.0001 0.0001"
+          solref="-300 -10"/>
   </contact>
 
   <actuator>

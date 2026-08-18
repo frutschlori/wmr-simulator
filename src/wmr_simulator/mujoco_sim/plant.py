@@ -138,6 +138,17 @@ class HiddenPlantConfig:
         )
 
 
+MUJOCO_DEFAULT_DENSITY = 1000.0
+"""MuJoCo's default geom density (kg/m^3); the wheel geoms declare no mass."""
+
+
+def _wheel_spin_inertia(geometry: "GeometrySpec") -> float:
+    """Spin inertia of one wheel geom about its hinge axis, m*r^2/2."""
+    radius, half_length = geometry.wheel_radius, geometry.wheel_width
+    mass = MUJOCO_DEFAULT_DENSITY * math.pi * radius**2 * (2.0 * half_length)
+    return mass * radius**2 / 2.0
+
+
 def _resolve_repo_path(value: str | Path) -> Path:
     """A relative asset path is repo-relative; an absolute one is left alone."""
     path = Path(value)
@@ -172,7 +183,12 @@ def build_plant_xml(config: HiddenPlantConfig) -> str:
         body = _require(root, f".//body[@name='{side}_wheel']", config.model_path)
         body.set("pos", f"0 {sign * geometry.half_track} 0")
         joint = _require(root, f".//joint[@name='{side}_wheel_joint']", config.model_path)
-        joint.set("armature", repr(motor.armature))
+        # `armature` is EXTRA inertia on top of the wheel geom's own, so the
+        # spec's time constant only comes out right if the geom's share is
+        # subtracted. It used to be negligible (0.6% of the armature at the old
+        # 0.150 N-m stall torque); at the datasheet 0.0245 N-m the armature is
+        # 29x smaller and the geom carries 19% of it.
+        joint.set("armature", repr(max(motor.armature - _wheel_spin_inertia(geometry), 0.0)))
         geom = _require(root, f".//geom[@name='{side}_wheel_geom']", config.model_path)
         geom.set("size", f"{geometry.wheel_radius} {geometry.wheel_width}")
         _set_sliding_friction(geom, config.friction.wheel)

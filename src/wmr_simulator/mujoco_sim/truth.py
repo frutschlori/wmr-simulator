@@ -34,7 +34,21 @@ from wmr_simulator.mujoco_sim.plant import MujocoPlant
 STRAIGHT_DUTIES = (0.2, 0.3, 0.4, 0.5, 0.6)
 SPIN_DUTIES = (0.10, 0.15)
 ARC_DUTIES = ((0.18, 0.22), (0.12, 0.18))
-SETTLE_TIME = 4.0
+
+# Every measurement here drives OPEN LOOP, and a rear-caster differential drive
+# is directionally unstable open loop: the CoM sits 11 mm BEHIND the drive axle,
+# so any yaw perturbation grows. Measured at duty 0.5, the robot tracks straight
+# to within 0.15 deg for 2.1 s and is then gone - 0.9 deg at 2.45 s, 5.8 at 2.8,
+# 44 at 3.15, spinning after that. The window has to close before that.
+#
+# This is not new physics, it was MASKED: at the old placeholder 0.150 N-m stall
+# torque the velocity servo was stiff enough to hold both wheel speeds equal
+# through the perturbation. At the datasheet 0.0245 N-m it cannot, and 4.0 s of
+# settling put every reading inside the divergence (wheel radius read 12.5 mm
+# against 16.0, the arc wheelbase 51 mm against 84, and the rise time constant
+# came out 0.000 s because `final` was averaged over a spinning tail).
+SETTLE_TIME = 1.5
+RISE_WINDOW_S = 1.5
 
 
 @dataclass(frozen=True)
@@ -103,9 +117,11 @@ def _motor_gain(plant: MujocoPlant) -> float:
 
     Duty 1.0 is left out: the plant's ratio drops there, so including it drags a
     through-origin fit ~2% low over the range a trajectory actually commands.
+    Duty 0.8 is left out too - the open-loop yaw divergence above reaches it
+    inside the settling window, and a diverged run reads as a low ratio.
     """
     ratios = []
-    for duty in (0.2, 0.4, 0.6, 0.8):
+    for duty in (0.2, 0.4, 0.6):
         _drive(plant, duty, duty)
         ratios.append(float(np.mean(plant.wheel_speeds())) / duty)
     return float(np.mean(ratios))
@@ -138,7 +154,7 @@ def _rise_time_constant(plant: MujocoPlant, logged: bool, duty: float = 0.6) -> 
 
     steps_per_tick = plant.steps_for(INNER_PERIOD_S)
     speeds = []
-    for _ in range(300):  # 3 s
+    for _ in range(int(round(RISE_WINDOW_S / INNER_PERIOD_S))):
         for _ in range(steps_per_tick):
             plant.set_duty(duty, duty)
             plant.step()
@@ -149,6 +165,8 @@ def _rise_time_constant(plant: MujocoPlant, logged: bool, duty: float = 0.6) -> 
             speeds.append(float(np.mean(plant.wheel_speeds())))
 
     speeds = np.asarray(speeds)
+    # Last 0.5 s of the window: past 6 loaded time constants, before the yaw
+    # divergence. Averaging a longer tail would fold the divergence into `final`.
     final = speeds[-50:].mean()
     return float(INNER_PERIOD_S * int(np.argmax(speeds >= (1.0 - np.exp(-1.0)) * final)))
 
