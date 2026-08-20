@@ -66,6 +66,14 @@
     still lose ground contact open loop - realistic oversteer for a rear-caster
     robot. Every test so far was OPEN LOOP, where a differential drive has no
     heading feedback and is unstable by construction. Re-evaluate closed loop.
+
+    KNOWN OPEN ITEM 2 (2026-08-19): the front contact is declared and its
+    friction is now honest, but nothing has ever REACHED it - 0.0% of ticks in
+    every open-loop manoeuvre tried, because the chassis pitches nose-UP under
+    acceleration and only a hard deceleration would put it on its nose. So it is
+    a correctness fix waiting to matter, and its two numbers - the 6.1 mm ground
+    clearance that comes from the cylinder's half-height, and mu = 0.15 - are
+    both unvalidated against the hardware.
   -->
   <compiler angle="radian" inertiafromgeom="true"/>
 
@@ -134,23 +142,67 @@
         Open-loop wheel-unload during a gentle arc falls the same way:
         27.8% -> 18.1% -> 23.7% -> 15.7%.
 
-        CAUTION, the trade is forward tipping. There is no front support in this
-        model, so the deceleration that lifts the robot over its wheel contacts
-        is g * |CoM_x| / h: 6.43 m/s^2 at the old CoM but only 3.37 here, against
-        the problem's a_max = 3.0 - a 12% margin. If the real robot has a front
-        ball caster, model it; the CoM could then go further forward still (with
-        the pack over the axle the arc unload measures 0.0%) at no tipping cost.
+        CoM 6 mm BEHIND THE AXLE, 15 mm UP (2026-08-19). The height is the real
+        change from what came before: it was +2.2 mm ABOVE the axle (which sits
+        at 16.1 mm), i.e. 18.3 mm up, and the batteries are on the UNDERSIDE of
+        the real robot, so the pack is what pulls the CoM below axle height.
+
+        The longitudinal offset went to 0.0 mm and then back to -6.0 mm, from
+        photographs of the underside: one of the battery pairs sits further back
+        than the other, so the pack is not concentric with the chassis and the
+        CoM is genuinely behind the axle. That offset is also what PRELOADS the
+        caster - with the CoM over the axle the caster carries no static load
+        and the chassis is free to rotate about the axle under the motors'
+        reaction torque until the contact catches it, which grew the pitch
+        excursions (-2.9 -> -5.6 deg on an arc) even as the wheel unload fell.
+
+        Placement is split between the two geoms on purpose. The cylinder is the
+        chassis OUTLINE and is concentric with the drive axle, which is what it
+        physically is; the (invisible, non-colliding) pack is the mass knob and
+        carries the offset. It sits 14.1 mm back rather than 6.0 because it has
+        to pull the wheels AND the 2 g caster hanging 41 mm behind with it.
+
+        Measured open loop, fraction of ticks with the two drive wheels under 5%
+        of body weight between them, and the pitch excursion (negative is
+        nose-up, i.e. rocked back onto the caster). Three CoMs: the previous
+        -6.2 mm / 18.3 mm, the on-axle experiment, and this file.
+
+                                  -6.2/18.3    0.0/15.0    -6.0/15.0
+          gentle arc (0.18/0.22)      0.0%        0.0%         0.0%
+          straight   (0.8)           12.1%        8.6%        11.2%
+          arc        (0.6/0.2)       40.3%       32.6%        37.3%
+          spin       (0.6/-0.6)      30.5%       13.8%        26.7%
+          hard whip  (0.9/0.3)       62.9%       51.7%        59.7%
+          pitch, arc                 -2.9 deg    -5.6 deg     -2.4 deg
+          pitch, whip                -5.4 deg    -7.9 deg     -5.0 deg
+
+        So the two effects trade against each other and both are real. Removing
+        the offset entirely buys the largest drop in wheel unload (spin halves)
+        but costs the caster preload, and the chassis then swings ~2x further in
+        pitch before the caster catches it. Preloaded, the pitch excursions come
+        back down and the unload sits between the two. Straight-line heading
+        holds to <5 deg for 6 s at duty 0.4/0.5/0.6 in all three.
+
+        Both numbers are provisional pending the weighing. The height is the
+        lever on the pitch swing and 15 mm is still a guess.
       -->
       <geom name="body" type="cylinder"
             size="0.0445 0.01"
-            pos="-0.006 0 0.0"
+            pos="0.0 0 0.0"
             rgba="1.0 1.0 1.0 1.0"
             mass="0.075"/>
 
+      <!--
+        Mass only, no collision (contype/conaffinity 0). It used to collide, and
+        after the CoM move its underside sits BELOW the chassis cylinder's, so
+        it would have become the front skid by accident. The thing that touches
+        down at the front is the chassis underside - see the floor/body pair.
+      -->
       <geom name="battery_pack" type="box"
             size="0.018 0.020 0.008"
-            pos="-0.006 0 0.006"
+            pos="-0.0140526 0 -0.0024875"
             rgba="0.2 0.2 0.2 0.0"
+            contype="0" conaffinity="0"
             mass="0.052"/>
 
       <!-- damping 0.2 -> 0, armature 0.005 -> 6.5217e-5, frictionloss 0.02 -> 2e-6 (note 3) -->
@@ -229,10 +281,28 @@
 
     The rolling friction (4th/5th components) must stay small: that is what lets
     the ball roll. The sliding friction is now high, not low - see the body.
+
+    THE FRONT (2026-08-19). The robot has no front caster: when it whips, the
+    front of the chassis / battery bay skids on the floor for a moment and the
+    robot then tips back off it. So the front contact is the chassis cylinder's
+    own rim - its underside clears the floor by 6.1 mm, i.e. it touches at 7.8
+    deg of nose-down pitch - and the only thing it needed was to stop being a
+    grabbing skid. Without a pair it ran at mu = max(floor 0.7, geom default
+    1.0) = 1.0, HIGHER than the wheels: a nose-down touch would bite and yaw the
+    robot. friction.chassis is deliberately low (0.15): a plastic underside on
+    PVC, sliding, for the tens of milliseconds before the robot rocks back.
+
+    Its solref gets the same explicit stiffness/damping treatment as the
+    caster's, and for the same reason - a hard contact reached at speed after a
+    6 mm free gap is an impulse, and the whole point of this contact is that it
+    is a brief graze, not a hammer blow.
   -->
   <contact>
-    <pair geom1="floor" geom2="caster_geom"
+    <pair name="floor_caster" geom1="floor" geom2="caster_geom"
           friction="0.4 0.4 0.001 0.0001 0.0001"
+          solref="-300 -10"/>
+    <pair name="floor_chassis" geom1="floor" geom2="body"
+          friction="0.15 0.15 0.001 0.0001 0.0001"
           solref="-300 -10"/>
   </contact>
 

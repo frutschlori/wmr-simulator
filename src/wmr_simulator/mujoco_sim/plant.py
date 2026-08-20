@@ -75,6 +75,7 @@ class FrictionSpec:
     floor: float
     wheel: float
     caster: float
+    chassis: float
 
 
 @dataclass(frozen=True)
@@ -199,6 +200,10 @@ def build_plant_xml(config: HiddenPlantConfig) -> str:
     # maximum and the "frictionless" ball inherits the floor's.
     pair = _require(root, ".//pair[@geom2='caster_geom']", config.model_path)
     _set_sliding_friction(pair, config.friction.caster, num_sliding=2)
+    # Same story for the chassis underside, which is the front skid: without a
+    # pair it would inherit mu = 1.0, higher than the wheels themselves.
+    pair = _require(root, ".//pair[@geom2='body']", config.model_path)
+    _set_sliding_friction(pair, config.friction.chassis, num_sliding=2)
 
     # The IMU site and its sensors are not in the delivered model, and cannot be
     # added after compilation - hence the XML-patch path.

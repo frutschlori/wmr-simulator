@@ -68,6 +68,13 @@ friction:
   # 0.05 -> 0.4. Rolling resistance lives in the <pair>'s rolling terms and
   # the socket drag in the ball joint's frictionloss, both in the XML.
   caster: 0.4             # via an explicit <pair>; see the XML header for why
+  # The chassis underside is the FRONT contact (2026-08-19): there is no front
+  # caster, so when the robot whips it grazes the floor on its battery bay for a
+  # few tens of ms and rocks back off it. Also via an explicit <pair>, because
+  # without one the elementwise-max rule gives the bare geom mu = 1.0 - higher
+  # than the wheels, so a graze would bite and yaw the robot. Low: hard plastic
+  # sliding on PVC, and the contact is meant to be a slip, not a pivot.
+  chassis: 0.15
 
 encoder:
   # Signed, and identical to the firmware's `encoder_cpr` key: the count->rad/s
