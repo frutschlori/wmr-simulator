@@ -166,7 +166,7 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         # worth designing it inside a gentler envelope than the hardware's
         # nominal one. Drop a key to fall back to the problem yaml's value.
         "motion_limits": {
-            "v_max": 1.5,          # m/s
+            "v_max": 2.0,          # m/s
             "a_max": 2.5,          # m/s^2
             "a_max_lateral": 2.5,  # m/s^2
             "omega_max": 5.0,      # rad/s
@@ -228,7 +228,7 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         # trajectory is only informative about the gains under the conditions
         # the tuner scores them under. Falls back to the nominal plant when no
         # model was trained (use_residual_model off).
-        "use_residual_model": False,
+        "use_residual_model": True,
         "num_trajectories": 10,
         "opt_steps": 50,
         "learning_rate": 3e-2,
@@ -270,7 +270,7 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         # unexplained yaw term, and the tuner rolls that out as if it were the
         # robot. Requires the top-level flag as well -- with no model trained
         # there is nothing to use.
-        "use_residual_model": False,
+        "use_residual_model": True,
     },
 }
 

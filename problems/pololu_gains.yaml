@@ -2,11 +2,11 @@ sim_time: 7.0 # seconds
 geometry_controller_dt: 0.05 # seconds
 wheel_controller_dt: 0.01 # seconds
 environment:
-  min: [-1.5, -2.5]
-  max: [1.5, 2.5]
+  min: [-1.3, -2.3]
+  max: [1.3, 2.3]
   obstacles: []
-start: [0.0, 0.0, 0.0]
-goal:  [1.5, 1.0]
+start: [-0.5, -1.0, 0.0]
+goal:  [1.0, 1.0]
 planner: 
   waypoints:
     - [0.5, 0.0]
@@ -46,7 +46,7 @@ controller:
     hidden_sizes: [16]
     seed: 0
     scheduled_indices: [0, 1, 2, 3, 4] # kx, ky, kth; motor PI gains stay static ([0,1,2,3,4] schedules all)
-    bound: 3.0             # upper factor bound, clipped to >= 1 when applied
+    bound: 2.0             # upper factor bound, clipped to >= 1 when applied
     learn_bound: false     # true adds the bound to the trainable vector
     spectral_norm_cap: 1.0 # per-matrix spectral norm cap, 0 disables
 robot:
@@ -55,7 +55,7 @@ robot:
   base_diameter: 0.0842 # m
   max_wheel_speed: 250  # rad/s
   time_constant:  0.16  # time constant for first-order wheel dynamics (set to 0 for ideal actuation)
-  a_slip_max:  2.5    # traction limit ~ mu*g in m/s^2, 0 to disable (burnout model, Wong 2008)
+  a_slip_max:  3.0    # traction limit ~ mu*g in m/s^2, 0 to disable (burnout model, Wong 2008)
   v_max: 2.5          # m/s
   a_max: 3.5          # m/s^2
   a_max_lateral: 4.0 # m/s^2
