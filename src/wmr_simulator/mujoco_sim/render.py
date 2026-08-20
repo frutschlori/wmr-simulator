@@ -110,7 +110,7 @@ LEGEND_TEXT_RGB = (238, 241, 245)
 REPLAY_MARKER_RADIUS_FACTOR = 1.35
 REPLAY_MARKER_SEGMENTS = 28
 REPLAY_MARKER_HEIGHT = 0.012
-FALLBACK_CHASSIS_RADIUS = 0.0445
+FALLBACK_CHASSIS_RADIUS = 0.0485
 
 
 @dataclass(frozen=True)
@@ -677,7 +677,7 @@ def _connect(mujoco, scene, geom_type, radius: float, start, end, rgba) -> bool:
 
 def _chassis_radius(mujoco, model) -> float:
     """The plant's own body radius, so a marker is the size of the real robot."""
-    geom_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "body")
+    geom_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "chassis_deck")
     if geom_id < 0:
         return FALLBACK_CHASSIS_RADIUS
     return float(model.geom_size[geom_id][0])
