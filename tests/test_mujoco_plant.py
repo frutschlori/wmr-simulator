@@ -52,9 +52,13 @@ def test_hidden_config_values_reach_the_compiled_model(config, plant):
 
     floor = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "floor")
     assert model.geom_friction[floor, 0] == pytest.approx(config.friction.floor)
-    # The caster's low friction only survives through the explicit pair, since
-    # MuJoCo otherwise takes the elementwise maximum with the floor's.
-    assert model.pair_friction[0, 0] == pytest.approx(config.friction.caster)
+    # The caster's low friction and the chassis underside's only survive through
+    # the explicit pairs, since MuJoCo otherwise takes the elementwise maximum
+    # with the floor's. Look them up by name: MuJoCo does not keep pairs in
+    # declaration order.
+    for name, expected in (("floor_caster", config.friction.caster), ("floor_chassis", config.friction.chassis)):
+        pair = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_PAIR, name)
+        assert model.pair_friction[pair, 0] == pytest.approx(expected)
 
 
 def test_patching_keeps_the_non_sliding_friction_components(config):
@@ -64,7 +68,7 @@ def test_patching_keeps_the_non_sliding_friction_components(config):
     root = ET.fromstring(build_plant_xml(config))
     floor = root.find(".//geom[@name='floor']").get("friction").split()
     assert [float(value) for value in floor] == [config.friction.floor, 0.005, 0.0001]
-    pair = [float(value) for value in root.find(".//pair").get("friction").split()]
+    pair = [float(value) for value in root.find(".//pair[@name='floor_caster']").get("friction").split()]
     assert pair[:2] == [config.friction.caster] * 2
     # Torsional then the two rolling terms. The rolling terms must stay small:
     # they are what let the ball caster roll instead of skid.
@@ -204,10 +208,18 @@ def test_measured_plant_truth_still_matches_the_benchmark_reference(config):
     # Which of these to score identification against is NOT settled. log_loader
     # advances the encoder series by DEFAULT_ENCODER_LP_TAU_S = 0.027 s, so the
     # low-pass group delay is already compensated and the fitted value should be
-    # the true PT1 tau, i.e. the mechanical one. But the mechanical rise is
-    # measured at duty 0.6, where the wheel spins up partly by slipping, so it
-    # reads faster than the vehicle actually responds. Real-robot fits span
-    # 0.12-0.25 s, which brackets the logged number and not the mechanical one.
-    assert truth.time_constant_mechanical == pytest.approx(0.070, abs=0.02)
-    assert truth.time_constant_logged == pytest.approx(0.200, abs=0.03)
+    # the true PT1 tau, i.e. the mechanical one.
+    #
+    # Re-pinned 2026-08-19 (0.070/0.200 -> 0.10/0.24) for the CoM at -6.0 mm,
+    # 15.0 mm up. This number is SLIP-SENSITIVE and should be read as a
+    # regression pin, not as the plant's motor lag: the duty-0.6 rise is not one
+    # PT1 but two phases, a fast slipping jump and then a slow loaded ramp
+    # (measured: 92 rad/s at 0.3 s, 127 at 0.6, 136.5 at 1.0, steady 138), and
+    # the 63% crossing lands inside the first. Moving the CoM onto the axle
+    # loaded the wheels fully, killed the slip phase and the same measurement
+    # read 0.26 s - i.e. this metric moves by 2.6x on a 6 mm CoM shift. The
+    # vehicle-inertia floor (m*r^2/2)/kv = 0.227 s the hidden yaml predicts is
+    # what the loaded ramp actually runs at; real-robot fits span 0.12-0.25 s.
+    assert truth.time_constant_mechanical == pytest.approx(0.10, abs=0.02)
+    assert truth.time_constant_logged == pytest.approx(0.24, abs=0.03)
     assert truth.time_constant_logged > truth.time_constant_mechanical
