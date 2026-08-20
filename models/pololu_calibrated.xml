@@ -1,7 +1,10 @@
 <mujoco model="pololu_calibrated">
   <!--
-    Calibrated hidden plant for the MuJoCo deployment studies (2026-08-10).
-    Derived from models/pololu.xml (colleague's original, kept unmodified).
+    Hidden plant for the MuJoCo deployment studies. REBUILT 2026-08-20 from the
+    manufacturer's drawing plus measurements on the actual robot; the previous
+    version (git history, up to 2026-08-19) was a plausible stand-in whose
+    chassis size, wheel width, caster size, ground clearance, mass and CoM were
+    all guesses that had been tuned against symptoms rather than measured.
 
     THIS FILE IS THE HIDDEN GROUND TRUTH. The active-learning pipeline must
     never read it: it only ever sees ROBOTCFG.CFG / robot_config.yaml, exactly
@@ -12,72 +15,114 @@
     build_plant_xml patches them into this file before compiling it, so editing
     an attribute here that the yaml also carries changes nothing. Change it in
     the yaml; the numbers below are kept in step so this file reads true on its
-    own.
+    own. Masses, chassis geometry and contact softness live here only.
 
-    The wheel geometry is the real robot's DIRECTLY MEASURED geometry (16 mm
-    radius, 84.2 mm wheelbase) rather than anything fitted, because those are
-    the two numbers a caliper can reach on the hardware. What identification
-    recovers is the *effective* pair below, so the same geometric-to-effective
-    gap is present here and on the robot and the two are comparable.
+    ================================ SOURCES =================================
 
-    Changes vs. the original, all measured:
+    (A) models/3pi-plus-chassis-kit-dimensions.pdf, the Pololu drawing for item
+        3725, and the STEP files beside it. The drawing is 1:1 vector art, so
+        the numbers below were not scaled off a picture: a least-squares circle
+        fit to the caster arc in the side views of BOTH page 1 and page 2 agrees
+        to 0.02 mm on centre and radius (r = 6.35 mm, residual 0.027 mm).
+        Directly read off it:
+            body outer diameter        97.0 mm  (bumper skirt; chassis 96.0)
+            wheel diameter             32.0 mm
+            caster ball diameter       12.7 mm
+            ground clearance            5.0 mm  (with skirt; 5.8 without)
+            overall height             36.1 mm
+            chassis tub length/height  77.9 / 15.0 mm
+        Fitted from the same vector art, relative to the wheel axle:
+            caster ball centre         40.37 mm behind, 6.06 mm above ground
 
-    1. CASTER FRICTION (bug fix). The original declares friction="0 0 0" on the
-       caster, intending a frictionless slider. MuJoCo combines friction as the
-       ELEMENTWISE MAXIMUM of the two geoms, so it actually ran at the floor's
-       mu = 1.0: a skid plate carrying ~27% of the weight. Effects measured:
-       open-loop speed 39% low, and a differential wheel command produced almost
-       NO yaw (the skid resists rotation on a 41 mm lever). Fixed with an
-       explicit <contact><pair>, which overrides the max rule.
+    (B) Measured on the robot (2026-08-19): total mass 171 g with batteries;
+        CoM 2-3 mm behind the drive axle; at rest it sits on the caster ball and
+        is very nearly level, nose a shade up; the nose dives onto the floor
+        under braking with roughly 5 mm of travel from rest, and that contact
+        is a low-friction point graze, not a grab.
 
-    2. CASTER CONTACT SOFTNESS. The caster sat 0.5 mm off the floor and the
-       motor's reaction torque pitched the chassis nose-up into it, producing a
-       13 N impulse (7x the robot's weight) every ~30 ms and launching the robot
-       (8 steps grounded / 7 airborne). solref="-300 -3" on the pair removes it.
-       NOT a solver artifact: timestep, integrator, solver iterations, friction
-       cone, wheel shape and mass all change essentially nothing.
+    (C) Caliper on the hardware: wheel track 84.2 mm, and it is consistent with
+        the drawing rather than in conflict with it. The 96.0 mm across the top
+        view is the span over the MOTOR SHAFT ENDS, not the tires: the wheels
+        are pressed on inboard of the shaft ends, and half a wheel width comes
+        off each side on top of that. Nothing here needs the drawing's number -
+        84.2 mm is a direct measurement of the thing the model wants.
 
-    3. MOTOR. The original kv=0.5 gives a 78 N-m stall torque on a 0.187 kg
-       robot, and armature=0.005 is ~200x the physical reflected inertia
-       (rotor 1.5e-8 * 15.25^2 + wheel 4.1e-7). Both were placeholders. Now
-       parametrized by three physical quantities:
-           omega_max = 230 rad/s   (wheel speed at duty = 1)
-           T_stall   = 0.150 N-m   (torque at duty = 1, zero speed)
-           tau       = 0.10 s      (free wheel-speed time constant)
-       giving  kv = T_stall/omega_max = 6.5217e-4, armature = kv*tau = 6.5217e-5.
-       Joint damping is 0 because back-EMF is already the kv term; the original
-       damping=0.2 was what made steady-state wheel speed only 0.714*ctrl.
+    ======================== WHY THE REST IS LEVEL-ISH =======================
 
-    4. FRICTION mu 1.0/0.7 -> 0.7 on floor and wheels, so a_slip = mu*g =
-       6.87 m/s^2 clears the problem yaml's a_max 3.0 and a_max_lateral 4.0.
-       At mu = 0.28 the designed trajectories were not executable.
+    The resting attitude is not a free parameter, it is contact geometry: a
+    LEVEL robot needs the ball centre 16.0 - 6.35 = 9.65 mm below the axle, and
+    every 0.1 mm of departure from that is 0.14 deg of pitch on the 40.37 mm
+    lever. So the drawing and observation (B) can be checked against each other,
+    and they very nearly agree - they disagree by 0.54 mm, i.e. by 0.8 deg.
 
-    The duty -> ctrl mapping used by the firmware port is  ctrl = duty * 230.
-    A velocity actuator applies torque = kv*(ctrl - qvel), which is algebraically
-    a DC motor's torque = (kt/R)*(V - ke*omega), so this is physically founded.
+    The drawing puts the ball centre 9.94 mm down, i.e. hanging 0.29 mm BELOW
+    the wheel contact plane, which rests the robot nose-DOWN by 0.41 deg
+    (verified in the compiled model: the nose skid ends up 0.43 mm below its
+    level height). (B) says nose a shade UP. This file uses 9.40 mm, which rests
+    it nose-up by 0.61 deg (0.35 from the geometry, the rest from the wheels
+    penetrating deeper than the lightly-loaded ball), and takes (B) over the
+    drawing for two reasons: it
+    is a direct observation of the actual robot, and the discrepancy has an
+    obvious physical home. The drawing shows the ball FREE-HANGING at the bottom
+    of its socket; on the floor it is pushed up into the socket and takes up
+    that clearance, and a few tenths of a millimetre of slop in a ball caster is
+    entirely ordinary.
+
+    This is the ONE number here fitted to an observation rather than read off
+    the drawing, so it is called out. To go back to the drawing exactly, set the
+    caster body's z to -0.00994 and expect a nose-down rest.
+
+    Either way the CoM must be BEHIND the axle, or the caster is not loaded at
+    all and the robot rocks on two contacts. It is, by 2.5 mm, which puts
+    2.5/40.37 = 6.2% of the weight on the ball - matched by the solver to the
+    digit.
+
+    =============================== CONTACTS =================================
+
+    Four contact geoms, and only four: two wheels, the caster ball, the nose
+    skid. Everything else - the CAD meshes, the mass primitives - is contype=0.
+    Modelling the contact set explicitly is the point: with a colliding chassis
+    cylinder the front contact was its RIM, a knife edge whose friction MuJoCo
+    silently took as max(floor, geom default) = 1.0, higher than the wheels.
+
+    THE WHEEL COLLISION CYLINDER IS NARROWER THAN THE TIRE (3.0 mm against
+    7.5 mm), deliberately. MuJoCo reduces a cylinder on a plane to a two-point
+    LINE contact at its two rim edges, both at full Coulomb friction, and those
+    two points fight every turn: the cylinder's half-length IS the scrub lever.
+    The real tire is crowned, so a 7 mm cylinder models a flat-tread tire the
+    robot does not have. Open loop at duty 0.35 with a 0.05 split, fraction of
+    the commanded wheel-speed split achieved: 7 mm 24%, 3.8 mm 79%, 3.0 mm 92%.
+    The yaml carries the full profile measurement and why 3.0 was picked.
+
+    That fixed the turning, but it did NOT reduce what the motor has to deliver:
+    at the datasheet stall torque, circle_medium diverges on 6 of 6 seeds at
+    3.8 mm exactly as it did at 7 mm. Worth knowing, because "the sim needs more
+    torque than the datasheet" and "MuJoCo invents scrub" are the two obvious
+    explanations for the same symptom and only one of them was true.
+
+    The nose skid is a 3 mm sphere at the front lip, which is the "nice point
+    collision" in (B) - a moulded plastic lip is a rounded edge, and a sphere is
+    both the honest shape and the one a contact solver handles gracefully. Its
+    lowest point sits at the drawing's 5.0 mm clearance, so it touches down at
+    6.3 deg of nose-down pitch (the true lip at r = 48.5 mm would be 5.9 deg).
+
+    ================================ MOTOR ===================================
+
+    ctrl = duty * omega_max on a MuJoCo velocity actuator, which applies
+    torque = kv * (ctrl - qvel): algebraically a DC motor's (kt/R)(V - ke w), so
+    this is physically founded rather than a servo bolted on. kv and armature
+    are derived in the yaml from omega_max, stall torque and the free wheel-speed
+    time constant; joint damping is 0 because back-EMF is already the kv term.
 
     EMERGENT (not set here, and deliberately different from the nominal yaml):
-      effective rolling radius ~15.97 mm   (contact penetration, geometric 16.00)
-      effective wheelbase      ~0.0833 m   (scrub, geometric 0.0842)
-    Recovering these is the point of the identification benchmark; the current
-    measured values live in mujoco_sim.truth and are pinned by its test.
-
-    KNOWN OPEN ITEM: hard cornering (a_lat >~ 4 m/s^2) and fast spin-in-place
-    still lose ground contact open loop - realistic oversteer for a rear-caster
-    robot. Every test so far was OPEN LOOP, where a differential drive has no
-    heading feedback and is unstable by construction. Re-evaluate closed loop.
-
-    KNOWN OPEN ITEM 2 (2026-08-19): the front contact is declared and its
-    friction is now honest, but nothing has ever REACHED it - 0.0% of ticks in
-    every open-loop manoeuvre tried, because the chassis pitches nose-UP under
-    acceleration and only a hard deceleration would put it on its nose. So it is
-    a correctness fix waiting to matter, and its two numbers - the 6.1 mm ground
-    clearance that comes from the cylinder's half-height, and mu = 0.15 - are
-    both unvalidated against the hardware.
+    the effective rolling radius (contact penetration) and the effective
+    wheelbase (tire scrub). Recovering those is the point of the identification
+    benchmark; the current measured values live in mujoco_sim.truth and are
+    pinned by its test. Re-measure them after ANY change to this file.
   -->
   <compiler angle="radian" inertiafromgeom="true"/>
 
-  <option timestep="0.002" integrator="implicit" gravity="0 0 -9.81"/>
+  <option timestep="0.001" integrator="implicit" gravity="0 0 -9.81"/>
 
   <visual>
     <global azimuth="45" elevation="-30" offwidth="1920" offheight="1080"/>
@@ -95,221 +140,232 @@
             width="256" height="256"/>
     <material name="wheel_mat" texture="wheel_tex"
               texrepeat="6 1" texuniform="true" reflectance="0.0"/>
+    <!--
+      Pololu's own STEP assembly, tessellated and split by
+      scripts/convert_chassis_mesh.py (see it for the frame conversion and why
+      the wheels had to be carved out of the chassis shell). Visual only: the
+      collision set stays four analytic primitives. A faceted mesh rolling on a
+      plane is polygonal rolling, which at 3.7 m/s puts a facet-rate ripple
+      well above the 1 kHz physics step - the exact hopping artefact the
+      contacts were tuned to remove.
+    -->
+    <mesh name="chassis_mesh" file="pololu_chassis.stl"/>
+    <mesh name="wheel_mesh" file="pololu_wheel.stl"/>
   </asset>
 
   <worldbody>
-    <!-- friction 1.0 -> 0.7 (see note 4) -->
     <!--
-      solref 0.002 1 -> 0.008 2 (2026-08-18). The experiments are run on rolled
-      PVC sheet ~5 mm thick: compliant and lossy, not a rigid slab. A near-rigid,
-      critically damped contact (0.002 1) let the tripod stance rock. Raising the
-      damping ratio is what helps; the time constant must stay SMALL, because the
-      binding constraint is penetration - it sets the effective rolling radius,
-      which is the thing identification has to recover. Measured penetration:
-      0.005 mm at 0.008 2, but 3.1 mm at 0.015 5, which collapsed the effective
-      radius 16.0 -> 12.9 mm and the wheelbase 84 -> 68 mm. Check r_eff in
-      mujoco_sim.truth before accepting any softer floor. Phenomenological, not
-      derived from PVC material data.
+      Rolled PVC sheet ~5 mm thick on a hard surface: for a 171 g robot this is
+      effectively RIGID, and the hardware bears that out - nobody expects this
+      robot to sink into that floor by more than a few hundredths of a
+      millimetre. Contact penetration is not a free knob, it sets the effective
+      rolling radius, which is the thing identification has to recover: 3.1 mm
+      of penetration at a soft (0.015 5) collapsed the effective radius
+      16.0 -> 12.9 mm. Check r_eff in mujoco_sim.truth after touching this.
+
+      THE WHEEL GEOMS CARRY THE SAME solref/solimp, and they have to. With no
+      explicit <pair>, MuJoCo MIXES the two geoms' solref rather than taking the
+      stiffer - setting (0.003 2) on the floor alone gave a wheel contact of
+      (0.0115 1.5), the average with the wheel geom's untouched default
+      (0.02 1), and the resting penetration barely moved (0.083 -> 0.080 mm).
+      Same trap as the elementwise-MAX friction rule, opposite direction: a
+      value set on one side of a contact is quietly diluted by the other side's
+      default. With both sides set the average is the value, and the resting
+      penetration is 0.04 mm.
+
+      The time constant cannot go below 2*timestep, so stiffness and timestep
+      are coupled: (0.003 2) is 3x the 0.001 s step, which is why the step is
+      0.001 and not 0.002. Physics is not the bottleneck in a deployment - the
+      firmware port ticks at 100 Hz - so the halved step costs little.
     -->
     <geom name="floor" type="plane" size="0 0 0.05" material="groundplane"
-          friction="0.7 0.005 0.0001"
-          solref="0.008 2" solimp="0.95 0.99 0.001"/>
+          friction="0.9 0.005 0.0001"
+          solref="0.003 2" solimp="0.99 0.9999 0.0005"/>
 
     <light pos="0 0 1.5" dir="0 0 -1" directional="true"/>
 
-    <body name="chassis" pos="-0.0445 0 0.0161">
+    <!--
+      Body frame: origin at the WHEEL-AXLE MIDPOINT, +x forward, +z up. That is
+      the pose the mocap and every pipeline consumer means by "the robot", which
+      is why mocap.offset_xyz in the yaml is all zeros. Level, the floor is at
+      z = -0.016 (the wheel radius), so a height above the floor h maps to
+      z = h - 0.016.
+    -->
+    <body name="chassis" pos="0 0 0.0163">
       <freejoint name="root"/>
       <camera name="track_cam" mode="track" pos="0 -0.6 0.25" xyaxes="1 0 0 0 0.6 1"/>
 
       <!--
-        MASS AND CoM (2026-08-18). Total was 0.188 kg with the battery pack
-        modelled at the rear (x = -30 mm), putting the CoM 11.3 mm behind the
-        drive axle. Both were wrong: a 3pi+ 32mm is ~83 g of robot plus ~52 g of
-        4x AAA NiMH, and the cells sit SYMMETRICALLY about the chassis, so the
-        pack is concentric with the body cylinder rather than hung off the back.
+        MASS BUDGET. Total 171 g measured (B). The split is a decomposition of
+        that measurement, not four independent guesses - it has to sum to 171 g
+        and put the CoM where (B) says, and test_mujoco_plant asserts both.
 
-        This matters far more than any contact parameter. A trailing-caster
-        differential drive is directionally unstable open loop exactly when the
-        CoM is behind the drive axle - the shopping-trolley arrangement - and the
-        CoM offset IS the stability margin. Measured, straight line, time until
-        heading error exceeds 5 deg, at duty 0.4 / 0.5 / 0.6:
+          chassis_deck    74.24 g   tub + skirt + motors + clips (the remainder)
+          control_board   32.0  g   3pi+ 32mm control board, on top of the tub
+          battery_pack    52.0  g   4x AAA NiMH at ~13 g
+          wheels        2x 5.63 g   density-derived, see the wheel geoms
+          caster ball      1.5  g   12.7 mm POM sphere
+                        ________
+                         171.0  g
 
-          CoM -15.4 mm (135 g, pack at rear)   3.68 s / 2.26 s / 1.46 s
-          CoM -11.3 mm (188 g, as shipped)      stable / 3.02 s / 2.23 s
-          CoM  -8.5 mm                          stable / stable / 5.38 s
-          CoM  -6.2 mm (this file)              stable / stable / stable
+        CoM: 2.5 mm behind the axle, 15.0 mm above the floor. The longitudinal
+        offset is the middle of the 2-3 mm in (B) - measured over that range,
+        -2.0/-2.5/-3.0 mm are within noise of each other on every open-loop
+        stability metric, so the midpoint is taken and nothing hangs on it. The
+        HEIGHT is the weakest number in this file: it is not measured, it is
+        inferred from the batteries being in the underside tub, and it is the
+        lever arm for every pitch excursion. Measure it if the pitch behaviour
+        ever needs to be trusted quantitatively.
 
-        Open-loop wheel-unload during a gentle arc falls the same way:
-        27.8% -> 18.1% -> 23.7% -> 15.7%.
-
-        CoM 6 mm BEHIND THE AXLE, 15 mm UP (2026-08-19). The height is the real
-        change from what came before: it was +2.2 mm ABOVE the axle (which sits
-        at 16.1 mm), i.e. 18.3 mm up, and the batteries are on the UNDERSIDE of
-        the real robot, so the pack is what pulls the CoM below axle height.
-
-        The longitudinal offset went to 0.0 mm and then back to -6.0 mm, from
-        photographs of the underside: one of the battery pairs sits further back
-        than the other, so the pack is not concentric with the chassis and the
-        CoM is genuinely behind the axle. That offset is also what PRELOADS the
-        caster - with the CoM over the axle the caster carries no static load
-        and the chassis is free to rotate about the axle under the motors'
-        reaction torque until the contact catches it, which grew the pitch
-        excursions (-2.9 -> -5.6 deg on an arc) even as the wheel unload fell.
-
-        Placement is split between the two geoms on purpose. The cylinder is the
-        chassis OUTLINE and is concentric with the drive axle, which is what it
-        physically is; the (invisible, non-colliding) pack is the mass knob and
-        carries the offset. It sits 14.1 mm back rather than 6.0 because it has
-        to pull the wheels AND the 2 g caster hanging 41 mm behind with it.
-
-        Measured open loop, fraction of ticks with the two drive wheels under 5%
-        of body weight between them, and the pitch excursion (negative is
-        nose-up, i.e. rocked back onto the caster). Three CoMs: the previous
-        -6.2 mm / 18.3 mm, the on-axle experiment, and this file.
-
-                                  -6.2/18.3    0.0/15.0    -6.0/15.0
-          gentle arc (0.18/0.22)      0.0%        0.0%         0.0%
-          straight   (0.8)           12.1%        8.6%        11.2%
-          arc        (0.6/0.2)       40.3%       32.6%        37.3%
-          spin       (0.6/-0.6)      30.5%       13.8%        26.7%
-          hard whip  (0.9/0.3)       62.9%       51.7%        59.7%
-          pitch, arc                 -2.9 deg    -5.6 deg     -2.4 deg
-          pitch, whip                -5.4 deg    -7.9 deg     -5.0 deg
-
-        So the two effects trade against each other and both are real. Removing
-        the offset entirely buys the largest drop in wheel unload (spin halves)
-        but costs the caster preload, and the chassis then swings ~2x further in
-        pitch before the caster catches it. Preloaded, the pitch excursions come
-        back down and the unload sits between the two. Straight-line heading
-        holds to <5 deg for 6 s at duty 0.4/0.5/0.6 in all three.
-
-        Both numbers are provisional pending the weighing. The height is the
-        lever on the pitch swing and 15 mm is still a guess.
+        The deck and board are placed by geometry and the pack carries the
+        offset that lands the total - which is also what (B) describes, one
+        battery pair sitting further back than the other.
       -->
-      <geom name="body" type="cylinder"
-            size="0.0445 0.01"
-            pos="0.0 0 0.0"
-            rgba="1.0 1.0 1.0 1.0"
-            mass="0.075"/>
+      <geom name="chassis_visual" type="mesh" mesh="chassis_mesh"
+            contype="0" conaffinity="0" mass="0"
+            rgba="0.93 0.93 0.93 1.0"/>
+
+      <geom name="chassis_deck" type="cylinder"
+            size="0.0485 0.0077" pos="0 0 -0.0033"
+            contype="0" conaffinity="0"
+            rgba="0.93 0.93 0.93 0.0" mass="0.0783"/>
+
+      <geom name="control_board" type="cylinder"
+            size="0.045 0.001" pos="0 0 0.006"
+            contype="0" conaffinity="0"
+            rgba="0.10 0.35 0.20 0.0" mass="0.032"/>
+
+      <geom name="battery_pack" type="box"
+            size="0.0225 0.020 0.0055" pos="-0.0070566 0 -0.00174"
+            contype="0" conaffinity="0"
+            rgba="0.2 0.2 0.2 0.0" mass="0.052"/>
 
       <!--
-        Mass only, no collision (contype/conaffinity 0). It used to collide, and
-        after the CoM move its underside sits BELOW the chassis cylinder's, so
-        it would have become the front skid by accident. The thing that touches
-        down at the front is the chassis underside - see the floor/body pair.
+        32 x 7 mm wheels (A). The geoms declare no mass: MuJoCo's default
+        density gives 5.63 g each, which is about right for a plastic rim and a
+        rubber tire, and `_wheel_spin_inertia` in plant.py depends on that
+        derivation to subtract the geom's share from the armature.
       -->
-      <geom name="battery_pack" type="box"
-            size="0.018 0.020 0.008"
-            pos="-0.0140526 0 -0.0024875"
-            rgba="0.2 0.2 0.2 0.0"
-            contype="0" conaffinity="0"
-            mass="0.052"/>
-
-      <!-- damping 0.2 -> 0, armature 0.005 -> 6.5217e-5, frictionloss 0.02 -> 2e-6 (note 3) -->
       <body name="left_wheel" pos="0.0 0.0421 0.0">
         <joint name="left_wheel_joint" type="hinge" axis="0 1 0"
-               damping="0.0" armature="6.5217e-5" frictionloss="2e-6"/>
-        <geom name="left_wheel_geom" type="cylinder" size="0.016 0.002"
-              rgba="1 1 1 1" euler="1.5708 0 0"
-              material="wheel_mat"
-              friction="0.7 0.001 0.0001"
-              />
+               damping="0.0" armature="3.5205e-6" frictionloss="2e-6"/>
+        <geom name="left_wheel_visual" type="mesh" mesh="wheel_mesh"
+              contype="0" conaffinity="0" mass="0"
+              rgba="0.15 0.15 0.15 1"/>
+        <geom name="left_wheel_geom" type="cylinder" size="0.016 0.0019"
+              rgba="1 1 1 0" euler="1.5708 0 0"
+              material="wheel_mat" mass="0.0036"
+              friction="0.9 0.001 0.0001"
+              solref="0.003 2" solimp="0.99 0.9999 0.0005"/>
         <geom name="left_wheel_marker" type="box"
-              size="0.0015 0.0006 0.0015"
-              pos="0 0 0.016"
-              rgba="1 0 0 1"
-              contype="0" conaffinity="0"/>
+              size="0.0015 0.0006 0.0015" pos="0 0 0.016"
+              rgba="1 0 0 1" contype="0" conaffinity="0"/>
       </body>
 
       <body name="right_wheel" pos="0.0 -0.0421 0.0">
         <joint name="right_wheel_joint" type="hinge" axis="0 1 0"
-               damping="0.0" armature="6.5217e-5" frictionloss="2e-6"/>
-        <geom name="right_wheel_geom" type="cylinder" size="0.016 0.002"
-              rgba="1 1 1 1" euler="1.5708 0 0"
-              material="wheel_mat"
-              friction="0.7 0.001 0.0001"
-              />
-          <geom name="right_wheel_marker" type="box"
-            size="0.0015 0.0006 0.0015"
-            pos="0 0 0.016"
-            rgba="1 0 0 1"
-            contype="0" conaffinity="0"/>
+               damping="0.0" armature="3.5205e-6" frictionloss="2e-6"/>
+        <geom name="right_wheel_visual" type="mesh" mesh="wheel_mesh"
+              contype="0" conaffinity="0" mass="0"
+              rgba="0.15 0.15 0.15 1"/>
+        <geom name="right_wheel_geom" type="cylinder" size="0.016 0.0019"
+              rgba="1 1 1 0" euler="1.5708 0 0"
+              material="wheel_mat" mass="0.0036"
+              friction="0.9 0.001 0.0001"
+              solref="0.003 2" solimp="0.99 0.9999 0.0005"/>
+        <geom name="right_wheel_marker" type="box"
+              size="0.0015 0.0006 0.0015" pos="0 0 0.016"
+              rgba="1 0 0 1" contype="0" conaffinity="0"/>
       </body>
 
       <!--
-        ROLLING BALL CASTER (2026-08-18). Until now this sphere was rigidly
-        fixed to the chassis, i.e. a skid plate, and the low mu=0.05 was what
-        kept the skid cheap. That is not the hardware: the 3pi+ carries a ball
-        caster that spins freely in its socket. As a skid it dragged sideways at
-        ~780 mm/s through every turn, and that parasitic drag is what the old
-        6x-oversized motor was silently paying for.
+        ROLLING BALL CASTER. Radius and the 40.37 mm setback are the circle fit
+        in (A); the 9.40 mm drop is (A)'s 9.94 mm corrected for socket seating
+        clearance so the robot rests nose-up as observed - see "WHY THE REST IS
+        LEVEL-ISH" above, the only place in this file where an observation
+        overrides the drawing. The joint is a BALL joint - the ball rotates in its socket but
+        does not translate relative to the chassis, which is what a caster is -
+        and `frictionloss` is the socket drag, the only thing resisting it.
 
-        The free joint here is a BALL joint: the ball rotates in its socket but
-        does not translate relative to the chassis, which is what a caster is.
-        `frictionloss` is the socket drag - the only thing resisting rotation -
-        and it is deliberately tiny. The contact friction is now a REAL friction
-        (see friction.caster in the hidden yaml): a ball caster needs enough
-        grip to roll rather than skid, which is the opposite of what the old
-        skid model wanted.
+        Do not turn this back into a rigidly-fixed sphere. As a skid it dragged
+        sideways at ~780 mm/s through every turn, and that parasitic drag was
+        what the old 6x-oversized motor was silently paying for; with the
+        datasheet motor and a skid, wheel speeds collapsed to 58/12 rad/s
+        against a commanded 92/46 and broke into a 10 Hz limit cycle.
       -->
-      <body name="caster" pos="-0.041 0.0 -0.01">
+      <body name="caster" pos="-0.04037 0.0 -0.00940">
         <joint name="caster_ball" type="ball" frictionloss="2e-7" damping="0"/>
-        <geom name="caster_geom" type="sphere" size="0.0055"
+        <geom name="caster_geom" type="sphere" size="0.00635"
               rgba="0.5 0.5 0.5 1"
-              friction="0.4 0.001 0.0001"
-              mass="0.002"
-              />
+              friction="0.35 0.001 0.0001"
+              mass="0.0015"/>
       </body>
+
+      <!--
+        NOSE SKID. The front lip of the skirt, as a 3 mm sphere whose lowest
+        point is the drawing's 5.0 mm ground clearance (z = -0.011). Massless:
+        its mass is already inside chassis_deck.
+      -->
+      <geom name="nose_skid" type="sphere" size="0.003"
+            pos="0.0455 0 -0.008"
+            rgba="0.93 0.93 0.93 1.0"
+            friction="0.35 0.001 0.0001"
+            mass="0"/>
 
     </body>
   </worldbody>
 
   <!--
-    An explicit pair overrides MuJoCo's elementwise-max friction combination, so
-    the caster's own friction is what acts, not the floor's 0.7 imposed on it.
-    solref="-300 -10" is explicit stiffness/damping (N/m, N-s/m) and is what
-    stops the 13 N hammer impacts the 0.5 mm caster gap otherwise produces.
+    Explicit pairs override MuJoCo's elementwise-MAXIMUM friction combination,
+    which is the whole reason this block exists: without a pair, a geom meant to
+    be slippery silently inherits the floor's mu. Both of these are surfaces
+    that must slide, and both are reached across a gap at speed, so both get
+    explicit stiffness/damping instead of the floor's solref.
 
-    The damping was -3 until 2026-08-18, which stopped the impacts but left the
-    contact badly UNDERDAMPED: k=300 N/m against the 0.187 kg chassis is
-    zeta ~ 0.2, f ~ 6.4 Hz, and the robot never settled. Measured at -3: a 1 deg
-    peak-to-peak pitch limit cycle at 5.6 Hz standing still at zero duty, and
-    driving circle_medium it pitched to -13 deg at 7.1 Hz with BOTH drive wheels
-    under 5% of body weight for 25% of ticks - hopping, not driving. At -10
-    (zeta ~ 0.6) the pitch excursion and the tracking error both fall and the
-    peak caster force stays ~2x body weight, i.e. the impacts do not come back.
+    solref="-k -c" is explicit (stiffness N/m, damping N-s/m). The two contacts
+    get very different values because they do different jobs.
 
-    The rolling friction (4th/5th components) must stay small: that is what lets
-    the ball roll. The sliding friction is now high, not low - see the body.
+    The CASTER carries static load continuously, so it is soft and well damped:
+    k = 300 N/m against the 0.171 kg chassis is zeta ~ 0.6. It was -3
+    (zeta ~ 0.2) until 2026-08-18, which left it badly underdamped - a 1 deg
+    peak-to-peak pitch limit cycle at 5.6 Hz standing still, and -13 deg at
+    7.1 Hz driving circle_medium with both drive wheels under 5% of body weight
+    for 25% of ticks. Hopping, not driving.
 
-    THE FRONT (2026-08-19). The robot has no front caster: when it whips, the
-    front of the chassis / battery bay skids on the floor for a moment and the
-    robot then tips back off it. So the front contact is the chassis cylinder's
-    own rim - its underside clears the floor by 6.1 mm, i.e. it touches at 7.8
-    deg of nose-down pitch - and the only thing it needed was to stop being a
-    grabbing skid. Without a pair it ran at mu = max(floor 0.7, geom default
-    1.0) = 1.0, HIGHER than the wheels: a nose-down touch would bite and yaw the
-    robot. friction.chassis is deliberately low (0.15): a plastic underside on
-    PVC, sliding, for the tens of milliseconds before the robot rocks back.
+    The NOSE is a rigid moulded lip that touches down intermittently, and it
+    has to STOP the dive rather than absorb it. At the caster's -300 -10 it
+    sank 5.5 mm - a 3 mm sphere almost entirely through the floor - and the
+    robot kept rotating to 13.9 deg nose-down. Measured, braking from duty 0.7:
 
-    Its solref gets the same explicit stiffness/damping treatment as the
-    caster's, and for the same reason - a hard contact reached at speed after a
-    6 mm free gap is an impulse, and the whole point of this contact is that it
-    is a brief graze, not a hammer blow.
+      solref        max nose-down    nose penetration
+      -300   -10       13.86 deg          5.52 mm
+      -3000  -30        8.60 deg          1.71 mm
+      -10000 -60        7.74 deg          0.94 mm     <- shipped
+      -30000 -100       7.32 deg          0.63 mm
+
+    It has converged by -10000 (zeta ~ 0.73): the lip first touches at 6.3 deg
+    and then sinks 1.4 deg further, which is what a hard plastic edge does.
+    Note the wheels unload for ~12% of the braking phase at EVERY stiffness, so
+    that is the braking dynamics and not something the contact is causing.
+
+    The caster's ROLLING terms (4th/5th) must stay small: that is what lets the
+    ball roll rather than skid. Its sliding mu is deliberately HIGH (0.4) for
+    the same reason - a ball caster needs grip to roll. The nose skid is the
+    opposite: it only ever slides, and (B) reports that graze as low friction.
   -->
   <contact>
     <pair name="floor_caster" geom1="floor" geom2="caster_geom"
-          friction="0.4 0.4 0.001 0.0001 0.0001"
-          solref="-300 -10"/>
-    <pair name="floor_chassis" geom1="floor" geom2="body"
-          friction="0.15 0.15 0.001 0.0001 0.0001"
-          solref="-300 -10"/>
+          friction="0.35 0.35 0.001 0.0001 0.0001"
+          solref="-5000 -40"/>
+    <pair name="floor_nose" geom1="floor" geom2="nose_skid"
+          friction="0.35 0.35 0.001 0.0001 0.0001"
+          solref="-10000 -60"/>
   </contact>
 
   <actuator>
-    <!-- kv = T_stall/omega_max = 0.150/230 = 6.5217e-4; ctrlrange = +-1.2*omega_max -->
-    <velocity name="left_motor"  joint="left_wheel_joint"  kv="6.5217e-4" ctrlrange="-276 276"/>
-    <velocity name="right_motor" joint="right_wheel_joint" kv="6.5217e-4" ctrlrange="-276 276"/>
+    <!-- kv = T_stall/omega_max = 0.0368/230 = 1.6000e-4; ctrlrange = +-1.2*omega_max -->
+    <velocity name="left_motor"  joint="left_wheel_joint"  kv="1.6e-4" ctrlrange="-276 276"/>
+    <velocity name="right_motor" joint="right_wheel_joint" kv="1.6e-4" ctrlrange="-276 276"/>
   </actuator>
 
 </mujoco>

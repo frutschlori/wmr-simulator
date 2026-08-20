@@ -12,9 +12,11 @@
 # masses, chassis geometry, contact softness, integrator - lives in the XML
 # only.
 #
-# Not listed on purpose: the effective rolling radius (~0.0160 m, contact
-# penetration under load) and the effective wheelbase (~0.0833 m, geometric
-# 0.0842 minus scrub). Those are emergent, and recovering them is the benchmark.
+# Not listed on purpose: the effective rolling radius (~0.01596 m, contact
+# penetration under load) and the effective wheelbase (~0.0849 m against a
+# geometric 0.0842 - the 7 mm-wide tires give a contact patch whose lever is not
+# the centreline separation). Those are emergent, and recovering them is the
+# benchmark; mujoco_sim.truth measures them and its test pins them.
 
 model_path: models/pololu_calibrated.xml
 
@@ -22,59 +24,149 @@ motor:
   # ctrl = duty * omega_max on a MuJoCo velocity actuator, which applies
   # torque = kv * (ctrl - qvel): algebraically a DC motor's (kt/R)(V - ke w).
   omega_max: 230.0        # rad/s at duty = 1        (nominal belief: 250)
-  # 0.150 -> 0.0245 (2026-08-18). The 3pi+ hyper's 15:1 HPCB 6V gearmotor is
-  # specified at 0.25 kg-cm = 0.0245 N-m stall and 2100 rpm = 220 rad/s no-load
-  # at the gearbox output, which drives the wheel directly. 0.150 was a
-  # placeholder worth 6.1x that: it could command 100 m/s^2 (15x the traction
-  # limit mu*g = 6.87, 33x the problem's a_max = 3.0) and its reaction torque
-  # was 5.5x what it takes to rotate the robot back onto the caster and lift the
-  # drive wheels (0.055 N-m), so every duty step was a wheelie.
+  # 1.5x THE DATASHEET, because the datasheet value cannot drive the robot's own
+  # trajectories with the robot's own gains (2026-08-20). The datasheet figure
+  # for a 15:1 HPCB 6V gearmotor is 0.25 kg-cm = 0.0245 N-m, and that is what
+  # this was until the model was rebuilt with the measured 171 g.
   #
-  # This could only be lowered once the caster became a rolling ball. As a rigid
-  # skid it cost ~780 mm/s of sideways drag through every turn, which the
-  # oversized motor was silently paying for; with the real motor and the old
-  # skid, wheel speeds collapsed to 58/12 rad/s against a commanded 92/46 and
-  # broke into a 10 Hz limit cycle. Do not raise the skid back.
-  stall_torque: 0.0245    # N-m at duty = 1, w = 0   (0.25 kg-cm, datasheet)
-  # The FREE wheel-speed rise (armature/kv) - a construction knob, not the
+  # The evidence is a torque budget, measured by instrumenting the actuator over
+  # a closed-loop run of the shipped baselines at the problem yaml's stock gains
+  # (peak |kv*(ctrl - qvel)| per wheel):
+  #
+  #     circle_slow     median 1.8   p95  8.6   peak 15.5 mN-m
+  #     circle_medium   median 2.8   p95 10.6   peak 23.5 mN-m
+  #     circle_fast     median 5.4   p95 14.6   peak 44.4 mN-m
+  #
+  # `circle_medium` peaks at 23.5 against a datasheet stall of 24.5 - the
+  # trajectory sits ON the ceiling, so every transient saturates and the inner
+  # PI has nothing left. That is not a gradual degradation: over 6 seeds it is
+  # 6/6 diverged at 45% duty saturation at 1.0x and 1.2x, and 0/6 diverged at 0%
+  # saturation at 1.5x. A sharp threshold, and 0.0368 gives the peak demand a
+  # 1.6x margin. `circle_fast` needs 44.4 and still saturates, which is what
+  # makes it the benchmark that discriminates.
+  #
+  # Ruled out as the cause, each measured: omega_max (230 / 250 / 262 all
+  # behave the same, so it is not a feedforward speed error); the tire contact
+  # patch (7 / 5 / 3 mm all diverge at the datasheet motor, so it is not the
+  # line-contact scrub inventing yaw resistance); and tire mu (0.5 / 0.7 / 0.9,
+  # no setting rescues the datasheet motor).
+  #
+  # It does not make the robot unphysically strong: 2*T/r = 4.6 N on 0.171 kg is
+  # 26.9 m/s^2, still far above the traction limit mu*g = 8.8 that binds first.
+  #
+  # NOT evidence for this, and the reason to distrust an earlier version of this
+  # note: the free-running / straight-line wheel-speed rise. That measurement is
+  # dominated by vehicle inertia reflected through the wheel and is extremely
+  # slip-sensitive, and the PT1 `time_constant` the pipeline identifies is a
+  # LUMPED stand-in for motor dynamics plus loading over real driving - the two
+  # are different quantities. Running the identification pipeline on four
+  # closed-loop plant logs, which is the like-for-like comparison, recovers
+  # tau = 0.200 s at 1.0x and 0.190 s at 1.5x, both inside the 0.12-0.25 s band
+  # real logs give. So the identified time constant does NOT discriminate here
+  # and must not be used to set this.
+  #
+  # WHAT IS UNRESOLVED is why the factor is 1.5. Most likely the datasheet
+  # figure is for a different variant than the robot actually carries. A stall
+  # torque measurement on the hardware would settle it in minutes.
+  #
+  # Historical: 0.150 was a placeholder worth 6.1x the datasheet. It could
+  # command 100 m/s^2 (11x the traction limit, 33x the problem's a_max = 3.0)
+  # and its reaction torque was 5.5x what it takes to rotate the robot back onto
+  # the caster and lift the drive wheels, so every duty step was a wheelie. It
+  # could only be lowered once the caster became a rolling ball: as a rigid skid
+  # it cost ~780 mm/s of sideways drag through every turn, which the oversized
+  # motor was silently paying for. Do not raise the skid back.
+  stall_torque: 0.0368    # N-m at duty = 1, w = 0   (1.5x datasheet, see above)
+  # The FREE wheel-speed rise (armature/kv) - a construction knob, NOT the
   # observable lag: it exists only to set armature = kv * time_constant, and
   # `build_plant_xml` subtracts the wheel geom's own inertia from it.
   #
-  # 0.0366 is the PHYSICAL value at the datasheet motor, not a fit: the rotor
-  # reflected through the 15:1 gearbox is 1.5e-8 * 15.25^2 = 3.49e-6 kg-m^2 and
-  # the wheel cylinder adds 4.12e-7, so the total 3.90e-6 over kv = 1.065e-4
-  # gives 0.0366 s. Do not set this much lower - at 0.005 the wheel is
-  # effectively massless, spins up inside one inner tick and simply slips, which
-  # makes the measured mechanical rise time read 0.
+  # 0.0263 is the PHYSICAL value, not a fit: the rotor reflected through the
+  # 15:1 gearbox is 1.5e-8 * 15.25^2 = 3.49e-6 kg-m^2 and the 32 x 7 mm wheel
+  # cylinder adds 7.21e-7, so the total 4.21e-6 over kv = 1.600e-4 gives
+  # 0.0263 s. It MOVES WHENEVER THE STALL TORQUE DOES, because kv does; keep it
+  # equal to (total reflected inertia)/kv rather than treating it as free. Do
+  # not set it much lower - at 0.005 the wheel is effectively massless, spins up
+  # inside one inner tick and simply slips, making the measured rise read 0.
   #
-  # What identification sees is the LOADED rise: this PLUS a floor of
-  # (m*r^2/2)/kv = 0.227 s set by the vehicle's own inertia reflected through
-  # the wheel, so ~0.263 s in total. The floor DOMINATES, so this knob barely
-  # moves the observable lag - mass and stall torque set it. Measured PT1 time
-  # constants on the real robot span 0.12-0.25 s, so 0.263 s sits just above
-  # that band; reducing chassis mass is the way to come down into it.
-  time_constant: 0.0366   # s, free wheel-speed rise (physical, see above)
+  # Do not tune this against an identified time constant. What identification
+  # fits is a lumped PT1 over real driving, dominated by the vehicle inertia
+  # reflected through the wheel ((m*r^2/2)/kv = 0.137 s at 171 g), so this knob
+  # barely moves it. mujoco_sim.truth's free-run figure (0.26 s logged) is a
+  # different quantity again and is only a regression pin.
+  time_constant: 0.0263   # s, free wheel-speed rise (physical, see above)
 
 geometry:
-  wheel_radius: 0.016     # geom size; the ROLLING radius is smaller, see above
-  wheel_width: 0.002      # cylinder half-length
-  half_track: 0.0421      # wheel body offset; geometric wheelbase 0.0842
+  # From Pololu's drawing and STEP assembly for item 3725 - see the XML header.
+  # The ROLLING radius is emergent (contact penetration, now sub-micron on the
+  # near-rigid floor, so it is essentially the geometric one) and the EFFECTIVE
+  # wheelbase is emergent (tire scrub); recovering the latter is the benchmark.
+  wheel_radius: 0.016     # 32 mm diameter, drawing and STEP agree
+  # CONTACT half-width, not the tire half-width, and chosen from measured
+  # turning behaviour rather than from the geometric profile - because the
+  # profile does not resolve it. The tire is 7.5 mm wide but CROWNED: off the
+  # STEP cross-section the tread is flat to |lat| = 2.75 mm (within 45 um of the
+  # crown) and then fillets away, dropping 0.13 mm by 3.1 mm and 0.79 mm by
+  # 3.6 mm. Narrower bands than that cannot be read off the tessellation - it
+  # carries +-16 um of its own noise - and a silicone tire under 0.79 N per
+  # wheel deforms anyway, so the patch is elastic, not geometric. The honest
+  # bracket is 3-5.5 mm and nothing in the CAD picks a value inside it.
+  #
+  # What does pick one: MuJoCo reduces a cylinder on a plane to a two-point LINE
+  # contact at its two rim edges, both at full Coulomb friction, so the
+  # half-length IS the scrub lever, and scrub shows up directly as a failure to
+  # turn. Fraction of a commanded wheel-speed split actually achieved, open
+  # loop, 0.05 duty split at cruise 0.35 / 0.55:
+  #
+  #     2.2 mm  106% / 137%     over-rotates: too little patch to hold the turn
+  #     3.0 mm   92% / 133%     <- shipped
+  #     3.8 mm   79% / 115%
+  #     5.5 mm   45% /  75%     the geometric flat; visibly scrub-bound, and it
+  #                             inflates the effective wheelbase to 86.1 mm
+  #
+  # 3.0 mm is the widest patch that still rolls close to slip-free at moderate
+  # speed. The closed-loop baselines cannot choose between 3.0 and 3.8 (both
+  # 0/6, 0/6, 6/6 diverged over 6 seeds on slow/medium/fast), so this is decided
+  # on turn fidelity, which is the thing the patch actually controls.
+  wheel_width: 0.0015     # cylinder HALF-length; 3.0 mm contact patch
+  # Wheel mass from the STEP volume (3.2 cm^3) at plastic/silicone density.
+  # Declared rather than left to MuJoCo's default geom density, which would size
+  # it from the (deliberately narrowed) collision cylinder and get 3.1 g of a
+  # disc that is not the shape of the wheel.
+  wheel_mass: 0.0036
+  # Caliper on the hardware. The STEP's tread centreline is 85.4 mm, so the two
+  # agree to 1.2 mm; the drawing's 96.0 mm is the span over the MOTOR SHAFT
+  # ENDS, not over the tires, which is what used to look like a 5 mm conflict.
+  half_track: 0.0421      # geometric wheelbase 0.0842
 
 friction:
-  floor: 0.7              # a_slip = mu*g = 6.87 m/s^2, clears a_max_lateral 4.0
-  wheel: 0.7
-  # The caster is a ROLLING BALL on a ball joint (2026-08-18), not a skid, so
-  # this is now real grip that makes it roll instead of slide - it went UP,
-  # 0.05 -> 0.4. Rolling resistance lives in the <pair>'s rolling terms and
-  # the socket drag in the ball joint's frictionloss, both in the XML.
-  caster: 0.4             # via an explicit <pair>; see the XML header for why
-  # The chassis underside is the FRONT contact (2026-08-19): there is no front
-  # caster, so when the robot whips it grazes the floor on its battery bay for a
-  # few tens of ms and rocks back off it. Also via an explicit <pair>, because
-  # without one the elementwise-max rule gives the bare geom mu = 1.0 - higher
-  # than the wheels, so a graze would bite and yaw the robot. Low: hard plastic
-  # sliding on PVC, and the contact is meant to be a slip, not a pivot.
-  chassis: 0.15
+  # Set from the MATERIAL PAIRS, not fitted to behaviour (2026-08-20). Each is a
+  # mid-range handbook value for that pair sliding dry, and each is sanity
+  # checked against what the robot is observed to do rather than tuned until a
+  # benchmark passes.
+  #
+  # Tire on floor: silicone rubber on rigid PVC, which is a grippy pair (0.8-1.2
+  # dry). This is the one that decides whether hard commands make the robot SLIP
+  # or JUMP, and on the real robot they mostly make it jump - the tires hold and
+  # the light chassis rotates instead. mu = 0.9 gives a_slip = mu*g = 8.8 m/s^2,
+  # which still clears the problem yaml's a_max_lateral 4.0 with room. Both
+  # entries are 0.9 because MuJoCo takes the elementwise max and the tire-floor
+  # pair is the only place either one acts.
+  floor: 0.9
+  wheel: 0.9
+  # Caster ball (POM) on PVC, 0.25-0.35 dry. This is REAL grip and it is what
+  # makes the ball roll instead of slide - the effective drag of a rolling
+  # caster is set by the <pair>'s rolling terms and the ball joint's
+  # frictionloss, not by this. It went 0.05 -> 0.4 when the caster stopped being
+  # a rigid skid; 0.35 is the handbook value for the pair.
+  caster: 0.35
+  # Nose skid: the ABS skirt lip on PVC, 0.3-0.4 dry. Observed as a low-friction
+  # point graze, and 0.35 against the tires' 0.9 is exactly that - it is low
+  # RELATIVE to the wheels, which is what "it slips rather than grabs" means.
+  # Without the explicit <pair> the elementwise-max rule would give it the
+  # floor's 0.9, i.e. as grippy as a tire, and a graze would bite and yaw the
+  # robot.
+  nose: 0.35
 
 encoder:
   # Signed, and identical to the firmware's `encoder_cpr` key: the count->rad/s
@@ -84,7 +176,7 @@ encoder:
   counts_per_revolution: -183.0
 
 imu:
-  site_pos: [0.0, 0.0, 0.01]      # body frame, on the chassis deck
+  site_pos: [0.0, 0.0, 0.006]     # body frame, on the control board
   site_euler: [0.0, 0.0, 0.0]     # chip axes aligned with the body axes
   accel_lsb_g: 6.1e-5             # LSM6DSO, 0.061 mg/LSB at +-2 g
   gyro_lsb_dps: 0.007             # LSM6DSO, 70 mdps/LSB at +-2000 dps

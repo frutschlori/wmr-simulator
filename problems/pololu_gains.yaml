@@ -55,12 +55,12 @@ robot:
   base_diameter: 0.0842 # m
   max_wheel_speed: 250  # rad/s
   time_constant:  0.16  # time constant for first-order wheel dynamics (set to 0 for ideal actuation)
-  a_slip_max:  3.0    # traction limit ~ mu*g in m/s^2, 0 to disable (burnout model, Wong 2008)
+  a_slip_max:  5.0    # traction limit ~ mu*g in m/s^2, 0 to disable (burnout model, Wong 2008)
   v_max: 2.5          # m/s
-  a_max: 3.5          # m/s^2
-  a_max_lateral: 4.0 # m/s^2
-  omega_max: 5.0    # rad/s
-  alpha_max: 15.0    # rad/s^2
+  a_max: 5.0          # m/s^2
+  a_max_lateral: 5.0  # m/s^2
+  omega_max: 5.0      # rad/s
+  alpha_max: 15.0     # rad/s^2
 noise_enabled: true # false zeroes the estimator measurement noise everywhere (sim, gain tuning, traj-opt FIM)
 estimator:
   type: "kf"              # estimator type: "kf" (Kalman Filter) or "dr" (Dead Reckoning)

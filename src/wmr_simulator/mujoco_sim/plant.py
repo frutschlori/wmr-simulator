@@ -67,6 +67,7 @@ class MotorSpec:
 class GeometrySpec:
     wheel_radius: float
     wheel_width: float
+    wheel_mass: float
     half_track: float
 
 
@@ -75,7 +76,7 @@ class FrictionSpec:
     floor: float
     wheel: float
     caster: float
-    chassis: float
+    nose: float
 
 
 @dataclass(frozen=True)
@@ -139,15 +140,14 @@ class HiddenPlantConfig:
         )
 
 
-MUJOCO_DEFAULT_DENSITY = 1000.0
-"""MuJoCo's default geom density (kg/m^3); the wheel geoms declare no mass."""
-
-
 def _wheel_spin_inertia(geometry: "GeometrySpec") -> float:
-    """Spin inertia of one wheel geom about its hinge axis, m*r^2/2."""
-    radius, half_length = geometry.wheel_radius, geometry.wheel_width
-    mass = MUJOCO_DEFAULT_DENSITY * math.pi * radius**2 * (2.0 * half_length)
-    return mass * radius**2 / 2.0
+    """Spin inertia of one wheel COLLISION geom about its hinge axis, m*r^2/2.
+
+    The wheel's mass is declared, not derived from MuJoCo's default density: the
+    collision cylinder is deliberately narrower than the tire (see the yaml), so
+    a density-derived mass would be the mass of the wrong solid.
+    """
+    return geometry.wheel_mass * geometry.wheel_radius**2 / 2.0
 
 
 def _resolve_repo_path(value: str | Path) -> Path:
@@ -173,6 +173,11 @@ def build_plant_xml(config: HiddenPlantConfig) -> str:
     """
     root = ET.parse(config.model_path).getroot()
 
+    # `MjModel.from_xml_string` has no file to resolve <mesh file=...> against,
+    # so it would look in the process's working directory. Point it at the model
+    # file's own directory, which is where the meshes live.
+    _require(root, "./compiler", config.model_path).set("meshdir", str(Path(config.model_path).parent))
+
     motor = config.motor
     for name in ("left_motor", "right_motor"):
         actuator = _require(root, f".//velocity[@name='{name}']", config.model_path)
@@ -192,6 +197,7 @@ def build_plant_xml(config: HiddenPlantConfig) -> str:
         joint.set("armature", repr(max(motor.armature - _wheel_spin_inertia(geometry), 0.0)))
         geom = _require(root, f".//geom[@name='{side}_wheel_geom']", config.model_path)
         geom.set("size", f"{geometry.wheel_radius} {geometry.wheel_width}")
+        geom.set("mass", repr(geometry.wheel_mass))
         _set_sliding_friction(geom, config.friction.wheel)
 
     _set_sliding_friction(_require(root, ".//geom[@name='floor']", config.model_path), config.friction.floor)
@@ -200,10 +206,10 @@ def build_plant_xml(config: HiddenPlantConfig) -> str:
     # maximum and the "frictionless" ball inherits the floor's.
     pair = _require(root, ".//pair[@geom2='caster_geom']", config.model_path)
     _set_sliding_friction(pair, config.friction.caster, num_sliding=2)
-    # Same story for the chassis underside, which is the front skid: without a
-    # pair it would inherit mu = 1.0, higher than the wheels themselves.
-    pair = _require(root, ".//pair[@geom2='body']", config.model_path)
-    _set_sliding_friction(pair, config.friction.chassis, num_sliding=2)
+    # Same story for the nose skid, the front lip the robot dives onto under
+    # braking: without a pair it would inherit mu = 1.0, higher than the wheels.
+    pair = _require(root, ".//pair[@geom2='nose_skid']", config.model_path)
+    _set_sliding_friction(pair, config.friction.nose, num_sliding=2)
 
     # The IMU site and its sensors are not in the delivered model, and cannot be
     # added after compilation - hence the XML-patch path.
