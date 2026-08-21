@@ -27,6 +27,18 @@ exactly the same way -- is drawn beside it from its own recorded true pose as a
 marker in its trace's colour. That is a drawing order, not a difference in how
 the two were simulated.
 
+**Split screen** (``views``) puts several cameras on the same run. MuJoCo has
+no notion of a multi-pane video, but it does not need one: a ``Renderer`` draws
+whatever ``mjData`` it is handed, so one pane per view means one renderer per
+view all rendering the *same* physics step, tiled into a single frame with
+numpy. There is still exactly one deployment behind it, and no second library
+stitching videos together afterwards -- the panes are frames of one video from
+the moment they are written.
+
+``pane_rects`` sizes the panes so they tile the frame exactly, which is why a
+1920x1080 split screen is a 960x1080 overview beside two 960x540 chase views:
+nothing is scaled and nothing is letterboxed.
+
 A MuJoCo scene has no text, so the legend is composited onto the rendered
 frames with Pillow. It is built once and blended in per frame, since nothing
 about it changes during a run.
@@ -78,6 +90,14 @@ DEFAULT_FOLLOW_HEIGHT = 0.045
 # 0 sits the camera squarely behind the robot, 90 abeam of it, 45 between the
 # two -- measured round the robot's own heading, so it holds through every turn.
 DEFAULT_FOLLOW_ANGLE = 0.0
+# The chase camera's elevation normally *follows* from how high and how far
+# back it rides, so the two can never be set to disagree. ``follow_elevation``
+# overrides that and states the angle outright instead, with follow_distance
+# read as the straight-line range: 0 is level with the robot, negative goes
+# under the floor. MuJoCo renders the ground plane one-sided, so a camera below
+# it looks straight up through it at the caster ball, both tires and their
+# contact patches -- the one view that shows what the robot stands on.
+DEFAULT_FOLLOW_ELEVATION = None
 # The robot spans about 0-25 mm above the floor (axle 16 mm, deck top 20 mm,
 # caster centre 6.6 mm), so aiming here keeps body and contacts in frame.
 FOLLOW_LOOKAT_HEIGHT = 0.015
@@ -151,6 +171,181 @@ REPLAY_MARKER_RADIUS_FACTOR = 1.35
 REPLAY_MARKER_SEGMENTS = 28
 REPLAY_MARKER_HEIGHT = 0.012
 FALLBACK_CHASSIS_RADIUS = 0.0485
+
+
+# ---------------------------------------------------------------------------
+# Views
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class View:
+    """One camera of a video: where it sits and what it follows.
+
+    A video is a sequence of these. A single view fills the frame, which is
+    what every video was before split screens existed; several are tiled by
+    ``pane_rects`` and each gets its own renderer over the same physics step.
+
+    ``camera_mode="static"`` is the overhead shot, framed once on the whole
+    reference from ``elevation``/``azimuth``. ``"follow"`` is the chase camera,
+    placed ``follow_angle`` degrees round the robot's *own* heading so the
+    bearing holds through every turn.
+    """
+
+    camera_mode: str = STATIC_CAMERA
+    elevation: float = DEFAULT_ELEVATION
+    azimuth: float = DEFAULT_AZIMUTH
+    follow_angle: float = DEFAULT_FOLLOW_ANGLE
+    follow_distance: float = DEFAULT_FOLLOW_DISTANCE
+    follow_height: float = DEFAULT_FOLLOW_HEIGHT
+    follow_elevation: float | None = DEFAULT_FOLLOW_ELEVATION
+
+    def __post_init__(self) -> None:
+        if self.camera_mode not in CAMERA_MODES:
+            raise ValueError(f"camera_mode must be one of {CAMERA_MODES}, got {self.camera_mode!r}")
+
+    @property
+    def is_follow(self) -> bool:
+        return self.camera_mode == FOLLOW_CAMERA
+
+    @property
+    def elevation_above_lookat(self) -> float:
+        """Degrees the camera sits above what it looks at; negative is below it.
+
+        For a chase camera this normally *follows* from the height and stand-off
+        rather than being a third setting that could disagree with them --
+        unless ``follow_elevation`` states it outright, which is the only way to
+        get under the floor.
+        """
+        if not self.is_follow:
+            return float(self.elevation)
+        if self.follow_elevation is not None:
+            return float(self.follow_elevation)
+        return math.degrees(math.atan2(self.follow_height - FOLLOW_LOOKAT_HEIGHT, self.follow_distance))
+
+    @property
+    def follow_range(self) -> float:
+        """Straight-line distance the chase camera holds from its lookat point."""
+        if self.follow_elevation is not None:
+            return float(self.follow_distance)
+        return math.hypot(self.follow_distance, self.follow_height - FOLLOW_LOOKAT_HEIGHT)
+
+    @property
+    def line_scale(self) -> float:
+        """How much to thin the reference and trace tubes for this view.
+
+        From 0.18 m away a 7 mm tube is wider than the robot is tall and simply
+        buries it, so a chase view draws them thinner than an overview does.
+        """
+        return FOLLOW_LINE_SCALE if self.is_follow else 1.0
+
+    @property
+    def label(self) -> str:
+        """How this view names itself when a run is reported on the terminal."""
+        elevation = self.elevation_above_lookat
+        if not self.is_follow:
+            return f"top view, {elevation:.0f} deg"
+        return (
+            f"chase {self.follow_angle:.0f} deg ({follow_bearing(self.follow_angle)}), "
+            f"elev {elevation:+.0f} deg, {self.follow_distance:.2f} m"
+        )
+
+
+def follow_bearing(angle: float) -> str:
+    """What a ``follow_angle`` looks like from the robot: behind, abeam, head-on."""
+    folded = abs(float(angle)) % 360.0
+    folded = min(folded, 360.0 - folded)
+    if folded < 15.0:
+        return "behind"
+    if folded > 165.0:
+        return "head-on"
+    if 75.0 <= folded <= 105.0:
+        return "abeam"
+    return "oblique"
+
+
+def pane_rects(num_views: int, width: int, height: int) -> list[tuple[int, int, int, int]]:
+    """``(x, y, w, h)`` per view, tiling the frame exactly.
+
+    One view fills the frame. Otherwise the first takes the left half and the
+    rest stack down the right, which is the layout the split screen exists for:
+    the whole trajectory on the left for context, the chase views beside it for
+    what the robot is actually doing under it. At 1920x1080 that is a 960x1080
+    overview and two 960x540 chase panes -- each rendered at its own size, so
+    nothing is scaled and nothing is letterboxed.
+    """
+    if num_views < 1:
+        raise ValueError(f"a video needs at least one view, got {num_views}")
+    if num_views == 1:
+        return [(0, 0, int(width), int(height))]
+
+    left = int(width) // 2
+    rects = [(0, 0, left, int(height))]
+    rows = num_views - 1
+    top = 0
+    for row in range(rows):
+        # Any remainder goes to the last row rather than being spread, so the
+        # panes tile the frame exactly whatever the height divides into.
+        row_height = int(height) - top if row == rows - 1 else int(height) // rows
+        rects.append((left, top, int(width) - left, row_height))
+        top += row_height
+    return rects
+
+
+def per_chase_view(values, count: int, name: str) -> list:
+    """Broadcast a chase-camera setting over ``count`` panes.
+
+    A setting is either one value, which every pane shares, or one per pane.
+    ``None`` broadcasts too, since that is how a setting says "derive me" --
+    there is no way to spell a per-pane None on a command line anyway.
+    Anything else is a mismatch worth refusing rather than silently zipping
+    short: two panes and three distances is a typo, not a request.
+    """
+    if values is None or isinstance(values, (int, float)):
+        return [values] * count
+    values = list(values)
+    if len(values) == 1:
+        return values * count
+    if len(values) != count:
+        raise ValueError(f"{name} takes one value or one per follow angle ({count}), got {len(values)}")
+    return values
+
+
+def split_screen_views(
+    follow_angles,
+    *,
+    elevation: float = DEFAULT_ELEVATION,
+    azimuth: float = DEFAULT_AZIMUTH,
+    follow_distance=DEFAULT_FOLLOW_DISTANCE,
+    follow_height=DEFAULT_FOLLOW_HEIGHT,
+    follow_elevation=DEFAULT_FOLLOW_ELEVATION,
+) -> list[View]:
+    """An overview plus one chase view per angle, in ``pane_rects`` order.
+
+    The chase settings are per pane: each takes one value shared by every pane,
+    or one value per angle. That is what lets a split screen watch the same run
+    from two genuinely different places -- abeam from under the floor beside
+    close-in from behind -- rather than the same shot twice at two bearings.
+    """
+    follow_angles = [float(angle) for angle in follow_angles]
+    if not follow_angles:
+        raise ValueError("a split screen needs at least one follow angle")
+    count = len(follow_angles)
+    distances = per_chase_view(follow_distance, count, "follow_distance")
+    heights = per_chase_view(follow_height, count, "follow_height")
+    elevations = per_chase_view(follow_elevation, count, "follow_elevation")
+
+    overview = View(camera_mode=STATIC_CAMERA, elevation=elevation, azimuth=azimuth)
+    return [overview] + [
+        View(
+            camera_mode=FOLLOW_CAMERA,
+            follow_angle=angle,
+            follow_distance=distance,
+            follow_height=height,
+            follow_elevation=chase_elevation,
+        )
+        for angle, distance, height, chase_elevation in zip(follow_angles, distances, heights, elevations)
+    ]
 
 
 @dataclass(frozen=True)
@@ -333,8 +528,6 @@ class DeploymentVideoRecorder(FrameObserver):
         dt: float,
         out_path: str | Path,
         *,
-        elevation: float = DEFAULT_ELEVATION,
-        azimuth: float = DEFAULT_AZIMUTH,
         fps: int = DEFAULT_FPS,
         width: int = DEFAULT_WIDTH,
         height: int = DEFAULT_HEIGHT,
@@ -343,14 +536,9 @@ class DeploymentVideoRecorder(FrameObserver):
         replay_poses: np.ndarray | None = None,
         replay_rgba=VARIANT_RGBA[STATIC_VARIANT],
         replay_label: str = VARIANT_LABELS[STATIC_VARIANT],
-        camera_mode: str = STATIC_CAMERA,
-        follow_distance: float = DEFAULT_FOLLOW_DISTANCE,
-        follow_height: float = DEFAULT_FOLLOW_HEIGHT,
-        follow_angle: float = DEFAULT_FOLLOW_ANGLE,
+        views=None,
         slowmo_factor: float = DEFAULT_SLOWMO_FACTOR,
     ) -> None:
-        if camera_mode not in CAMERA_MODES:
-            raise ValueError(f"camera_mode must be one of {CAMERA_MODES}, got {camera_mode!r}")
         if slowmo_factor <= 0.0:
             raise ValueError(f"slowmo_factor must be positive, got {slowmo_factor}")
         # Slow motion is a *sampling* rate, not a playback rate: the plant is
@@ -368,24 +556,12 @@ class DeploymentVideoRecorder(FrameObserver):
         self.reference_xy = np.asarray(reference_xy, dtype=float)[:, :2]
         self.dt = float(dt)
         self.out_path = Path(out_path)
-        self.elevation = float(elevation)
-        self.azimuth = float(azimuth)
-        self.camera_mode = str(camera_mode)
-        self.follow_distance = float(follow_distance)
-        self.follow_height = float(follow_height)
-        self.follow_angle = float(follow_angle)
+        # One view fills the frame; several are tiled into it by pane_rects,
+        # each rendered at its own pane's size rather than scaled to fit.
+        self.views = (View(),) if views is None else tuple(views)
         self.slowmo_factor = float(slowmo_factor)
-        # Height and stand-off are the two knobs; the elevation that makes the
-        # camera actually look at the robot from there follows from them, so
-        # the two can never be set to disagree with each other.
-        rise = self.follow_height - FOLLOW_LOOKAT_HEIGHT
-        self._follow_elevation = math.degrees(math.atan2(rise, self.follow_distance))
-        self._follow_range = math.hypot(self.follow_distance, rise)
-        self._follow_position_alpha = 1.0 - math.exp(-1.0 / (self.fps * FOLLOW_POSITION_TAU))
-        self._follow_yaw_alpha = 1.0 - math.exp(-1.0 / (self.fps * FOLLOW_YAW_TAU))
-        self._follow_pose: tuple[float, float, float] | None = None
-        self._line_scale = FOLLOW_LINE_SCALE if self.camera_mode == FOLLOW_CAMERA else 1.0
-        # h264 needs even dimensions.
+        # h264 needs even dimensions on the *composed* frame; the panes are
+        # numpy slices of it and are free to be any size that tiles it.
         self.width = int(width) + int(width) % 2
         self.height = int(height) + int(height) % 2
         self.trace_rgba = tuple(trace_rgba)
@@ -394,10 +570,8 @@ class DeploymentVideoRecorder(FrameObserver):
         self.replay_rgba = tuple(replay_rgba)
         self.replay_label = str(replay_label)
 
-        self._renderer = None
+        self._panes: list[_ViewPane] = []
         self._writer = None
-        self._camera = None
-        self._scene_option = None
         self._chassis_radius = FALLBACK_CHASSIS_RADIUS
         self._legend = _legend_overlay(self.legend_entries(), self.width, self.height)
 
@@ -413,46 +587,54 @@ class DeploymentVideoRecorder(FrameObserver):
         if self._writer is not None:
             self._writer.close()
             self._writer = None
-        if self._renderer is not None:
-            self._renderer.close()
-            self._renderer = None
+        for pane in self._panes:
+            pane.close()
+        self._panes = []
 
     # -- hooks ------------------------------------------------------------
 
     def _start(self, plant: MujocoPlant) -> None:
         mujoco = self._mujoco
         model = plant.model
+        rects = pane_rects(len(self.views), self.width, self.height)
         # mujoco.Renderer refuses to render larger than the model's offscreen
-        # framebuffer, which is a <visual><global> property of the XML.
-        model.vis.global_.offwidth = max(model.vis.global_.offwidth, self.width)
-        model.vis.global_.offheight = max(model.vis.global_.offheight, self.height)
-
-        self._renderer = mujoco.Renderer(model, height=self.height, width=self.width, max_geom=self._geom_budget(model))
-        self._scene_option = mujoco.MjvOption()
-        self._camera = self._build_camera(model)
+        # framebuffer, which is a <visual><global> property of the XML. It is
+        # the largest *pane* that has to fit, not the composed frame.
+        model.vis.global_.offwidth = max(model.vis.global_.offwidth, max(rect[2] for rect in rects))
+        model.vis.global_.offheight = max(model.vis.global_.offheight, max(rect[3] for rect in rects))
         self._chassis_radius = _chassis_radius(mujoco, model)
 
-        if self.camera_mode == STATIC_CAMERA:
-            lookat, distance = _frame_shot(
-                self.reference_xy,
-                azimuth=self.azimuth,
-                elevation=self.elevation,
-                fovy=float(model.vis.global_.fovy),
-                aspect=self.width / self.height,
+        budget = self._geom_budget(model)
+        self._panes = [
+            _ViewPane(
+                mujoco, model, view, rect, reference_xy=self.reference_xy, fps=self.fps, max_geom=budget
             )
-            self._camera.lookat[:] = lookat
-            self._camera.distance = distance
+            for view, rect in zip(self.views, rects)
+        ]
 
         self.out_path.parent.mkdir(parents=True, exist_ok=True)
         self._writer = self._imageio.get_writer(self.out_path, fps=self.output_fps, macro_block_size=1)
 
     def _frame(self, plant: MujocoPlant) -> None:
+        # Every pane draws the same physics step, so the panes of a frame are
+        # the same instant of one deployment seen from several cameras.
+        frame = np.empty((self.height, self.width, 3), dtype=np.uint8)
+        for pane in self._panes:
+            frame[pane.top : pane.top + pane.height, pane.left : pane.left + pane.width] = pane.render(
+                plant, self._decorate
+            )
+        margin = max(1, round(LEGEND_MARGIN_FRACTION * self.height))
+        _composite(frame, self._legend, margin, margin)
+        self._writer.append_data(frame)
+
+    def _decorate(self, scene, scale: float) -> None:
+        """Add the reference, the traces and the replayed robot to one pane's scene.
+
+        Called once per pane per frame: each renderer owns its own scene, and
+        the tube radii are scaled per view, since a tube sized for an overview
+        buries the robot from 0.18 m away.
+        """
         mujoco = self._mujoco
-        if self.camera_mode == FOLLOW_CAMERA:
-            self._update_follow_camera(plant.pose())
-        self._renderer.update_scene(plant.data, camera=self._camera, scene_option=self._scene_option)
-        scene = self._renderer.scene
-        scale = self._line_scale
         _add_polyline(
             mujoco, scene, self.reference_xy, REFERENCE_HEIGHT, scale * REFERENCE_RADIUS, REFERENCE_RGBA
         )
@@ -475,10 +657,6 @@ class DeploymentVideoRecorder(FrameObserver):
         _add_polyline(
             mujoco, scene, self.pose_track()[:, :2], TRACE_HEIGHT, scale * TRACE_RADIUS, self.trace_rgba
         )
-        frame = self._renderer.render()
-        margin = max(1, round(LEGEND_MARGIN_FRACTION * self.height))
-        _composite(frame, self._legend, margin, margin)
-        self._writer.append_data(frame)
 
     # -- internals --------------------------------------------------------
 
@@ -496,26 +674,74 @@ class DeploymentVideoRecorder(FrameObserver):
         marker = REPLAY_MARKER_SEGMENTS + 2
         return len(self.reference_xy) + 2 * traces * frames + marker + model.ngeom + 1000
 
-    def _build_camera(self, model):
-        mujoco = self._mujoco
-        camera = mujoco.MjvCamera()
-        camera.type = mujoco.mjtCamera.mjCAMERA_FREE
 
-        if self.camera_mode == STATIC_CAMERA:
-            camera.azimuth = self.azimuth
-            # MuJoCo measures elevation downward-negative, so a request of 80 deg
-            # "looking down from above" is -80 in the camera's own convention.
-            camera.elevation = -self.elevation
-            # lookat and distance are framed against the reference in _start,
-            # once the model's fovy is available.
-        else:
+class _ViewPane:
+    """One ``View``'s renderer and camera, and where its frame lands.
+
+    A pane is not a separate video: it renders whatever ``mjData`` it is handed,
+    so all the panes of a frame are the same physics step of the same
+    deployment, and the tiling in ``DeploymentVideoRecorder._frame`` is the only
+    thing that makes them a split screen.
+    """
+
+    def __init__(
+        self,
+        mujoco,
+        model,
+        view: View,
+        rect: tuple[int, int, int, int],
+        *,
+        reference_xy: np.ndarray,
+        fps: int,
+        max_geom: int,
+    ) -> None:
+        self._mujoco = mujoco
+        self.view = view
+        self.left, self.top, self.width, self.height = (int(value) for value in rect)
+        self.renderer = mujoco.Renderer(model, height=self.height, width=self.width, max_geom=max_geom)
+        self.scene_option = mujoco.MjvOption()
+        self.camera = mujoco.MjvCamera()
+        self.camera.type = mujoco.mjtCamera.mjCAMERA_FREE
+        # MuJoCo measures elevation downward-negative, so a camera 80 deg above
+        # what it looks at is -80 in the camera's own convention -- and a
+        # follow_elevation of -90, under the floor looking up, is +90.
+        self.camera.elevation = -view.elevation_above_lookat
+
+        if view.is_follow:
             # Only the azimuth and the lookat move with the robot; how far back
             # and how high the camera rides is fixed for the whole run.
-            camera.elevation = -self._follow_elevation
-            camera.distance = self._follow_range
-        return camera
+            self.camera.distance = view.follow_range
+        else:
+            self.camera.azimuth = view.azimuth
+            # Framed against this pane's own aspect ratio, not the composed
+            # frame's: a 960x1080 overview is a different shot from a 1920x1080
+            # one and has to be framed as one.
+            lookat, distance = _frame_shot(
+                reference_xy,
+                azimuth=view.azimuth,
+                elevation=view.elevation,
+                fovy=float(model.vis.global_.fovy),
+                aspect=self.width / self.height,
+            )
+            self.camera.lookat[:] = lookat
+            self.camera.distance = distance
 
-    def _update_follow_camera(self, pose) -> None:
+        self._position_alpha = 1.0 - math.exp(-1.0 / (fps * FOLLOW_POSITION_TAU))
+        self._yaw_alpha = 1.0 - math.exp(-1.0 / (fps * FOLLOW_YAW_TAU))
+        self._pose: tuple[float, float, float] | None = None
+
+    def render(self, plant: MujocoPlant, decorate) -> np.ndarray:
+        """This pane's ``(h, w, 3)`` frame of the plant's current state."""
+        if self.view.is_follow:
+            self._track(plant.pose())
+        self.renderer.update_scene(plant.data, camera=self.camera, scene_option=self.scene_option)
+        decorate(self.renderer.scene, self.view.line_scale)
+        return self.renderer.render()
+
+    def close(self) -> None:
+        self.renderer.close()
+
+    def _track(self, pose) -> None:
         """Point the chase camera at the robot for this frame.
 
         MuJoCo's free camera sits at
@@ -525,28 +751,29 @@ class DeploymentVideoRecorder(FrameObserver):
         the robot's right -- 90 abeam, 45 between the two. Because the azimuth
         is measured off the robot's *own* heading it holds through every turn,
         which a fixed azimuth cannot do.
+
+        The camera lags the robot rather than locking to it: one nailed to the
+        raw pose holds the robot perfectly still and swings the world around it
+        instead, hiding exactly the wobble this view exists to show.
         """
         x, y, yaw = (float(value) for value in pose)
-        if self._follow_pose is None:
-            self._follow_pose = (x, y, yaw)
+        if self._pose is None:
+            self._pose = (x, y, yaw)
         else:
-            prev_x, prev_y, prev_yaw = self._follow_pose
+            prev_x, prev_y, prev_yaw = self._pose
             # Take the short way round: a raw difference across the +-pi
             # branch cut would swing the camera a full turn the wrong way.
             delta_yaw = (yaw - prev_yaw + math.pi) % (2.0 * math.pi) - math.pi
-            move = self._follow_position_alpha
-            turn = self._follow_yaw_alpha
-            self._follow_pose = (
+            move, turn = self._position_alpha, self._yaw_alpha
+            self._pose = (
                 prev_x + move * (x - prev_x),
                 prev_y + move * (y - prev_y),
                 prev_yaw + turn * delta_yaw,
             )
 
-        cam_x, cam_y, cam_yaw = self._follow_pose
-        self._camera.azimuth = math.degrees(cam_yaw) + self.follow_angle
-        self._camera.elevation = -self._follow_elevation
-        self._camera.lookat[:] = [cam_x, cam_y, FOLLOW_LOOKAT_HEIGHT]
-        self._camera.distance = self._follow_range
+        cam_x, cam_y, cam_yaw = self._pose
+        self.camera.azimuth = math.degrees(cam_yaw) + self.view.follow_angle
+        self.camera.lookat[:] = [cam_x, cam_y, FOLLOW_LOOKAT_HEIGHT]
 
 
 # ---------------------------------------------------------------------------
@@ -574,8 +801,6 @@ def render_deployment(
     out_path: str | Path,
     *,
     seed: int = 0,
-    elevation: float = DEFAULT_ELEVATION,
-    azimuth: float = DEFAULT_AZIMUTH,
     fps: int = DEFAULT_FPS,
     width: int = DEFAULT_WIDTH,
     height: int = DEFAULT_HEIGHT,
@@ -585,10 +810,7 @@ def render_deployment(
     replay_poses: np.ndarray | None = None,
     replay_rgba=VARIANT_RGBA[STATIC_VARIANT],
     replay_label: str = VARIANT_LABELS[STATIC_VARIANT],
-    camera_mode: str = STATIC_CAMERA,
-    follow_distance: float = DEFAULT_FOLLOW_DISTANCE,
-    follow_height: float = DEFAULT_FOLLOW_HEIGHT,
-    follow_angle: float = DEFAULT_FOLLOW_ANGLE,
+    views=None,
     slowmo_factor: float = DEFAULT_SLOWMO_FACTOR,
 ) -> tuple[DeploymentResult, int]:
     """Drive one deployment and write the mp4.
@@ -600,9 +822,10 @@ def render_deployment(
     a log into an iteration's ``data/`` would hand identification a run nobody
     asked for.
 
-    ``camera_mode="follow"`` swaps the static overhead shot for a chase camera
-    riding at ``follow_height`` above the floor, ``follow_distance`` back, and
-    ``follow_angle`` degrees round the robot's own heading (0 behind, 90 abeam).
+    ``views`` is the cameras to render it from: one fills the frame (the
+    default, an overhead shot from ``elevation``/``azimuth``), several are tiled
+    into a split screen by ``pane_rects``. They all watch the same deployment,
+    so a split screen costs one render per pane and nothing else.
     ``slowmo_factor`` above 1 samples the plant that much more often and plays
     the frames at ``fps``, so the video is that many times longer.
     """
@@ -613,8 +836,6 @@ def render_deployment(
         reference.states[:, :2],
         reference.dt,
         out_path,
-        elevation=elevation,
-        azimuth=azimuth,
         fps=fps,
         width=width,
         height=height,
@@ -623,10 +844,7 @@ def render_deployment(
         replay_poses=replay_poses,
         replay_rgba=replay_rgba,
         replay_label=replay_label,
-        camera_mode=camera_mode,
-        follow_distance=follow_distance,
-        follow_height=follow_height,
-        follow_angle=follow_angle,
+        views=views,
         slowmo_factor=slowmo_factor,
     ) as recorder:
         result = _drive(robot_config, trajectory, recorder, seed=seed, log_dir=log_dir)
@@ -640,16 +858,11 @@ def render_deployment_comparison(
     out_path: str | Path,
     *,
     seed: int = 0,
-    elevation: float = DEFAULT_ELEVATION,
-    azimuth: float = DEFAULT_AZIMUTH,
     fps: int = DEFAULT_FPS,
     width: int = DEFAULT_WIDTH,
     height: int = DEFAULT_HEIGHT,
     log_dir: str | Path | None = None,
-    camera_mode: str = STATIC_CAMERA,
-    follow_distance: float = DEFAULT_FOLLOW_DISTANCE,
-    follow_height: float = DEFAULT_FOLLOW_HEIGHT,
-    follow_angle: float = DEFAULT_FOLLOW_ANGLE,
+    views=None,
     slowmo_factor: float = DEFAULT_SLOWMO_FACTOR,
 ) -> tuple[list[VariantRun], int]:
     """Both of an iteration's controllers, in one video, on the same seed.
@@ -690,8 +903,6 @@ def render_deployment_comparison(
             trajectory,
             out_path,
             seed=seed,
-            elevation=elevation,
-            azimuth=azimuth,
             fps=fps,
             width=width,
             height=height,
@@ -701,10 +912,7 @@ def render_deployment_comparison(
             replay_poses=replay_poses,
             replay_rgba=replay.rgba,
             replay_label=replay.label,
-            camera_mode=camera_mode,
-            follow_distance=follow_distance,
-            follow_height=follow_height,
-            follow_angle=follow_angle,
+            views=views,
             slowmo_factor=slowmo_factor,
         )
 

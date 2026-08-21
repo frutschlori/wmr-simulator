@@ -24,14 +24,19 @@ from wmr_simulator.mujoco_sim.render import (
     VARIANT_RGBA,
     DeploymentVideoRecorder,
     FrameObserver,
+    View,
     _composite,
     _frame_shot,
     _legend_overlay,
     find_iteration_root,
+    follow_bearing,
+    pane_rects,
+    per_chase_view,
     record_pose_track,
     render_deployment_comparison,
     resolve_controller,
     ships_two_controllers,
+    split_screen_views,
 )
 from wmr_simulator.pololu.reference_importer import load_pololu_reference, load_reference
 
@@ -331,3 +336,119 @@ def test_composite_clips_an_overlay_that_runs_off_the_frame():
     _composite(frame, overlay, 6, 6)  # only a 4x4 corner fits
     assert frame[9, 9].tolist() == [255, 255, 255]
     assert frame[5, 5].tolist() == [0, 0, 0]
+
+
+# ---------------------------------------------------------------------------
+# Views and the split screen
+# ---------------------------------------------------------------------------
+
+
+def test_a_single_view_fills_the_frame():
+    assert pane_rects(1, 1920, 1080) == [(0, 0, 1920, 1080)]
+
+
+def test_split_screen_tiles_1920x1080_into_the_panes_it_promises():
+    """An overview beside stacked chase views, at sizes that need no scaling."""
+    assert pane_rects(2, 1920, 1080) == [(0, 0, 960, 1080), (960, 0, 960, 1080)]
+    assert pane_rects(3, 1920, 1080) == [(0, 0, 960, 1080), (960, 0, 960, 540), (960, 540, 960, 540)]
+
+
+@pytest.mark.parametrize("num_views", [1, 2, 3, 4, 5])
+@pytest.mark.parametrize("size", [(1920, 1080), (1281, 723), (640, 360)])
+def test_panes_tile_the_frame_exactly_and_never_overlap(num_views, size):
+    """A gap or an overlap would leave uninitialized pixels in the frame buffer."""
+    width, height = size
+    covered = np.zeros((height, width), dtype=int)
+    for left, top, pane_width, pane_height in pane_rects(num_views, width, height):
+        assert pane_width > 0 and pane_height > 0
+        covered[top : top + pane_height, left : left + pane_width] += 1
+    assert np.all(covered == 1)
+
+
+def test_a_view_refuses_a_camera_mode_it_cannot_render():
+    with pytest.raises(ValueError, match="camera_mode"):
+        View(camera_mode="orbit")
+
+
+def test_a_chase_camera_elevation_follows_from_its_height_and_stand_off():
+    """Height and stand-off are the two knobs, so they cannot disagree with a third."""
+    view = View(camera_mode="follow", follow_height=0.045, follow_distance=0.18)
+    rise = 0.045 - 0.015  # FOLLOW_LOOKAT_HEIGHT
+    assert view.elevation_above_lookat == pytest.approx(math.degrees(math.atan2(rise, 0.18)))
+    assert view.follow_range == pytest.approx(math.hypot(0.18, rise))
+
+
+def test_follow_elevation_overrides_the_height_and_reads_distance_as_the_range():
+    """Which is the only way under the floor: the height cannot go negative usefully."""
+    view = View(camera_mode="follow", follow_elevation=-90.0, follow_distance=0.16, follow_height=0.045)
+    assert view.elevation_above_lookat == -90.0
+    assert view.follow_range == pytest.approx(0.16)
+
+
+def test_an_overview_reports_its_own_elevation_and_full_width_lines():
+    view = View(camera_mode="static", elevation=80.0)
+    assert view.elevation_above_lookat == 80.0
+    assert view.line_scale == 1.0
+    # A tube sized for a whole-trajectory shot buries the robot from 0.18 m away.
+    assert View(camera_mode="follow").line_scale < 1.0
+
+
+@pytest.mark.parametrize(
+    "angle,bearing", [(0.0, "behind"), (-5.0, "behind"), (90.0, "abeam"), (-90.0, "abeam"), (180.0, "head-on"), (45.0, "oblique")]
+)
+def test_follow_bearing_names_where_the_camera_sits(angle, bearing):
+    assert follow_bearing(angle) == bearing
+
+
+def test_split_screen_views_puts_the_overview_first_and_one_chase_pane_per_angle():
+    views = split_screen_views([0.0, 90.0], elevation=70.0, follow_elevation=-20.0)
+    assert [view.camera_mode for view in views] == ["static", "follow", "follow"]
+    assert views[0].elevation == 70.0
+    assert [view.follow_angle for view in views[1:]] == [0.0, 90.0]
+    # A single chase setting is shared by every pane.
+    assert all(view.follow_elevation == -20.0 for view in views[1:])
+
+
+def test_each_chase_pane_can_have_its_own_distance_and_elevation():
+    """Otherwise a split screen is the same shot at two bearings."""
+    views = split_screen_views([0.0, 90.0], follow_elevation=[10.0, -60.0], follow_distance=[0.12, 0.20])
+    assert [view.follow_elevation for view in views[1:]] == [10.0, -60.0]
+    assert [view.follow_distance for view in views[1:]] == [0.12, 0.20]
+    # follow_elevation is set, so the range is the distance as given.
+    assert [view.follow_range for view in views[1:]] == [0.12, 0.20]
+    assert [view.elevation_above_lookat for view in views[1:]] == [10.0, -60.0]
+
+
+def test_a_chase_setting_with_the_wrong_count_is_refused_not_zipped_short():
+    with pytest.raises(ValueError, match="one per follow angle"):
+        split_screen_views([0.0, 90.0], follow_distance=[0.12, 0.16, 0.20])
+
+
+@pytest.mark.parametrize(
+    "values,expected",
+    [
+        (0.18, [0.18, 0.18]),
+        ([0.18], [0.18, 0.18]),
+        (None, [None, None]),
+        ([0.12, 0.20], [0.12, 0.20]),
+    ],
+)
+def test_per_chase_view_broadcasts_a_shared_setting_and_keeps_a_per_pane_one(values, expected):
+    assert per_chase_view(values, 2, "follow_distance") == expected
+
+
+def test_two_views_differing_only_in_stand_off_report_themselves_differently():
+    """The terminal line is how a run says which shots it rendered."""
+    near = View(camera_mode="follow", follow_angle=90.0, follow_elevation=-35.0, follow_distance=0.12)
+    far = View(camera_mode="follow", follow_angle=90.0, follow_elevation=-35.0, follow_distance=0.20)
+    assert near.label != far.label
+
+
+def test_split_screen_needs_at_least_one_chase_angle():
+    with pytest.raises(ValueError, match="follow angle"):
+        split_screen_views([])
+
+
+def test_a_recorder_defaults_to_one_overview_view(tmp_path):
+    assert _recorder(tmp_path).views == (View(),)
+

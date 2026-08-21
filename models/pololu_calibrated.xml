@@ -257,9 +257,6 @@
               material="wheel_mat" mass="0.0036"
               friction="0.9 0.001 0.0001"
               solref="0.003 2" solimp="0.99 0.9999 0.0005"/>
-        <geom name="left_wheel_marker" type="box"
-              size="0.0015 0.0006 0.0015" pos="0 0 0.016"
-              rgba="1 0 0 1" contype="0" conaffinity="0"/>
       </body>
 
       <body name="right_wheel" pos="0.0 -0.0421 0.0">
@@ -273,9 +270,6 @@
               material="wheel_mat" mass="0.0036"
               friction="0.9 0.001 0.0001"
               solref="0.003 2" solimp="0.99 0.9999 0.0005"/>
-        <geom name="right_wheel_marker" type="box"
-              size="0.0015 0.0006 0.0015" pos="0 0 0.016"
-              rgba="1 0 0 1" contype="0" conaffinity="0"/>
       </body>
 
       <!--
@@ -299,6 +293,24 @@
               rgba="0.5 0.5 0.5 1"
               friction="0.35 0.001 0.0001"
               mass="0.0015"/>
+        <!--
+          Visual only: a painted dot so the ball's rotation is readable. A
+          smooth sphere on a smooth floor gives the eye nothing to track, and
+          whether the caster is ROLLING or dragging is the one thing this body
+          exists to get right (see the skid warning above) - the render camera
+          can go under the floor and look straight up at it.
+
+          It starts at the bottom of the ball, i.e. at the contact patch, which
+          is where a camera below the floor sees it. contype/conaffinity 0 keeps
+          the contact set at the four geoms declared above, and mass="0" keeps
+          the ball's 1.5 g and its inertia exactly as measured - a marker that
+          changed how the caster rolls would defeat its own purpose. It stands
+          0.5 mm proud of the surface because a dot fully inside an opaque
+          sphere cannot be seen at all, and a dot flush with it disappears at
+          the grazing angles a chase camera spends most of a run at.
+        -->
+        <geom name="caster_marker" type="sphere" size="0.0017" pos="0 0 -0.0052"
+              rgba="0.9 0.1 0.1 1" contype="0" conaffinity="0" mass="0"/>
       </body>
 
       <!--
