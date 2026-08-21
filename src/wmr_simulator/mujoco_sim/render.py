@@ -62,6 +62,46 @@ DEFAULT_HEIGHT = 720
 # Fraction of headroom left around the reference when framing the shot.
 CAMERA_MARGIN = 1.2
 
+STATIC_CAMERA = "static"
+FOLLOW_CAMERA = "follow"
+CAMERA_MODES = (STATIC_CAMERA, FOLLOW_CAMERA)
+
+# The chase camera rides at roughly the robot's own height and rakes in almost
+# flat, which is the point of it: the caster ball (12.7 mm, 40 mm behind the
+# axle) and both wheels are only ever visible together from down there, and a
+# top-down shot cannot show contact geometry at all. The height is measured:
+# the chassis skirt hides the caster from 0.06 m up, and it clears the skirt
+# from about 0.045 m down (0.03 m puts it in plain view, at a very high
+# horizon). Both wheels show at any of these; a wheel is clearest abeam.
+DEFAULT_FOLLOW_DISTANCE = 0.18
+DEFAULT_FOLLOW_HEIGHT = 0.045
+# 0 sits the camera squarely behind the robot, 90 abeam of it, 45 between the
+# two -- measured round the robot's own heading, so it holds through every turn.
+DEFAULT_FOLLOW_ANGLE = 0.0
+# The robot spans about 0-25 mm above the floor (axle 16 mm, deck top 20 mm,
+# caster centre 6.6 mm), so aiming here keeps body and contacts in frame.
+FOLLOW_LOOKAT_HEIGHT = 0.015
+# A camera nailed to the raw pose holds the robot perfectly still and swings
+# the world around it instead, hiding exactly the wobble this view exists to
+# show; a camera that lags too much loses the robot out of frame. The two axes
+# want very different amounts, so they get their own time constants: heading is
+# what whips the whole world sideways and is smoothed hard, position only needs
+# enough lag to let the robot shift within the frame. Position lag is roughly
+# tau * speed, so at 1 m/s this is ~8 cm -- under one robot length, against a
+# stand-off of DEFAULT_FOLLOW_DISTANCE. In simulated seconds, so the framing is
+# identical at every --slowmo-factor.
+FOLLOW_POSITION_TAU = 0.08
+FOLLOW_YAW_TAU = 0.30
+# The reference and trace capsules are sized for a shot framed on a whole
+# trajectory; from 0.18 m away a 7 mm tube is wider than the robot is tall and
+# simply buries it, so the chase camera draws them thinner.
+FOLLOW_LINE_SCALE = 0.3
+
+# >1 stretches the run out: the plant is sampled that many times more often and
+# the extra frames are played at the same rate, so the motion is genuinely
+# resolved rather than the same frames merely held longer.
+DEFAULT_SLOWMO_FACTOR = 1.0
+
 STATIC_VARIANT = "static"
 PARAMETRIZED_VARIANT = "parametrized"
 
@@ -303,8 +343,23 @@ class DeploymentVideoRecorder(FrameObserver):
         replay_poses: np.ndarray | None = None,
         replay_rgba=VARIANT_RGBA[STATIC_VARIANT],
         replay_label: str = VARIANT_LABELS[STATIC_VARIANT],
+        camera_mode: str = STATIC_CAMERA,
+        follow_distance: float = DEFAULT_FOLLOW_DISTANCE,
+        follow_height: float = DEFAULT_FOLLOW_HEIGHT,
+        follow_angle: float = DEFAULT_FOLLOW_ANGLE,
+        slowmo_factor: float = DEFAULT_SLOWMO_FACTOR,
     ) -> None:
-        super().__init__(fps=fps)
+        if camera_mode not in CAMERA_MODES:
+            raise ValueError(f"camera_mode must be one of {CAMERA_MODES}, got {camera_mode!r}")
+        if slowmo_factor <= 0.0:
+            raise ValueError(f"slowmo_factor must be positive, got {slowmo_factor}")
+        # Slow motion is a *sampling* rate, not a playback rate: the plant is
+        # watched slowmo times more often and the frames are written at the
+        # requested fps, so a 2x video is twice as long and twice as finely
+        # resolved. Dropping the writer's fps instead would give a video of the
+        # same length with fewer frames in it.
+        super().__init__(fps=max(1, round(fps * float(slowmo_factor))))
+        self.output_fps = max(1, int(fps))
         import imageio.v2 as imageio
         import mujoco
 
@@ -315,6 +370,21 @@ class DeploymentVideoRecorder(FrameObserver):
         self.out_path = Path(out_path)
         self.elevation = float(elevation)
         self.azimuth = float(azimuth)
+        self.camera_mode = str(camera_mode)
+        self.follow_distance = float(follow_distance)
+        self.follow_height = float(follow_height)
+        self.follow_angle = float(follow_angle)
+        self.slowmo_factor = float(slowmo_factor)
+        # Height and stand-off are the two knobs; the elevation that makes the
+        # camera actually look at the robot from there follows from them, so
+        # the two can never be set to disagree with each other.
+        rise = self.follow_height - FOLLOW_LOOKAT_HEIGHT
+        self._follow_elevation = math.degrees(math.atan2(rise, self.follow_distance))
+        self._follow_range = math.hypot(self.follow_distance, rise)
+        self._follow_position_alpha = 1.0 - math.exp(-1.0 / (self.fps * FOLLOW_POSITION_TAU))
+        self._follow_yaw_alpha = 1.0 - math.exp(-1.0 / (self.fps * FOLLOW_YAW_TAU))
+        self._follow_pose: tuple[float, float, float] | None = None
+        self._line_scale = FOLLOW_LINE_SCALE if self.camera_mode == FOLLOW_CAMERA else 1.0
         # h264 needs even dimensions.
         self.width = int(width) + int(width) % 2
         self.height = int(height) + int(height) % 2
@@ -362,26 +432,49 @@ class DeploymentVideoRecorder(FrameObserver):
         self._camera = self._build_camera(model)
         self._chassis_radius = _chassis_radius(mujoco, model)
 
+        if self.camera_mode == STATIC_CAMERA:
+            lookat, distance = _frame_shot(
+                self.reference_xy,
+                azimuth=self.azimuth,
+                elevation=self.elevation,
+                fovy=float(model.vis.global_.fovy),
+                aspect=self.width / self.height,
+            )
+            self._camera.lookat[:] = lookat
+            self._camera.distance = distance
+
         self.out_path.parent.mkdir(parents=True, exist_ok=True)
-        self._writer = self._imageio.get_writer(self.out_path, fps=self.fps, macro_block_size=1)
+        self._writer = self._imageio.get_writer(self.out_path, fps=self.output_fps, macro_block_size=1)
 
     def _frame(self, plant: MujocoPlant) -> None:
         mujoco = self._mujoco
+        if self.camera_mode == FOLLOW_CAMERA:
+            self._update_follow_camera(plant.pose())
         self._renderer.update_scene(plant.data, camera=self._camera, scene_option=self._scene_option)
         scene = self._renderer.scene
-        _add_polyline(mujoco, scene, self.reference_xy, REFERENCE_HEIGHT, REFERENCE_RADIUS, REFERENCE_RGBA)
+        scale = self._line_scale
+        _add_polyline(
+            mujoco, scene, self.reference_xy, REFERENCE_HEIGHT, scale * REFERENCE_RADIUS, REFERENCE_RGBA
+        )
         if self.replay_poses is not None and len(self.replay_poses):
             # The two runs drive the same reference for the same duration, so
             # they share a frame index; clamp anyway rather than let a
             # one-frame rounding difference truncate the replay.
             index = min(self.num_frames, len(self.replay_poses))
             _add_polyline(
-                mujoco, scene, self.replay_poses[:index, :2], REPLAY_TRACE_HEIGHT, TRACE_RADIUS, self.replay_rgba
+                mujoco,
+                scene,
+                self.replay_poses[:index, :2],
+                REPLAY_TRACE_HEIGHT,
+                scale * TRACE_RADIUS,
+                self.replay_rgba,
             )
             _add_robot_marker(
-                mujoco, scene, self.replay_poses[index - 1], self._chassis_radius, self.replay_rgba
+                mujoco, scene, self.replay_poses[index - 1], self._chassis_radius, self.replay_rgba, scale
             )
-        _add_polyline(mujoco, scene, self.pose_track()[:, :2], TRACE_HEIGHT, TRACE_RADIUS, self.trace_rgba)
+        _add_polyline(
+            mujoco, scene, self.pose_track()[:, :2], TRACE_HEIGHT, scale * TRACE_RADIUS, self.trace_rgba
+        )
         frame = self._renderer.render()
         margin = max(1, round(LEGEND_MARGIN_FRACTION * self.height))
         _composite(frame, self._legend, margin, margin)
@@ -407,20 +500,53 @@ class DeploymentVideoRecorder(FrameObserver):
         mujoco = self._mujoco
         camera = mujoco.MjvCamera()
         camera.type = mujoco.mjtCamera.mjCAMERA_FREE
-        camera.azimuth = self.azimuth
-        # MuJoCo measures elevation downward-negative, so a request of 80 deg
-        # "looking down from above" is -80 in the camera's own convention.
-        camera.elevation = -self.elevation
-        lookat, distance = _frame_shot(
-            self.reference_xy,
-            azimuth=self.azimuth,
-            elevation=self.elevation,
-            fovy=float(model.vis.global_.fovy),
-            aspect=self.width / self.height,
-        )
-        camera.lookat[:] = lookat
-        camera.distance = distance
+
+        if self.camera_mode == STATIC_CAMERA:
+            camera.azimuth = self.azimuth
+            # MuJoCo measures elevation downward-negative, so a request of 80 deg
+            # "looking down from above" is -80 in the camera's own convention.
+            camera.elevation = -self.elevation
+            # lookat and distance are framed against the reference in _start,
+            # once the model's fovy is available.
+        else:
+            # Only the azimuth and the lookat move with the robot; how far back
+            # and how high the camera rides is fixed for the whole run.
+            camera.elevation = -self._follow_elevation
+            camera.distance = self._follow_range
         return camera
+
+    def _update_follow_camera(self, pose) -> None:
+        """Point the chase camera at the robot for this frame.
+
+        MuJoCo's free camera sits at
+        ``lookat - distance * [cos(az)cos(el), sin(az)cos(el), sin(el)]``, so the
+        camera is placed entirely by its azimuth: ``azimuth = yaw`` puts it
+        squarely behind the robot, and ``+ follow_angle`` swings it round toward
+        the robot's right -- 90 abeam, 45 between the two. Because the azimuth
+        is measured off the robot's *own* heading it holds through every turn,
+        which a fixed azimuth cannot do.
+        """
+        x, y, yaw = (float(value) for value in pose)
+        if self._follow_pose is None:
+            self._follow_pose = (x, y, yaw)
+        else:
+            prev_x, prev_y, prev_yaw = self._follow_pose
+            # Take the short way round: a raw difference across the +-pi
+            # branch cut would swing the camera a full turn the wrong way.
+            delta_yaw = (yaw - prev_yaw + math.pi) % (2.0 * math.pi) - math.pi
+            move = self._follow_position_alpha
+            turn = self._follow_yaw_alpha
+            self._follow_pose = (
+                prev_x + move * (x - prev_x),
+                prev_y + move * (y - prev_y),
+                prev_yaw + turn * delta_yaw,
+            )
+
+        cam_x, cam_y, cam_yaw = self._follow_pose
+        self._camera.azimuth = math.degrees(cam_yaw) + self.follow_angle
+        self._camera.elevation = -self._follow_elevation
+        self._camera.lookat[:] = [cam_x, cam_y, FOLLOW_LOOKAT_HEIGHT]
+        self._camera.distance = self._follow_range
 
 
 # ---------------------------------------------------------------------------
@@ -459,6 +585,11 @@ def render_deployment(
     replay_poses: np.ndarray | None = None,
     replay_rgba=VARIANT_RGBA[STATIC_VARIANT],
     replay_label: str = VARIANT_LABELS[STATIC_VARIANT],
+    camera_mode: str = STATIC_CAMERA,
+    follow_distance: float = DEFAULT_FOLLOW_DISTANCE,
+    follow_height: float = DEFAULT_FOLLOW_HEIGHT,
+    follow_angle: float = DEFAULT_FOLLOW_ANGLE,
+    slowmo_factor: float = DEFAULT_SLOWMO_FACTOR,
 ) -> tuple[DeploymentResult, int]:
     """Drive one deployment and write the mp4.
 
@@ -468,6 +599,12 @@ def render_deployment(
     directory that is thrown away: a video is not data collection, and dropping
     a log into an iteration's ``data/`` would hand identification a run nobody
     asked for.
+
+    ``camera_mode="follow"`` swaps the static overhead shot for a chase camera
+    riding at ``follow_height`` above the floor, ``follow_distance`` back, and
+    ``follow_angle`` degrees round the robot's own heading (0 behind, 90 abeam).
+    ``slowmo_factor`` above 1 samples the plant that much more often and plays
+    the frames at ``fps``, so the video is that many times longer.
     """
     from wmr_simulator.pololu.reference_importer import load_reference
 
@@ -486,6 +623,11 @@ def render_deployment(
         replay_poses=replay_poses,
         replay_rgba=replay_rgba,
         replay_label=replay_label,
+        camera_mode=camera_mode,
+        follow_distance=follow_distance,
+        follow_height=follow_height,
+        follow_angle=follow_angle,
+        slowmo_factor=slowmo_factor,
     ) as recorder:
         result = _drive(robot_config, trajectory, recorder, seed=seed, log_dir=log_dir)
         num_frames = recorder.num_frames
@@ -504,6 +646,11 @@ def render_deployment_comparison(
     width: int = DEFAULT_WIDTH,
     height: int = DEFAULT_HEIGHT,
     log_dir: str | Path | None = None,
+    camera_mode: str = STATIC_CAMERA,
+    follow_distance: float = DEFAULT_FOLLOW_DISTANCE,
+    follow_height: float = DEFAULT_FOLLOW_HEIGHT,
+    follow_angle: float = DEFAULT_FOLLOW_ANGLE,
+    slowmo_factor: float = DEFAULT_SLOWMO_FACTOR,
 ) -> tuple[list[VariantRun], int]:
     """Both of an iteration's controllers, in one video, on the same seed.
 
@@ -527,8 +674,16 @@ def render_deployment_comparison(
         replay = resolve_controller(iteration_root, STATIC_VARIANT, staging)
         live = resolve_controller(iteration_root, PARAMETRIZED_VARIANT, staging)
 
+        # The marker is indexed frame-for-frame against the rendered run, so
+        # it has to be sampled on the cadence that run is *rendered* at -- under
+        # slow motion that is fps * slowmo_factor, not fps, or the replay track
+        # runs out partway through and its robot freezes.
         replay_result, replay_poses = record_pose_track(
-            replay.config_path, trajectory, seed=seed, fps=fps, log_dir=log_dir
+            replay.config_path,
+            trajectory,
+            seed=seed,
+            fps=max(1, round(fps * slowmo_factor)),
+            log_dir=log_dir,
         )
         live_result, num_frames = render_deployment(
             live.config_path,
@@ -546,6 +701,11 @@ def render_deployment_comparison(
             replay_poses=replay_poses,
             replay_rgba=replay.rgba,
             replay_label=replay.label,
+            camera_mode=camera_mode,
+            follow_distance=follow_distance,
+            follow_height=follow_height,
+            follow_angle=follow_angle,
+            slowmo_factor=slowmo_factor,
         )
 
     return (
@@ -584,7 +744,7 @@ def _add_polyline(mujoco, scene, points_xy: np.ndarray, z: float, radius: float,
             return
 
 
-def _add_robot_marker(mujoco, scene, pose, chassis_radius: float, rgba) -> None:
+def _add_robot_marker(mujoco, scene, pose, chassis_radius: float, rgba, line_scale: float = 1.0) -> None:
     """The other run's robot: a ring around its chassis, with a heading tick.
 
     A ring rather than a look-alike chassis for legibility, not for honesty --
@@ -596,12 +756,12 @@ def _add_robot_marker(mujoco, scene, pose, chassis_radius: float, rgba) -> None:
     radius = REPLAY_MARKER_RADIUS_FACTOR * chassis_radius
     angles = np.linspace(0.0, 2.0 * math.pi, REPLAY_MARKER_SEGMENTS + 1)
     ring = np.column_stack([x + radius * np.cos(angles), y + radius * np.sin(angles)])
-    _add_polyline(mujoco, scene, ring, REPLAY_MARKER_HEIGHT, 0.6 * TRACE_RADIUS, rgba)
+    _add_polyline(mujoco, scene, ring, REPLAY_MARKER_HEIGHT, line_scale * 0.6 * TRACE_RADIUS, rgba)
     # Which way it is pointing, since a ring alone cannot say. Drawn outside
     # the ring so it clears the live chassis when the two runs coincide.
     heading = np.array([math.cos(yaw), math.sin(yaw)])
     tick = np.array([[x, y]]) + np.outer([1.0, 1.5], radius * heading)
-    _add_polyline(mujoco, scene, tick, REPLAY_MARKER_HEIGHT, 0.6 * TRACE_RADIUS, rgba)
+    _add_polyline(mujoco, scene, tick, REPLAY_MARKER_HEIGHT, line_scale * 0.6 * TRACE_RADIUS, rgba)
 
 
 def _legend_overlay(entries, width: int, height: int) -> np.ndarray:
