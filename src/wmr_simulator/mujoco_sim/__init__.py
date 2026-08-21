@@ -17,9 +17,12 @@ from wmr_simulator.mujoco_sim.render import (
     DeploymentVideoRecorder,
     FrameObserver,
     VariantRun,
+    View,
+    pane_rects,
     record_pose_track,
     render_deployment,
     render_deployment_comparison,
+    split_screen_views,
 )
 from wmr_simulator.mujoco_sim.truth import PlantTruth, measure_plant_truth
 
@@ -36,11 +39,14 @@ __all__ = [
     "MujocoPlant",
     "PlantTruth",
     "VariantRun",
+    "View",
     "build_plant_xml",
     "load_hidden_plant_config",
     "measure_plant_truth",
+    "pane_rects",
     "record_pose_track",
     "render_deployment",
     "render_deployment_comparison",
     "run_deployment",
+    "split_screen_views",
 ]
