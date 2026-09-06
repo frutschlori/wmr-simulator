@@ -193,19 +193,54 @@ def test_inner_loop_feedforward_divides_by_the_configs_wheel_max():
     inner.set_command(speed, speed)
     duty = inner.update((0, 0))
     assert duty == pytest.approx([speed / open_loop.wheel_max] * 2)
-    # Not the simulator's identified motor gain, which would be 12% larger here.
-    assert duty[0] != pytest.approx(speed / 223.0)
+    # The exporter writes the identified motor gain into wheel_max, so on an
+    # exported config the feedforward is exact rather than ~12% weak.
+    assert duty[0] == pytest.approx(speed / 223.0)
 
 
-def test_inner_loop_publishes_the_twist_from_the_filtered_speeds(config):
-    """The deployed branch has no odometry task: the twist comes from omega_lp."""
+def test_a_hand_written_wheel_max_still_wins_over_the_identified_gain():
+    """The firmware believes the card, so a stale CFG makes the feedforward weak."""
+    stale = FirmwareConfig.from_mapping({**stock_values(), "wheel_max": 250.0, "kp_inner": 0.0, "ki_inner": 0.0})
+    inner = InnerLoop(stale)
+    inner.reset((0, 0))
+    inner.set_command(100.0, 100.0)
+    duty = inner.update((0, 0))
+    assert duty[0] == pytest.approx(100.0 / 250.0)
+    assert duty[0] < 100.0 / 223.0
+
+
+def test_inner_loop_publishes_the_twist_from_the_raw_speeds(config):
+    """`odometry.rs`: the EKF predicts on the unfiltered wheel speeds.
+
+    Building it from `omega_lp` instead puts the 53 ms encoder lag into the
+    pose the outer tracking law closes around, and disagrees with the JAX
+    `estimator.py`. On the first tick out of reset the low-pass has only
+    reached `alpha` of the step, so the two differ by ~6x here.
+    """
     inner = InnerLoop(config)
     inner.reset((0, 0))
     counts = np.array([-12, -17])
     inner.update(counts)
-    left, right = inner.omega_lp
+    omega_raw = 2.0 * math.pi * counts / (config.encoder_cpr * inner.dt)
+    left, right = omega_raw
     assert inner.twist[0] == pytest.approx(config.wheel_radius * (right + left) / 2.0)
     assert inner.twist[1] == pytest.approx(config.wheel_radius * (right - left) / config.wheel_base)
+
+    lp_left, lp_right = inner.omega_lp
+    assert inner.twist[0] != pytest.approx(config.wheel_radius * (lp_right + lp_left) / 2.0)
+
+
+def test_the_twist_and_the_logged_speeds_converge_in_steady_state(config):
+    """The raw/filtered split is a lag, not an offset: it vanishes at constant speed."""
+    inner = InnerLoop(config)
+    inner.reset((0, 0))
+    step = np.array([-12, -17])
+    counts = np.zeros(2, dtype=np.int64)
+    for _ in range(400):
+        counts = counts + step
+        inner.update(counts)
+    left, right = inner.omega_lp
+    assert inner.twist[0] == pytest.approx(config.wheel_radius * (right + left) / 2.0, rel=1e-6)
 
 
 def test_inner_loop_applies_the_motor_direction(config):
@@ -286,9 +321,9 @@ def test_the_wheel_command_is_not_clipped(config):
     states, actions = trivial_trajectory()
     follower = TrajectoryFollower(config, states, actions)
     outputs = follower.control((0.0, -5.0, 0.0), follower.setpoint(0.0))
-    # Past the config's own wheel_max of 250 rad/s, which the firmware carries
-    # on its DiffdriveCascade and then never applies on this path.
-    assert abs(outputs.omega_right) > 250.0
+    # Past the config's own wheel_max, which the firmware carries on its
+    # DiffdriveCascade and then never applies on this path.
+    assert abs(outputs.omega_right) > config.wheel_max
 
 
 # ----------------------------------------------------------------- gain MLP

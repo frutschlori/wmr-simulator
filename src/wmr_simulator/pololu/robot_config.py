@@ -6,6 +6,12 @@ This module renders that format from simulator quantities:
 
 - ``wheel_radius`` / ``wheel_base`` come from PhysicalParams (base_diameter is
   the effective wheelbase).
+- ``wheel_max`` is the identified ``max_wheel_speed``. The firmware divides its
+  inner-loop feedforward by it (``inner_controller.rs``) and clamps the
+  commanded wheel speeds to it (``trajectory_control.rs``), so leaving it at a
+  template value while the robot identifies something lower makes the
+  feedforward weak by exactly that fraction -- visible as a standing
+  inner-loop integrator offset in the logs.
 - ``kx_traj`` / ``ky_traj`` / ``ktheta_traj`` are the outer tracking gains,
   identical in both conventions.
 - ``kp_inner`` / ``ki_inner`` are the inner wheel-speed gains. The simulator
@@ -113,8 +119,9 @@ def robot_config_values(
 
     ``physical_params`` is a PhysicalParams (or anything with wheel_radius,
     base_diameter and max_wheel_speed attributes); ``controller_gains`` is the
-    simulator gain vector [kx, ky, kth, kpmotor, kimotor]. Inner motor gains are
-    converted to firmware duty/(rad/s) units by dividing by max_wheel_speed, so
+    simulator gain vector [kx, ky, kth, kpmotor, kimotor]. ``max_wheel_speed``
+    is exported twice over: as ``wheel_max`` itself, and as the divisor turning
+    the simulator's inner gains into the firmware's duty/(rad/s) units -- so
     exporting gains requires physical_params too. The firmware ``kd_inner`` slot
     has no simulator counterpart and is forced to 0.
     """
@@ -122,6 +129,7 @@ def robot_config_values(
     if physical_params is not None:
         values["wheel_radius"] = float(physical_params.wheel_radius)
         values["wheel_base"] = float(physical_params.base_diameter)
+        values["wheel_max"] = float(physical_params.max_wheel_speed)
     if controller_gains is not None:
         if physical_params is None:
             raise ValueError("Exporting controller gains requires physical_params for the motor-gain conversion.")
