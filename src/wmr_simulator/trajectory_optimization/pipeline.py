@@ -312,6 +312,7 @@ class TrajectoryOptimizationPipeline:
         min_tangent_fraction: float = DEFAULT_MIN_TANGENT_FRACTION,
         kimotor_fim_scale: float | None = None,
         motion_limits: dict | None = None,
+        controller_gains=None,
         residual_model=None,
     ):
         self.problem = ProblemDefinition(problem_path)
@@ -344,7 +345,41 @@ class TrajectoryOptimizationPipeline:
         )
         self.robot = self.simulation.robot
         self.controller = self.simulation.controller
-        self.controller_gains = self.simulation.gains
+        # The design point, and the gains every rollout in here is driven at.
+        #
+        # This designer always drives the *static* controller -- no rollout in
+        # this class passes ``schedule_params``, so the gain parametrization is
+        # off everywhere -- and the design point therefore has to be the static
+        # gains. A parametrized run's *base* gains are not a controller anybody
+        # runs (the network absorbs whatever scale they take, and they drift far
+        # from the effective gains), so designing at them while driving the
+        # static controller designs for a robot that does not exist: measured on
+        # real02, base kth 50 / kpmotor 21.5 against effective 9.25 / 0.0, and
+        # that design point is what flattens the curves. ``controller_gains``
+        # names them explicitly; None falls back to the problem yaml's, which is
+        # only the same thing when no parametrization has been trained against
+        # them.
+        self.controller_gains = (
+            self.simulation.gains
+            if controller_gains is None
+            else jnp.asarray(controller_gains, dtype=jnp.float32)
+        )
+        if self.controller_gains.shape != self.simulation.gains.shape:
+            raise ValueError(
+                f"controller_gains must have shape {self.simulation.gains.shape}, "
+                f"got {self.controller_gains.shape}."
+            )
+        if controller_gains is None and self._problem_has_a_trained_parametrization():
+            # Not an error -- a bare problem yaml is a legitimate thing to
+            # design from -- but designing at a *trained* parametrization's base
+            # gains is the flaw this argument exists for, and it is silent.
+            print(
+                "WARNING: the problem's gain parametrization is trained, so "
+                f"controller.gains {np.asarray(self.controller_gains).tolist()} are its base "
+                "gains, not a controller anybody runs. This designer drives the static "
+                "controller; pass controller_gains= the static-tuned gains "
+                "(robot_config_static_gains.yaml in an active-learning iteration)."
+            )
         # kimotor's FIM scale: constant, and by default the problem's *nominal*
         # kimotor. See fim_parameter_scaling for why it cannot track the value.
         #
@@ -452,6 +487,20 @@ class TrajectoryOptimizationPipeline:
         self.batch_start_offsets = None
         self.batch_constraint_weights = None
         self.optimization_snapshots = None
+
+    def _problem_has_a_trained_parametrization(self) -> bool:
+        """Whether the problem's gain parametrization is anything but the identity.
+
+        The stock yamls ship an *enabled* parametrization at theta = 0, which is
+        exactly the static controller, so enablement alone says nothing -- only a
+        non-zero trainable vector means the base gains have been tuned against a
+        network.
+        """
+        if not self.simulation.gain_parametrization_enabled:
+            return False
+        from wmr_simulator.gain_parametrization import flat_params
+
+        return bool(np.any(np.asarray(flat_params(self.simulation.gain_parametrization_params)) != 0.0))
 
     def nominal_parameters(self) -> jnp.ndarray:
         if self.objective_mode == OBJECTIVE_MODE_GAIN_TUNING:

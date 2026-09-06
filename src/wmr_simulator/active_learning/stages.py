@@ -194,6 +194,29 @@ def _load_design_residual_model(path: Path):
     return residual_model
 
 
+def _static_design_gains(paths: IterationPaths) -> list[float] | None:
+    """The static gains the trajectory designers compute their FIM around.
+
+    The designers always drive the *static* controller (no rollout in
+    TrajectoryOptimizationPipeline passes schedule_params), so their design
+    point has to be static gains. The iteration's problem yaml carries the
+    *parametrized* run's base gains -- finalize writes those into
+    robot_config.yaml and write_iteration_problem copies them on -- and those
+    are not a controller anybody runs: the network absorbs whatever scale they
+    take, so they drift far from the effective gains and, being large, flatten
+    the designs.
+
+    robot_config_static_gains.yaml is the same file stage_tune_gains warm-starts
+    its static run from. Missing it means there is no separate static
+    controller for this iteration -- iteration 1, or an experiment with the
+    parametrization off -- and the problem's own gains already are the static
+    ones.
+    """
+    if not paths.robot_config_static.is_file():
+        return None
+    return [float(gain) for gain in load_yaml(paths.robot_config_static)["controller"]["gains"]]
+
+
 def stage_plan_identification_trajectory(experiment: Experiment, iteration: int) -> Path:
     """Synthesize (or copy) the informative identification trajectory and
     export it as a Pololu reference JSN plus a bridged repeat variant
@@ -222,11 +245,17 @@ def stage_plan_identification_trajectory(experiment: Experiment, iteration: int)
         residual_model = None
         if config["use_residual_model"] and iteration > 1:
             residual_model = _load_design_residual_model(experiment.paths(iteration - 1).residual_model)
+        design_gains = _static_design_gains(paths)
+        if design_gains is not None:
+            print(f"Designing at the static-tune gains: {design_gains}")
         pipeline = TrajectoryOptimizationPipeline(
             str(paths.problem),
             time_scaling=config["time_scaling"],
             objective_mode="identification",
             fim_a_slip_max=bool(config["fim_a_slip_max"]),
+            # The design is driven with the parametrization off, so it is
+            # scored at the static gains rather than the problem's base gains.
+            controller_gains=design_gains,
             # This design's own motion envelope, gentler than the one the
             # tuning designer works in: the identification trajectory is placed
             # by hand and driven on the robot, not rolled out in sim.
@@ -315,12 +344,19 @@ def stage_plan_tuning_trajectories(experiment: Experiment, iteration: int) -> li
     residual_model = None
     if config["use_residual_model"]:
         residual_model = _load_design_residual_model(paths.residual_model)
+    design_gains = _static_design_gains(paths)
+    if design_gains is not None:
+        print(f"Designing at the static-tune gains: {design_gains}")
     pipeline = TrajectoryOptimizationPipeline(
         str(problem_path),
         time_scaling=config["time_scaling"],
         objective_mode="gain-tuning",
         kimotor_fim_scale=float(config["kimotor_fim_scale"]),
         start_offset_mode=str(config["start_offset_mode"]),
+        # The FIM's design parameters *are* these gains here, and the rollout
+        # runs them with the parametrization off -- so they have to be the
+        # static ones, not the parametrized run's base gains.
+        controller_gains=design_gains,
         residual_model=residual_model,
     )
     constraint_component_weights = {
