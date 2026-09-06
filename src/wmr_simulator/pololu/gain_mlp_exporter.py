@@ -135,7 +135,7 @@ def reference_forward(payload: dict, ref: list, pose: list, twist: list) -> np.n
 
     factors = np.ones(NUM_GAINS, dtype=np.float32)
     factors[payload["scheduled_indices"]] = np.clip(
-        np.float32(1.0) + h, np.float32(error_mlp.MIN_FACTOR), np.float32(payload["bound"])
+        np.float32(1.0) + h, np.float32(0.0), np.float32(payload["bound"])
     )
     return factors
 

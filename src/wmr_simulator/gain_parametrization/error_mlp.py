@@ -5,7 +5,7 @@ speed features to one bounded multiplicative factor per *scheduled* controller
 gain (``scheduled_indices``, default all five; gains not listed pass through
 untouched, e.g. ``[0, 1, 2]`` keeps the motor PI gains static):
 
-    gains[i] = base_gains[i] * clip(1 + mlp(z)[i], MIN_FACTOR, bound),  bound >= 1
+    gains[i] = base_gains[i] * clip(1 + mlp(z)[i], 0, bound),  bound >= 1
 
 The trainable flat vector is a *delta* on a frozen random init whose final
 layer is zero, so a zero delta is exactly the identity parametrization (static
@@ -35,7 +35,6 @@ NUM_FEATURES = len(FEATURE_NAMES)
 NUM_GAINS = 5
 
 _V_D_EPS = 1e-12
-MIN_FACTOR = 0.01
 # Default scales for the pose-error features; velocity features are scaled by
 # the robot limits (v_max, omega_max) like in the bounded scheduler.
 _POS_ERROR_SCALE = 0.5   # m
@@ -170,7 +169,7 @@ def factors(
     z = features(ref_state, pose_est, twist_est, params.feature_scale)
     raw = _forward(effective_layers(params), z)
     bound = jnp.clip(params.bound, min=1.0)
-    return jnp.clip(1.0 + raw, min=MIN_FACTOR, max=bound)
+    return jnp.clip(1.0 + raw, min=0.0, max=bound)
 
 
 def apply(
