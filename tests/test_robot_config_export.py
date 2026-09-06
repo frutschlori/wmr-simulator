@@ -46,6 +46,20 @@ def test_gain_conversion_divides_inner_gains_by_motor_gain():
     assert values["gear_ratio"] == pytest.approx(DEFAULT_ROBOT_CONFIG["gear_ratio"])
 
 
+def test_wheel_max_is_the_identified_motor_gain():
+    # The firmware's feedforward is omega_cmd / wheel_max, so the exported
+    # wheel_max has to be the same max_wheel_speed the inner gains were
+    # divided by -- a template value left in place makes the feedforward weak
+    # by exactly the identification's shortfall.
+    class SlowParams(FakeParams):
+        max_wheel_speed = 229.83
+
+    values = robot_config_values(physical_params=SlowParams(), controller_gains=[1, 2, 3, 4, 5])
+    assert values["wheel_max"] == pytest.approx(229.83)
+    assert values["wheel_max"] != pytest.approx(DEFAULT_ROBOT_CONFIG["wheel_max"])
+    assert values["kp_inner"] == pytest.approx(4.0 / 229.83)
+
+
 def test_gains_require_physical_params():
     with pytest.raises(ValueError, match="physical_params"):
         robot_config_values(controller_gains=[1, 2, 3, 4, 5])
@@ -65,6 +79,8 @@ def test_export_with_template_and_overrides(tmp_path):
     values = load_robot_config_file(output)
     assert lines[3:5] == ["robot_id=10", "joystick_control_dt_ms=20.0"]
     assert values["robot_id"] == pytest.approx(10.0)
-    assert values["wheel_max"] == pytest.approx(300.0)
+    # wheel_max is derived from physical_params, so it wins over the template.
+    assert values["wheel_max"] == pytest.approx(250.0)
+    assert values["gear_ratio"] == pytest.approx(DEFAULT_ROBOT_CONFIG["gear_ratio"])
     assert values["max_speed"] == pytest.approx(2.0)
     assert values["kp_inner"] == pytest.approx(4.0 / 250.0)

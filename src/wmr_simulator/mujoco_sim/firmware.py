@@ -12,10 +12,17 @@ differs from `main` in ways that matter here (feedforward, integral limit,
 where the odometry twist comes from):
 
 - ``inner_controller.rs`` — 100 Hz: counts → rad/s → 3 Hz low-pass →
-  feedforward + PI → duty. The *low-passed* speed is what gets logged as
-  ``omega_*_meas``, and on this branch it is also what the body twist for the
-  EKF is built from: ``odometry.rs`` is deleted and the inner loop publishes
-  ``(v, w)`` itself, from the **filtered** speeds and the config's geometry.
+  feedforward + PI → duty. The *low-passed* speed is what the PI closes on and
+  what gets logged as ``omega_*_meas``.
+- ``odometry.rs`` — 100 Hz: the same counters, but the body twist ``(v, w)``
+  the EKF predicts on is built from the **raw** speeds, with no low-pass. The
+  two sources are deliberately separate: filtering the EKF's input puts the
+  53 ms encoder lag into the pose the outer tracking law closes around, and it
+  makes the firmware disagree with ``estimator.py``, which predicts on the raw
+  wheel speeds. (The task was folded into the inner loop for a while, which is
+  what introduced that lag; it was restored.) Sampling the counters twice is
+  what the robot does — here one tick reads them once, which is the same
+  numbers, so the two speeds are computed side by side in ``InnerLoop``.
 - ``ekf.rs`` — 3-state EKF, ``Q``/``R``/``P0`` copied from ``default_at_origin``.
 - ``trajectory_control.rs`` — 20 Hz: predict → mocap update if fresh →
   setpoint lookup → gain-MLP factors → Kanayama law → wheel speeds. No
@@ -97,8 +104,10 @@ class FirmwareConfig:
     motor_direction_left: float
     motor_direction_right: float
     traj_following_dt_s: float
-    # The feedforward's motor gain. Note this is the config's own `wheel_max`
-    # (250 by default), NOT the simulator's identified `max_wheel_speed`.
+    # The feedforward's motor gain, and the wheel-speed limit the firmware
+    # carries on its cascade. The exporter writes the identified
+    # `max_wheel_speed` here, so on an exported config the two coincide; a
+    # hand-written CFG can still disagree, and the firmware believes the file.
     wheel_max: float
     # The parsed GAINMLP.JSN, when one sat next to the config on the card.
     # Not a scalar like the rest, so it is excluded from the mapping parsing.
@@ -221,10 +230,10 @@ class FirmwareClock:
 class InnerLoop:
     """``inner_controller.rs``: counts -> rad/s -> low-pass -> feedforward + PI -> duty.
 
-    It also publishes the body twist the EKF predicts from. That used to be a
-    separate 100 Hz ``odometry.rs`` task working on the *raw* count differences;
-    on the deployed branch that file is gone and the twist is built from the
-    **low-passed** speeds, here, with the config's geometry.
+    It also carries ``odometry.rs``'s job, which on the robot is a separate
+    100 Hz task over the same counters: the body twist the EKF predicts from,
+    built from the **raw** count differences and the config's geometry, with
+    no low-pass. Only the PI feedback and the log see the filtered speeds.
     """
 
     def __init__(self, config: FirmwareConfig, dt: float = INNER_PERIOD_S) -> None:
@@ -272,9 +281,9 @@ class InnerLoop:
         derivative = (error - self.previous_error) / self.dt
         self.previous_error = error
 
-        # The feedforward divides by the config's `wheel_max`, not by the
-        # identified motor gain - so it is a ~12% under-estimate at the stock
-        # numbers, which the integral term is left to make up.
+        # The feedforward divides by the config's `wheel_max` - whatever the
+        # card says, not the simulator's own parameters. When the two disagree
+        # the deficit shows up as a standing offset on the integral term.
         feedforward = self.command / config.wheel_max
         # Only kp and ki are scheduled; kd is not one of the five gains.
         output = np.clip(
@@ -283,7 +292,9 @@ class InnerLoop:
             DUTY_LIMIT,
         )
 
-        left, right = float(self.omega_lp[0]), float(self.omega_lp[1])
+        # `odometry.rs`: the EKF's twist comes off the *raw* speeds, not the
+        # filtered ones the PI term above closed on.
+        left, right = float(omega_raw[0]), float(omega_raw[1])
         self.twist = (
             config.wheel_radius * (right + left) / 2.0,
             config.wheel_radius * (right - left) / config.wheel_base,
