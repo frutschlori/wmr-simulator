@@ -20,7 +20,6 @@ from wmr_simulator.gain_parametrization import (
     zero_params,
 )
 from wmr_simulator.gain_parametrization.error_mlp import (
-    MIN_FACTOR,
     NUM_FEATURES,
     effective_layers,
     factors,
@@ -357,9 +356,9 @@ def test_gradient_wrt_theta_is_finite_and_nonzero_at_identity():
     assert np.linalg.norm(grad) > 0.0
 
 
-def test_saturated_factors_stop_at_min_factor():
-    # The factor clip floors at MIN_FACTOR, not 0, so a saturated network can
-    # only scale a gain down to MIN_FACTOR of its base, never switch it off.
+def test_saturated_factors_reach_zero():
+    # The factor clip floors at 0 (mirroring firmware/libs/gain_mlp), so a
+    # saturated network switches the gains it schedules off entirely.
     template = _params(scheduled_indices=[0, 1, 2, 3, 4], bound=3.0)
     # A large negative output *bias* saturates every factor at the lower clip;
     # biases are not spectrally normalized, so this survives effective_layers.
@@ -373,7 +372,7 @@ def test_saturated_factors_stop_at_min_factor():
     for _ in range(20):
         ref, pose, twist = _random_inputs(rng)
         np.testing.assert_allclose(
-            np.asarray(factors(params, ref, pose, twist)), MIN_FACTOR, rtol=1e-6
+            np.asarray(factors(params, ref, pose, twist)), 0.0, atol=0.0
         )
         gains = np.asarray(apply(base, params, ref, pose, twist))
-        np.testing.assert_allclose(gains, np.asarray(base) * MIN_FACTOR, rtol=1e-6)
+        np.testing.assert_allclose(gains, 0.0, atol=0.0)

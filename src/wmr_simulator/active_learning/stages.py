@@ -723,7 +723,7 @@ def _benchmark_variant_specs(paths: IterationPaths) -> list[tuple[str, Path, Pat
     The static side is always the gains some run converged to, never the
     parametrized run's base gains with the network taken away: those base gains
     are not a controller anybody tuned (the factors they are tuned against range
-    over ``[MIN_FACTOR, bound]``, so the base gains absorb whatever scale the
+    over ``[0, bound]``, so the base gains absorb whatever scale the
     network leaves them), and driving them bare would benchmark an artifact
     instead of the alternative actually on offer.
     """
