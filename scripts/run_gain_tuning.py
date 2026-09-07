@@ -263,7 +263,7 @@ def main():
             schedule_params=schedule,
         )[0]
         for name, gains, schedule in (
-            ("init", None, None),
+            ("init", result["init_gains"], result["init_schedule_params"]),
             ("tuned", result["optimized_gains"], result["schedule_params"]),
             ("static", result["static_gains"], None),
         )
@@ -287,6 +287,8 @@ def main():
         realizations=result["realizations"],
         schedule_params=result["schedule_params"],
         static_gains=result["static_gains"],
+        init_gains=result["init_gains"],
+        init_schedule_params=result["init_schedule_params"],
         max_trajectories=args.num_summary_training_trajectories,
         out_prefix="summary_training",
     )
@@ -298,6 +300,8 @@ def main():
         realizations=result["realizations"],
         schedule_params=result["schedule_params"],
         static_gains=result["static_gains"],
+        init_gains=result["init_gains"],
+        init_schedule_params=result["init_schedule_params"],
         out_prefix="summary_validation",
     )
     plot_controller_tuning_errors(

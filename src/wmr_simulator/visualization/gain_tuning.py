@@ -349,6 +349,8 @@ def plot_trajectory_set_summary(
     key_namespace,
     schedule_params=None,
     static_gains=None,
+    init_gains=None,
+    init_schedule_params=None,
     max_trajectories: int | None = None,
     title: str = "Trajectories",
     out_prefix="trajectory_summary",
@@ -392,6 +394,10 @@ def plot_trajectory_set_summary(
     )
     plotted_robot_keys = robot_keys[:num_trajectories]
     plotted_estimator_keys = estimator_keys[:num_trajectories]
+    # ``init_gains`` / ``init_schedule_params`` name the controller the run
+    # started from (run_gain_tuning_experiment's ``init_gains``); None falls
+    # back to the problem's bare gains, which under a trained parametrization
+    # is not a controller anybody ran.
     init_poses = rollout_realizations(
         pipeline,
         robot_params,
@@ -399,6 +405,8 @@ def plot_trajectory_set_summary(
         plotted_offsets,
         plotted_robot_keys,
         plotted_estimator_keys,
+        controller_gains=init_gains,
+        schedule_params=init_schedule_params,
     )
     tuned_poses = rollout_realizations(
         pipeline,
@@ -483,6 +491,8 @@ def plot_training_trajectory_summary(
     realizations,
     schedule_params=None,
     static_gains=None,
+    init_gains=None,
+    init_schedule_params=None,
     max_trajectories: int | None = 5,
     out_prefix="summary_training",
 ):
@@ -496,6 +506,8 @@ def plot_training_trajectory_summary(
         key_namespace=TRAINING_KEY_NAMESPACE,
         schedule_params=schedule_params,
         static_gains=static_gains,
+        init_gains=init_gains,
+        init_schedule_params=init_schedule_params,
         max_trajectories=max_trajectories,
         title="Training Trajectories",
         out_prefix=out_prefix,
@@ -510,6 +522,8 @@ def plot_validation_trajectory_summary(
     realizations,
     schedule_params=None,
     static_gains=None,
+    init_gains=None,
+    init_schedule_params=None,
     out_prefix="summary_validation",
 ):
     return plot_trajectory_set_summary(
@@ -522,6 +536,8 @@ def plot_validation_trajectory_summary(
         key_namespace=VALIDATION_KEY_NAMESPACE,
         schedule_params=schedule_params,
         static_gains=static_gains,
+        init_gains=init_gains,
+        init_schedule_params=init_schedule_params,
         max_trajectories=None,
         title="Validation Trajectories",
         out_prefix=out_prefix,
