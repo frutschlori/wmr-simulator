@@ -43,8 +43,8 @@ def main():
     # Optimization Settings
     parser.add_argument("--save-trajectory", action="store_true", default=True)
     parser.add_argument("--window-length", type=int, default=50) # replay window length, only for identification mode
-    parser.add_argument("--learning-rate", type=float, default=3e-2)
-    parser.add_argument("--opt-steps", type=int, default=50)
+    parser.add_argument("--learning-rate", type=float, default=2e-2)
+    parser.add_argument("--opt-steps", type=int, default=100)
     parser.add_argument("--objective-mode", choices=["identification", "gain-tuning"],
                         default="gain-tuning")
     parser.add_argument("--fim-a-slip-max", action=argparse.BooleanOptionalAction, default=False)
@@ -57,7 +57,7 @@ def main():
     # B-spline control points. This is the parametrization's stiffness knob:
     # more of them means finer detail but a curve that reacts harder to each
     # one, so the motion constraints bind sooner (see bspline.py).
-    parser.add_argument("--num-control-points", type=int, default=5)
+    parser.add_argument("--num-control-points", type=int, default=6)
     parser.add_argument("--trajectory-seed", type=int, default=0)
     parser.add_argument("--criterion", choices=list(CRITERIA), default=DEFAULT_CRITERION)
     # What happens to the rollout start offsets the FIM is averaged over:

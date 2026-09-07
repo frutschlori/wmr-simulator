@@ -41,7 +41,8 @@ Deviations from the firmware, all deliberate:
   100 Hz streams and 39–62 ms on the outer loop; here every task is on its
   nominal period. The firmware's ``dt_sample`` (measured elapsed time, with a
   guard that skips intervals under half a period) therefore always equals its
-  nominal ``dt`` here, and the guard never fires.
+  nominal ``dt`` here, and the guard never fires. The robot is nevertheless
+  always a hair *late*, and one place cares: see ``TICK_EPSILON_S``.
 - **The gain MLP is evaluated by the pipeline's own numpy replica.** The
   firmware runs ``libs/gain_mlp``; ``pololu.gain_mlp_exporter.reference_forward``
   is the numpy mirror of that crate's ``factors``, and it is what the crate's
@@ -83,6 +84,13 @@ EKF_MEASUREMENT_NOISE = (0.0001, 0.0001, 0.001)
 # Measured off real logs: the outer loop's WheelCmd/TrackingError records are
 # stamped ~2 ms after its Setpoint, because that is how long its body takes.
 OUTER_OUTPUT_STAMP_DELAY_MS = 2
+
+# How far past its nominal deadline a task's time is taken to be. The robot is
+# always a little late (>= 1 ms of Ticker/scheduler latency is enough); this
+# port's clock is exact, so a deadline landing on an exact multiple of a period
+# must resolve *forward*, not backwards by a float epsilon. Far below the
+# 1 ms log stamp resolution, so nothing else can see it.
+TICK_EPSILON_S = 1e-9
 
 
 GAIN_MLP_FILENAME = "GAINMLP.JSN"
@@ -383,8 +391,17 @@ class TrajectoryFollower:
         return self.states.shape[0] * self.dt
 
     def setpoint(self, t: float) -> Setpoint:
-        """``idx = floor(t/dt)``, pose from ``states[idx + 1]`` and feedforward from ``actions[idx]``."""
-        index = int(t / self.dt)
+        """``idx = floor(t/dt)``, pose from ``states[idx + 1]`` and feedforward from ``actions[idx]``.
+
+        The floor is nudged by ``TICK_EPSILON_S``. On the robot ``t`` is measured
+        elapsed time, so an outer tick lands at or just *after* its deadline; here
+        the clock is exact, and an exact multiple of ``dt`` floors down by a
+        float epsilon (``0.15 / 0.05 = 2.9999999999999996``). Without the nudge
+        every fifth tick re-issues the previous setpoint and the next one jumps
+        two states - 46 repeats and 46 double-steps per 340 outer ticks, against
+        the 0.4-1% of repeats measured across the real exp logs.
+        """
+        index = int(math.floor(t / self.dt + TICK_EPSILON_S / self.dt))
         # The firmware clamps to len(actions) - 1 only. Exports carry N-1
         # actions for N states so the two agree, but a file with N actions
         # would index states out of bounds there; clamp on both here.

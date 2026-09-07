@@ -298,6 +298,30 @@ def test_setpoint_lookup_uses_the_next_state_and_the_current_action(config):
     assert follower.setpoint(99.0).x_des == pytest.approx(states[-1, 0])
 
 
+def test_the_setpoint_advances_by_exactly_one_index_per_outer_tick(config):
+    """No stalls and no double-steps on a clock that lands exactly on the period.
+
+    ``int(t / dt)`` floors an exact multiple of dt *down* by a float epsilon
+    (0.15 / 0.05 = 2.9999999999999996), so every fifth tick used to re-issue the
+    previous setpoint and the next one jumped two states. The robot is always a
+    hair past its deadline and never sees this; the port's exact clock does.
+    """
+    dt = config.traj_following_dt_s
+    num = 400
+    states, actions = trivial_trajectory(num=num)
+    follower = TrajectoryFollower(config, states, actions)
+
+    # Stop before the tail, where the index deliberately clamps to the last state.
+    clock = FirmwareClock(0.001, dt)
+    indices = [
+        round(follower.setpoint(tick.time).x_des / 0.1) for tick in clock.ticks((num - 2) * dt) if tick.outer
+    ]
+
+    assert len(indices) > 300
+    assert indices[0] == 2  # the first outer tick is one period in, so idx 1, reading states[2]
+    assert np.all(np.diff(indices) == 1)
+
+
 def test_kanayama_law_matches_the_firmware_expression(config):
     states, actions = trivial_trajectory()
     follower = TrajectoryFollower(config, states, actions)
