@@ -3,6 +3,9 @@
 *.pyc
 venv/
 
+# Test simulation runs
+Pololu Data/test*
+
 # Personal notes
 results/
 notes/

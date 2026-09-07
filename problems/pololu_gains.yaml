@@ -46,16 +46,16 @@ controller:
     hidden_sizes: [16]
     seed: 0
     scheduled_indices: [0, 1, 2, 3, 4] # kx, ky, kth; motor PI gains stay static ([0,1,2,3,4] schedules all)
-    bound: 2.0             # upper factor bound, clipped to >= 1 when applied
+    bound: 5.0             # upper factor bound, clipped to >= 1 when applied
     learn_bound: false     # true adds the bound to the trainable vector
-    spectral_norm_cap: 1.0 # per-matrix spectral norm cap, 0 disables
+    spectral_norm_cap: 2.0 # per-matrix spectral norm cap, 0 disables
 robot:
   type: differential_drive
   wheel_radius: 0.016   # m
   base_diameter: 0.0842 # m
   max_wheel_speed: 250  # rad/s
   time_constant:  0.16  # time constant for first-order wheel dynamics (set to 0 for ideal actuation)
-  a_slip_max:  5.0    # traction limit ~ mu*g in m/s^2, 0 to disable (burnout model, Wong 2008)
+  a_slip_max:  3.0    # traction limit ~ mu*g in m/s^2, 0 to disable (burnout model, Wong 2008)
   v_max: 2.5          # m/s
   a_max: 5.0          # m/s^2
   a_max_lateral: 5.0  # m/s^2
@@ -71,7 +71,7 @@ estimator:
   enc_angle_noise: 0.03   # encoder noise [rad]
   wheel_lp_tau: 0.053     # [s] first-order low-pass on encoder wheel speeds fed to the controller (mirrors firmware; ~30 ms lag). 0 disables.
 
-  proc_pos_std: 0.001     # [m]   process noise on x,y per step
-  proc_theta_std: 0.01    # [rad] process noise on θ per step
+  proc_pos_std: 0.01      # [m]   process noise on x,y per step
+  proc_theta_std: 0.03    # [rad] process noise on θ per step
 
   start: [0.0, 0.0, 0.0]  # initial pose estimate

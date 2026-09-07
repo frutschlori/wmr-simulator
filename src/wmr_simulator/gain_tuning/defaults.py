@@ -29,8 +29,8 @@ GAIN_TUNING_DEFAULTS: dict = {
     # optimum, ky's whole range moves the loss by ~5%, one noise sigma). The
     # defaults match how the robot is actually placed by hand across the
     # exp04/exp05 logs: 31-100 mm and up to 9.5 deg. Both 0 disables.
-    "init_offset_radius": 0.1,
-    "init_offset_angle": 0.3,
+    "init_offset_radius": 0.05,
+    "init_offset_angle": 0.2,
     # 0 = presearch off, which is the default now that the refinement optimizer
     # is BFGS. The LHS sweep exists to hand Adam a good starting basin; measured
     # on trajectory_exports/gain_optimized_current, BFGS with no presearch
@@ -60,15 +60,15 @@ GAIN_TUNING_DEFAULTS: dict = {
     # 0 disables.
     "outlier_loss_factor": 20.0,
     # Loss weights
-    "position_tracking_weight": 1.0,
+    "position_tracking_weight": 1.5,
     "heading_tracking_weight": 1.0,
     "velocity_tracking_weight": 1.0,
     "input_weight": 0.0,
-    "input_delta_weight": 1.0,
+    "input_delta_weight": 0.0,
     "omega_delta_weight": 1.5, # Penalty on step-to-step change in the robot yaw rate, discourages gains that oscillate omega
-    "gain_delta_weight": 0.0,
+    "gain_delta_weight": 1e-4,
     "k_min_stab": 1e-2,
-    "k_max_stab": 30.0,
+    "k_max_stab": 20.0,
     "k_max_rest": 20.0,
     "gain_parametrization": None,  # None -> follow problem yaml
     # Run an independent static-gain tuning (LHS + multistart Adam, no

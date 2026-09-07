@@ -282,6 +282,18 @@ def test_measured_plant_truth_still_matches_the_benchmark_reference(config):
     # real driving. Measured like-for-like - the pipeline run on four closed-loop
     # plant logs - the plant identifies at 0.19 s, inside the 0.12-0.25 s band
     # real robot logs give. These numbers say nothing about that.
-    assert truth.time_constant_mechanical == pytest.approx(0.08, abs=0.05)
-    assert truth.time_constant_logged == pytest.approx(0.26, abs=0.04)
+    #
+    # Both moved when the tire mu went 0.9 -> 0.70 (2026-09-07): 0.08 -> 0.06 and
+    # 0.26 -> 0.16. That is the slip sensitivity this comment warns about doing
+    # exactly what it says - a less grippy wheel spins up faster because it slips
+    # instead of dragging the vehicle - and it is why these are not the plant's
+    # motor lag. The like-for-like number did NOT move: run through the
+    # identification pipeline on closed-loop plant logs (windowed replay, same
+    # trajectory and budget on both plants) the fit is insensitive to mu -
+    # tau 0.2167 / 0.2173 s at mu 0.9 against 0.2159 / 0.2160 s at 0.70, with
+    # wheel_radius and max_wheel_speed identical to 2 d.p. and base_diameter
+    # 92.4-92.9 mm either way. So the identification benchmark is untouched by
+    # the friction change; only these free-run pins move.
+    assert truth.time_constant_mechanical == pytest.approx(0.06, abs=0.05)
+    assert truth.time_constant_logged == pytest.approx(0.16, abs=0.04)
     assert truth.time_constant_logged > truth.time_constant_mechanical

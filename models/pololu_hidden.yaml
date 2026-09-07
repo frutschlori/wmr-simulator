@@ -52,7 +52,7 @@ motor:
   # no setting rescues the datasheet motor).
   #
   # It does not make the robot unphysically strong: 2*T/r = 4.6 N on 0.171 kg is
-  # 26.9 m/s^2, still far above the traction limit mu*g = 8.8 that binds first.
+  # 26.9 m/s^2, still far above the traction limit mu*g = 6.9 that binds first.
   #
   # NOT evidence for this, and the reason to distrust an earlier version of this
   # note: the free-running / straight-line wheel-speed rise. That measurement is
@@ -145,15 +145,56 @@ friction:
   # checked against what the robot is observed to do rather than tuned until a
   # benchmark passes.
   #
-  # Tire on floor: silicone rubber on rigid PVC, which is a grippy pair (0.8-1.2
-  # dry). This is the one that decides whether hard commands make the robot SLIP
-  # or JUMP, and on the real robot they mostly make it jump - the tires hold and
-  # the light chassis rotates instead. mu = 0.9 gives a_slip = mu*g = 8.8 m/s^2,
-  # which still clears the problem yaml's a_max_lateral 4.0 with room. Both
-  # entries are 0.9 because MuJoCo takes the elementwise max and the tire-floor
-  # pair is the only place either one acts.
-  floor: 0.9
-  wheel: 0.9
+  # Tire on floor. THE ONE FRICTION FITTED TO BEHAVIOUR (2026-09-07), and the
+  # exception to the material-pair rule above - it is called out because the
+  # rest of this block is not fitted and must not become so.
+  #
+  # The handbook pair is silicone rubber on rigid PVC, 0.8-1.2 dry, and 0.9 was
+  # the mid-range value. It is now 0.70, set from the one hardware behaviour
+  # there is data for: at the stock gains the real robot is marginal on
+  # `circle_fast`, losing traction partway and sometimes not coming back. Seven
+  # real runs at exactly these gains (2026_08_19/real02/it01 x4,
+  # 2026_07_27/exp01/it01 x3) give pose RMSE 0.119-0.429, median 0.190, with
+  # 2 of 7 past 0.3 m. Sim medians over 8 seeds, same config:
+  #
+  #   mu     circle_fast RMSE   diverged     circle_slow / circle_medium
+  #   0.90   0.023              0/8          0.012 0/6 / 0.016 0/6
+  #   0.80   0.039              1/8
+  #   0.75   0.109              1/8
+  #   0.70   0.169              3/8          0.012 0/6 / 0.018 0/6   <- shipped
+  #   0.65   0.549              7/8
+  #   0.60   0.618              8/8
+  #
+  # 0.70 reproduces the real median and the real divergence rate, and keeps
+  # circle_slow / circle_medium clean, which the real robot also tracks. The
+  # mechanism matches too: all 8 seeds hold to t = 2.35 s, break traction at the
+  # lateral-demand peak, then split into recovering and not.
+  #
+  # Read the value with three caveats. (1) It is BELOW the handbook band for the
+  # clean dry pair; the physical story it implies is a dusty floor and worn
+  # tires, not new silicone on new PVC, and a hardware mu measurement would
+  # settle whether that is honest. (2) The cliff between 0.70 and 0.65 is sharp,
+  # so this sits deliberately at the edge of a marginal regime - expect seed
+  # scatter, and never judge a plant change here on one run. (3) It does NOT
+  # close the whole gap: on `lemniscate_fast` the real robot gives 0.540 / 0.255
+  # where the plant at 0.70 gives a median 0.096 with 0/8 diverging, i.e. still
+  # ~4x too good on the high-yaw-rate trajectory. The likely remainder is the
+  # missing wheel-loop phase lag (see CLAUDE.md, "Open modeling question"): the
+  # sim's PT1+PI inner loop cannot oscillate, and an oscillation is what the
+  # real robot is observed to lose traction *after*. Do not chase that residual
+  # with more mu - 0.65 already breaks circle_slow's siblings and 0.60 breaks
+  # everything.
+  #
+  # Note the sweep recorded under `motor.stall_torque` above ("tire mu 0.5 /
+  # 0.7 / 0.9, no setting rescues the datasheet motor") is a different question
+  # and still stands: mu cannot fix a torque shortfall. It is not evidence that
+  # mu does nothing.
+  #
+  # a_slip = mu*g = 6.87 m/s^2, still clear of the problem yaml's
+  # a_max_lateral 4.0. Both entries are equal because MuJoCo takes the
+  # elementwise max and the tire-floor pair is the only place either one acts.
+  floor: 0.70
+  wheel: 0.70
   # Caster ball (POM) on PVC, 0.25-0.35 dry. This is REAL grip and it is what
   # makes the ball roll instead of slide - the effective drag of a rolling
   # caster is set by the <pair>'s rolling terms and the ball joint's

@@ -111,7 +111,7 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         # Hand-placement spread of the first run's start pose, the deployment
         # driver's own defaults (mujoco_sim.deploy, measured off exp04/exp05).
         "start_offset_radius": 0.1,
-        "start_offset_angle": 0.3,
+        "start_offset_angle": 0.2,
     },
     # Fixed baseline reference every iteration is scored on. Unlike the
     # identification and tuning trajectories this one never changes, so the
@@ -121,7 +121,7 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
     # mujoco_deployment.enabled (or `run --simulate-deployment`); on the real
     # robot the equivalent runs are recorded by hand into data/<name>/.
     "benchmark": {
-        "trajectory": "trajectory_exports/baselines/circle_medium.JSN",
+        "trajectory": "trajectory_exports/baselines/circle_fast.JSN",
         # Consecutive runs per iteration, chained the way the robot repeats a
         # reference: only the first is placed by hand.
         "num_runs": 5,
@@ -133,7 +133,7 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         # Hand-placement spread, the same distribution the identification
         # deployment and the gain tuner's start offsets use.
         "start_offset_radius": 0.05,
-        "start_offset_angle": 0.3,
+        "start_offset_angle": 0.2,
         # A reference that does not end where it starts gets a wait + bridge
         # path back appended (pololu.bridge_exporter), which is what makes
         # chaining possible at all; a self-closing one is driven as it is.
@@ -166,9 +166,9 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         # worth designing it inside a gentler envelope than the hardware's
         # nominal one. Drop a key to fall back to the problem yaml's value.
         "motion_limits": {
-            "v_max": 2.0,          # m/s
-            "a_max": 2.5,          # m/s^2
-            "a_max_lateral": 2.5,  # m/s^2
+            "v_max": 1.5,          # m/s
+            "a_max": 3.0,          # m/s^2
+            "a_max_lateral": 4.0,  # m/s^2
             "omega_max": 5.0,      # rad/s
             "alpha_max": 15.0,     # rad/s^2
         },
@@ -181,7 +181,7 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
     "identification": {
         "steps": 500,
         "learning_rate": 1e-3,
-        "window_length": None,
+        "window_length": 50,
         # Robust deviation (modified z-score) above which a log's own parameter
         # estimate counts as disagreeing with the rest of the batch and is left
         # out of the joint fit; 0 disables the screening, and it needs at least
@@ -195,7 +195,7 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         # positive to (re-)enable identification of a_slip_max (log-space
         # optimizer: 0 * exp(theta) = 0). 0 keeps the model disabled. Ignored
         # when identify_a_slip_max is off, which leaves a disabled limit disabled.
-        "init_a_slip_max": 5.0,
+        "init_a_slip_max": 3.5,
     },
     "residual": {
         # Expert ensemble geometry (residual_model.residual.ResidualEnsemble).
@@ -229,10 +229,10 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         # the tuner scores them under. Falls back to the nominal plant when no
         # model was trained (use_residual_model off).
         "use_residual_model": True,
-        "num_trajectories": 10,
+        "num_trajectories": 15,
         "opt_steps": 50,
         "learning_rate": 3e-2,
-        "num_control_points": 5,
+        "num_control_points": 7,
         "time_scaling": "s-curve",
         "constraint_weight_jitter": 0.4,
         "window_length": 50,
