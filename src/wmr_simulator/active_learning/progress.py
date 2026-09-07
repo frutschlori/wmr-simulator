@@ -14,7 +14,11 @@ robot by hand, from ``data/with gain MLP/circle`` (also accepting the older
 controller the iteration *deployed*, which is what its gains and schedule
 describe. The static-gain baseline's runs beside them
 (``data/benchmark_static``) are a different controller and are compared with
-these in ``visualization.baseline_runs`` instead. It computes the same
+these in ``visualization.baseline_runs`` instead -- or plotted here in their
+own right by passing ``benchmark_dir`` and ``static_controller`` to
+``evaluate_pipeline_progress``, which is what an experiment whose hand-recorded
+runs live under a shape name of their own (``data/fast_circle_static``) needs.
+It computes the same
 gain-tuning loss terms (``tracking, velocity_tracking, input, input_delta, omega_delta``) in two
 ways:
 
@@ -171,7 +175,7 @@ def _real_run_terms(pipeline, log, weights):
     )
 
 
-def _benchmark_directory(paths) -> Path | None:
+def _benchmark_directory(paths, benchmark_dir=None) -> Path | None:
     """Where one iteration's benchmark runs were recorded, if anywhere.
 
     ``data/benchmark`` is what the benchmark stage writes for the *deployed*
@@ -182,7 +186,14 @@ def _benchmark_directory(paths) -> Path | None:
     parametrization has both benchmark directories and ``benchmark`` is the one
     it deployed, while iteration 1 (and any experiment with the parametrization
     off) deploys the static controller and has only ``benchmark_static``.
+
+    ``benchmark_dir`` overrides that search with one ``data/`` subdirectory,
+    for hand-recorded experiments whose runs sit under a shape name of their
+    own (``data/fast_circle_static``) rather than under either standard name.
     """
+    if benchmark_dir is not None:
+        directory = paths.data_dir / benchmark_dir
+        return directory if directory.is_dir() else None
     for relative in (
         Path("benchmark"),
         Path("benchmark_static"),
@@ -195,7 +206,7 @@ def _benchmark_directory(paths) -> Path | None:
     return None
 
 
-def _load_benchmark_logs(paths) -> list:
+def _load_benchmark_logs(paths, benchmark_dir=None) -> list:
     """Decode and load all benchmark recordings for one iteration.
 
     Benchmark logs are intentionally nested below ``data/`` and normally kept as
@@ -205,13 +216,15 @@ def _load_benchmark_logs(paths) -> list:
     """
     from wmr_simulator.active_learning.baseline_runs import load_run_logs
 
-    benchmark_dir = _benchmark_directory(paths)
-    if benchmark_dir is None:
+    directory = _benchmark_directory(paths, benchmark_dir)
+    if directory is None:
         return []
-    return [log for _, log in load_run_logs(benchmark_dir)]
+    return [log for _, log in load_run_logs(directory)]
 
 
-def _evaluate_iteration(experiment, index, weights, num_realizations, seed):
+def _evaluate_iteration(
+    experiment, index, weights, num_realizations, seed, benchmark_dir=None, static_controller=False
+):
     """Benchmark sim/real terms of one iteration: the two run means, plus the
     per-run real terms behind the second of them."""
     import jax
@@ -221,7 +234,7 @@ def _evaluate_iteration(experiment, index, weights, num_realizations, seed):
     import jax.numpy as jnp
 
     paths = experiment.paths(index)
-    logs = _load_benchmark_logs(paths)
+    logs = _load_benchmark_logs(paths, benchmark_dir)
     if not logs:
         return None
     problem_path = paths.problem_identified if paths.problem_identified.is_file() else paths.problem
@@ -232,7 +245,16 @@ def _evaluate_iteration(experiment, index, weights, num_realizations, seed):
     pipeline = ControllerTuningPipeline(
         str(problem_path), robot_params=robot_params, seed=seed, residual_model=None
     )
-    base_gains_list, schedule_params = _log_gain_parametrization(paths)
+    if static_controller:
+        # The runs were driven by the static-gain controller, so the sim curve
+        # has to be that one too -- the whole point of the pair is that sim and
+        # real differ only in plant, not in controller.
+        static = _static_gains(paths)
+        if static is None:
+            return None
+        base_gains_list, schedule_params = static.tolist(), None
+    else:
+        base_gains_list, schedule_params = _log_gain_parametrization(paths)
     base_gains = jnp.asarray(base_gains_list, dtype=jnp.float32)
 
     key = jax.random.PRNGKey(seed)
@@ -289,8 +311,14 @@ def _static_gains(paths):
     return np.asarray([float(gain) for gain in config["controller"]["gains"]], dtype=float)
 
 
-def evaluate_pipeline_progress(experiment):
+def evaluate_pipeline_progress(experiment, benchmark_dir=None, static_controller=False):
     """Per-iteration gains and sim/real loss terms across the whole pipeline.
+
+    ``benchmark_dir`` names the ``data/`` subdirectory the runs are read from,
+    overriding the standard search (see ``_benchmark_directory``);
+    ``static_controller`` says those runs were driven on the iteration's static
+    gains rather than on its deployed controller, so the sim curve beside them
+    is simulated with those same static gains and no gain parametrization.
 
     Returns a list (sorted by iteration) of dicts with keys ``index``,
     ``gains`` (the *static* controller gains available to the iteration, see
@@ -315,7 +343,15 @@ def evaluate_pipeline_progress(experiment):
         paths = experiment.paths(index)
         gains = _static_gains(paths)
 
-        evaluated = _evaluate_iteration(experiment, index, weights, num_realizations, seed)
+        evaluated = _evaluate_iteration(
+            experiment,
+            index,
+            weights,
+            num_realizations,
+            seed,
+            benchmark_dir=benchmark_dir,
+            static_controller=static_controller,
+        )
         sim = real = None
         real_runs = []
         if evaluated is not None:

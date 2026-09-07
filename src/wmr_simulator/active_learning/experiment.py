@@ -229,7 +229,7 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         # the tuner scores them under. Falls back to the nominal plant when no
         # model was trained (use_residual_model off).
         "use_residual_model": True,
-        "num_trajectories": 15,
+        "num_trajectories": 10,
         "opt_steps": 50,
         "learning_rate": 3e-2,
         "num_control_points": 7,
