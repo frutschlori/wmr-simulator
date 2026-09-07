@@ -383,10 +383,36 @@ def run_gain_tuning_experiment(
     # transient the tuning loss was computed on.
     summary_offsets = training_start_offsets[0]
     summary_initial_pose = pipeline.initial_reference_pose() + summary_offsets[0]
+    # The controller the run starts from -- what drove the previous iteration's
+    # robot -- not the problem's bare base gains. Under a warm-started
+    # parametrization that is the base gains *with* the problem's network: base
+    # gains are not a controller on their own (the network absorbs whatever
+    # scale they take; measured on real02, the bare ones score 27-150x worse
+    # than the deployed controller and oscillate in heading). With the
+    # parametrization off, or not warm-started, it is the static controller:
+    # the previous iteration's static gains when the caller hands them over,
+    # else the problem's own gains. The "Initial" curves of every summary
+    # figure draw this controller.
+    static_init = pipeline.gains if static_init_gains is None else jnp.asarray(static_init_gains, dtype=jnp.float32)
+    if schedule_enabled and warm_start_schedule:
+        init_gains = pipeline.gains
+        init_schedule_params = pipeline.gain_schedule_params
+    else:
+        init_gains = static_init
+        init_schedule_params = None
     init_hidden_log = pipeline.run_closed_loop(
-        robot_params, use_hidden_robot=True, initial_pose=summary_initial_pose
+        robot_params,
+        use_hidden_robot=True,
+        controller_gains=init_gains,
+        schedule_params=init_schedule_params,
+        initial_pose=summary_initial_pose,
     )
-    init_model_log = pipeline.run_closed_loop(robot_params, initial_pose=summary_initial_pose)
+    init_model_log = pipeline.run_closed_loop(
+        robot_params,
+        controller_gains=init_gains,
+        schedule_params=init_schedule_params,
+        initial_pose=summary_initial_pose,
+    )
 
     def optimize(init_gains, run_schedule_enabled, run_num_steps, run_learning_rate, run_num_lhs_points=None):
         return pipeline.optimize(
@@ -424,7 +450,6 @@ def run_gain_tuning_experiment(
         static_learning_rate = (
             learning_rate if static_tune_learning_rate is None else float(static_tune_learning_rate)
         )
-        static_init = pipeline.gains if static_init_gains is None else jnp.asarray(static_init_gains, dtype=jnp.float32)
         # The budget itself is reported by the "Refining ..." line inside
         # optimize_controller_gains, which knows how each optimizer reads it.
         print("Static run: optimizing base gains only.")
@@ -520,6 +545,9 @@ def run_gain_tuning_experiment(
         "training_start_offsets": training_start_offsets,
         "validation_start_offsets": validation_start_offsets,
         "summary_start_offsets": summary_offsets,
+        # The controller the summaries' "Initial" curves show (see above).
+        "init_gains": init_gains,
+        "init_schedule_params": init_schedule_params,
         "init_hidden_log": init_hidden_log,
         "init_model_log": init_model_log,
         "optimized_gains": optimized_gains,

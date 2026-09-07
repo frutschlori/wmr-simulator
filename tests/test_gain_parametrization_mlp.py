@@ -376,3 +376,34 @@ def test_saturated_factors_reach_zero():
         )
         gains = np.asarray(apply(base, params, ref, pose, twist))
         np.testing.assert_allclose(gains, 0.0, atol=0.0)
+
+
+def test_initial_curve_is_the_controller_the_run_started_from():
+    """The summaries' "Initial" curves used to roll out the problem's base gains
+    with the parametrization switched off -- under a trained network that is a
+    controller nobody ran (real02: 27-150x worse than the deployed one, and
+    oscillating). The starting controller is the warm-started schedule when
+    there is one, else the static gains the caller hands over."""
+    from wmr_simulator.gain_tuning.pipeline import resolve_gain_robot_params, run_gain_tuning_experiment
+
+    robot_params = resolve_gain_robot_params(PROBLEM, None, None)
+    common = dict(
+        problem_path=PROBLEM,
+        robot_params=robot_params,
+        num_steps=0,
+        learning_rate=1e-3,
+        num_realizations=1,
+        num_lhs_points=0,
+        num_adam_optimizations=1,
+        schedule_enabled=True,
+    )
+    warm = run_gain_tuning_experiment(warm_start_schedule=True, **common)
+    assert isinstance(warm["init_schedule_params"], ErrorMlpParams)
+    np.testing.assert_allclose(np.asarray(warm["init_gains"]), np.asarray(warm["pipeline"].gains))
+
+    static_init = [1.0, 2.0, 3.0, 0.5, 0.0]
+    cold = run_gain_tuning_experiment(
+        warm_start_schedule=False, static_init_gains=static_init, **common
+    )
+    assert cold["init_schedule_params"] is None
+    np.testing.assert_allclose(np.asarray(cold["init_gains"]), static_init)

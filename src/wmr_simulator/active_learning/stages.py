@@ -1480,6 +1480,8 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
                 summary_offsets,
                 summary_robot_keys,
                 summary_estimator_keys,
+                controller_gains=result["init_gains"],
+                schedule_params=result["init_schedule_params"],
             )[0],
             tuned_realization_poses=rollout_realizations(
                 pipeline,
@@ -1514,6 +1516,8 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
             realizations=result["realizations"],
             schedule_params=result["schedule_params"],
             static_gains=result["static_gains"],
+            init_gains=result["init_gains"],
+            init_schedule_params=result["init_schedule_params"],
             max_trajectories=None,
             out_prefix="summary_training",
         )
@@ -1525,6 +1529,8 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
             realizations=result["realizations"],
             schedule_params=result["schedule_params"],
             static_gains=result["static_gains"],
+            init_gains=result["init_gains"],
+            init_schedule_params=result["init_schedule_params"],
             out_prefix="summary_validation",
         )
         plot_controller_tuning_errors(
