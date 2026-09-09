@@ -29,6 +29,11 @@ An experiment lives in its own directory and holds one folder per iteration:
                                     the progress plot scores every iteration on them
         results/                    identification.yaml, gains.yaml, residual_model.pkl
         visualize/                  plots of this iteration
+        visualize/logs/             summary plot of every decoded identification log
+        visualize/logs/<data subdir>/  one summary plot per recording in the data/
+                                    subdirectory of the same name; `run` rescans
+                                    every iteration for these, so benchmark logs
+                                    copied off the SD card late still get plotted
       iteration_02/                 created by the finalize stage from iteration_01 results
 
 Typical usage (run all stages that can proceed; stops when robot data is needed):
@@ -63,6 +68,11 @@ rerun an earlier one; delete a stage's outputs to force a rerun under `run`):
     python scripts/run_active_learning.py plan-tuning-trajectories --experiment experiments/exp01
     python scripts/run_active_learning.py tune-gains              --experiment experiments/exp01
     python scripts/run_active_learning.py finalize                --experiment experiments/exp01
+    python scripts/run_active_learning.py plot-run-logs           --experiment experiments/exp01
+
+plot-run-logs is the one command that is not per iteration: it plots the
+recordings in every iteration's data/ subdirectories, which is what `run` does
+on its own each time it proceeds.
 
 Stage hyperparameters live in experiments/exp01/experiment.yaml (editable
 between stages). Set JAX_PLATFORMS=gpu to run the optimization stages on the GPU.
@@ -163,13 +173,17 @@ def build_parser() -> argparse.ArgumentParser:
         "plan-tuning-trajectories": "Optimize (or copy) the gain-tuning trajectory set.",
         "tune-gains": "Tune controller gains on the identified model.",
         "finalize": "Fold the iteration results into the next iteration folder.",
+        "plot-run-logs": (
+            "Plot every data/ subdirectory recording of every iteration into that "
+            "iteration's visualize/logs/<same subdirectory>/ (also done by `run`)."
+        ),
         "run": "Run all stages that can proceed; stops when robot data is needed.",
         "status": "Show per-iteration stage completion.",
     }
     for command, help_text in stage_commands.items():
         stage_parser = subparsers.add_parser(command, help=help_text)
         stage_parser.add_argument("--experiment", required=True, help="Experiment directory.")
-        if command != "status":
+        if command not in ("status", "plot-run-logs"):
             stage_parser.add_argument("--iteration", type=int, default=None, help="Iteration number (default: latest).")
         if command in ("identify", "run"):
             stage_parser.add_argument(
@@ -246,6 +260,12 @@ def main(argv: list[str] | None = None) -> int:
     experiment = Experiment.load(args.experiment)
     if args.command == "status":
         stages.stage_status(experiment)
+        return 0
+
+    if args.command == "plot-run-logs":
+        # Experiment-wide, like the cross-iteration figures: the point is the
+        # iterations the loop has already left behind.
+        stages.plot_run_directory_logs(experiment)
         return 0
 
     if args.command == "run":

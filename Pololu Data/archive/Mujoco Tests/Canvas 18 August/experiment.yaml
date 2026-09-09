@@ -92,7 +92,8 @@ gain_tuning:
   outlier_loss_factor: 20.0
   position_tracking_weight: 1.0
   heading_tracking_weight: 1.0
-  velocity_tracking_weight: 1.0
+  linear_velocity_tracking_weight: 1.0
+  angular_velocity_tracking_weight: 1.0
   input_weight: 0.0
   input_delta_weight: 1.0
   omega_delta_weight: 1.2

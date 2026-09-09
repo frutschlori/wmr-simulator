@@ -54,7 +54,8 @@ gain_tuning:
   num_lhs_points: 500
   num_adam_optimizations: 3
   validation_split: 0.2
-  velocity_tracking_weight: 0.2
+  linear_velocity_tracking_weight: 0.2
+  angular_velocity_tracking_weight: 0.2
   input_weight: 0.0
   input_delta_weight: 1.0
   omega_delta_weight: 0.0
