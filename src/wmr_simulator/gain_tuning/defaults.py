@@ -60,14 +60,20 @@ GAIN_TUNING_DEFAULTS: dict = {
     # 0 disables.
     "outlier_loss_factor": 20.0,
     # Loss weights
-    "position_tracking_weight": 1.5,
+    "position_tracking_weight": 1.0,
     "heading_tracking_weight": 1.0,
-    "velocity_tracking_weight": 1.0,
+    # Velocity tracking is split by channel: [v, omega] are each normalized by
+    # their own limit (v_max, omega_max) before being squared, so these two are
+    # relative weights on commensurate errors. Separate because the linear and
+    # angular channels are tracked by different gains (kx against ky/kth and
+    # the inner loop) and because omega_max scales the angular channel.
+    "linear_velocity_tracking_weight": 0.1,
+    "angular_velocity_tracking_weight": 0.5,
     "input_weight": 0.0,
     "input_delta_weight": 0.0,
     "omega_delta_weight": 1.5, # Penalty on step-to-step change in the robot yaw rate, discourages gains that oscillate omega
-    "gain_delta_weight": 1e-5,
-    "k_min_stab": 1e-2,
+    "gain_delta_weight": 1e-4,
+    "k_min_stab": 1e-3,
     "k_max_stab": 20.0,
     "k_max_rest": 20.0,
     "gain_parametrization": None,  # None -> follow problem yaml

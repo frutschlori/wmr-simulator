@@ -73,7 +73,7 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
     # experiment does nothing. Only reachable unattended with
     # mujoco_deployment.enabled; otherwise `run` stops at the first iteration
     # that needs robot data.
-    "num_iterations": 1,
+    "num_iterations": 5,
     # Flags.
     "use_residual_model": True,
     "optimize_trajectories": True,
@@ -148,8 +148,8 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         # the nominal robot parameters being identified, and the previous
         # residual corrects a plant that has since been re-identified.
         "use_residual_model": False,
-        "opt_steps": 500,
-        "learning_rate": 1e-2,
+        "opt_steps": 750,
+        "learning_rate": 5e-3,
         "num_control_points": 6,
         "time_scaling": "s-curve",
         "window_length": 50,
@@ -166,10 +166,10 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         # worth designing it inside a gentler envelope than the hardware's
         # nominal one. Drop a key to fall back to the problem yaml's value.
         "motion_limits": {
-            "v_max": 1.5,          # m/s
-            "a_max": 3.0,          # m/s^2
-            "a_max_lateral": 4.0,  # m/s^2
-            "omega_max": 5.0,      # rad/s
+            "v_max": 2.5,          # m/s
+            "a_max": 4.0,          # m/s^2
+            "a_max_lateral": 5.0,  # m/s^2
+            "omega_max": 10.0,      # rad/s
             "alpha_max": 15.0,     # rad/s^2
         },
         # <name>_bridge.JSN is always exported alongside (same directory): the
@@ -179,8 +179,8 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         "bridge_time": 8.5,
     },
     "identification": {
-        "steps": 500,
-        "learning_rate": 1e-3,
+        "steps": 150,
+        "learning_rate": 1e-4,
         "window_length": 50,
         # Robust deviation (modified z-score) above which a log's own parameter
         # estimate counts as disagreeing with the rest of the batch and is left
@@ -202,14 +202,14 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         "num_experts": 4,
         "hidden_sizes": [16, 16],
         # Per-matrix spectral-norm cap on the experts (Lipschitz bound); 0 disables.
-        "spectral_norm_cap": 1.0,
+        "spectral_norm_cap": 1.5,
         # Gaussian gate bandwidth = intra-cluster RMS distance * this (>1 overlaps).
         "gate_bandwidth_scale": 1.0,
         # Null "zero expert" distance in bandwidths; beyond it the residual -> 0.
         "ood_sigma": 3.0,
-        "epochs": 1000,
+        "epochs": 1500,
         "batch_size": 16384,
-        "learning_rate": 5e-4,
+        "learning_rate": 2e-4,
         "validation_split": 0.2,
         "output_reg_weight": 1e-2,
         "resample_uniform": True,
@@ -229,9 +229,9 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         # the tuner scores them under. Falls back to the nominal plant when no
         # model was trained (use_residual_model off).
         "use_residual_model": True,
-        "num_trajectories": 10,
-        "opt_steps": 50,
-        "learning_rate": 3e-2,
+        "num_trajectories": 15,
+        "opt_steps": 75,
+        "learning_rate": 1e-2,
         "num_control_points": 7,
         "time_scaling": "s-curve",
         "constraint_weight_jitter": 0.4,

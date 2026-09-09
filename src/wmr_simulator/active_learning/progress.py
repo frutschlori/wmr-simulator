@@ -19,8 +19,9 @@ own right by passing ``benchmark_dir`` and ``static_controller`` to
 ``evaluate_pipeline_progress``, which is what an experiment whose hand-recorded
 runs live under a shape name of their own (``data/fast_circle_static``) needs.
 It computes the same
-gain-tuning loss terms (``tracking, velocity_tracking, input, input_delta, omega_delta``) in two
-ways:
+gain-tuning loss terms (``position_tracking, heading_tracking,
+linear_velocity_tracking, angular_velocity_tracking, input, input_delta,
+omega_delta``) in two ways:
 
 - ``sim``  — closed-loop simulation of that iteration's *recording* controller
   (the base gains + error-MLP schedule stored in ``problem_identified.yaml``,
@@ -46,7 +47,15 @@ import numpy as np
 
 from wmr_simulator.active_learning.experiment import load_yaml
 
-TERM_NAMES = ("tracking", "velocity_tracking", "input", "input_delta", "omega_delta")
+TERM_NAMES = (
+    "position_tracking",
+    "heading_tracking",
+    "linear_velocity_tracking",
+    "angular_velocity_tracking",
+    "input",
+    "input_delta",
+    "omega_delta",
+)
 
 
 def _resolve_gain_tuning_config(experiment):
@@ -75,40 +84,47 @@ def _reference_states_for_sim(run_reference):
 
 
 def _sim_terms(pipeline, base_gains, schedule_params, reference_states, robot_keys, estimator_keys, weights):
-    """Five sim loss terms for a reference already in the sim/global convention."""
+    """The base sim loss terms (``TERM_NAMES``) for a reference already in the
+    sim/global convention."""
     from wmr_simulator.gain_tuning.objectives import (
         closed_loop_objective_terms,
         scheduled_closed_loop_objective_terms,
     )
 
-    vtw, iw, idw, odw = weights
+    ptw, htw, lvtw, avtw, iw, idw, odw = weights
     if schedule_params is None:
         terms = closed_loop_objective_terms(
             pipeline,
             base_gains,
             robot_keys,
             estimator_keys,
-            velocity_tracking_weight=vtw,
+            position_tracking_weight=ptw,
+            heading_tracking_weight=htw,
+            linear_velocity_tracking_weight=lvtw,
+            angular_velocity_tracking_weight=avtw,
             input_weight=iw,
             input_delta_weight=idw,
             omega_delta_weight=odw,
             reference_states=reference_states,
         )
     else:
-        # Drop the trailing gain-schedule term; keep the five base terms.
+        # Drop the trailing gain-schedule term; keep the base terms.
         terms = scheduled_closed_loop_objective_terms(
             pipeline,
             base_gains,
             schedule_params,
             robot_keys,
             estimator_keys,
-            velocity_tracking_weight=vtw,
+            position_tracking_weight=ptw,
+            heading_tracking_weight=htw,
+            linear_velocity_tracking_weight=lvtw,
+            angular_velocity_tracking_weight=avtw,
             input_weight=iw,
             input_delta_weight=idw,
             omega_delta_weight=odw,
             gain_delta_weight=0.0,
             reference_states=reference_states,
-        )[:5]
+        )[: len(TERM_NAMES)]
     return np.asarray(terms, dtype=float)
 
 
@@ -123,13 +139,16 @@ def _sim_run_terms(pipeline, base_gains, schedule_params, run_reference, robot_k
 def _real_run_terms(pipeline, log, weights):
     """Loss terms of the recorded run, time-aligned to the reference timestamps.
 
-    Mirrors ``_base_loss_terms``: pose_mse tracking, [v, omega] velocity error
-    normalized by (v_max, omega_max), duty-cycle input/input-delta energy, and
+    Mirrors ``_base_loss_terms``: the position and heading tracking errors, the
+    linear and angular velocity errors normalized by (v_max, omega_max) -- each
+    of the four with its own weight -- duty-cycle input/input-delta energy, and
     the normalized yaw-rate-chatter penalty.
     """
     import jax.numpy as jnp
 
-    vtw, iw, idw, odw = weights
+    from wmr_simulator.gain_tuning.objectives import pose_tracking_losses
+
+    ptw, htw, lvtw, avtw, iw, idw, odw = weights
     ref_states = np.asarray(log.reference.states, dtype=float)
     ref_time = np.asarray(log.reference.time_s, dtype=float)
     if len(ref_states) < 2:
@@ -146,7 +165,10 @@ def _real_run_terms(pipeline, log, weights):
     pred_y = np.interp(target_time, pose_time, pose_states[:, 1])
     pred_theta = np.interp(target_time, pose_time, np.unwrap(pose_states[:, 2]))
     predicted_poses = np.stack([pred_x, pred_y, pred_theta], axis=1)
-    tracking = float(pipeline.pose_mse(jnp.asarray(predicted_poses), jnp.asarray(target_poses)))
+    position_tracking, heading_tracking = (
+        float(value)
+        for value in pose_tracking_losses(jnp.asarray(predicted_poses), jnp.asarray(target_poses))
+    )
 
     wheel_time = np.asarray(log.wheel.time_s, dtype=float)
     vel_omega = np.asarray(log.wheel.vel_omega, dtype=float)  # [v, omega]
@@ -156,7 +178,8 @@ def _real_run_terms(pipeline, log, weights):
     velocity_error = (
         np.stack([pred_v, pred_omega], axis=1) - np.stack([reference_v, reference_omega], axis=1)
     ) / velocity_scale
-    velocity = float(np.mean(np.sum(velocity_error**2, axis=1)))
+    linear_velocity = float(np.mean(velocity_error[:, 0] ** 2))
+    angular_velocity = float(np.mean(velocity_error[:, 1] ** 2))
 
     duty = np.asarray(log.wheel.duty_cycle, dtype=float)
     window = (wheel_time >= target_time[0]) & (wheel_time <= target_time[-1])
@@ -171,7 +194,15 @@ def _real_run_terms(pipeline, log, weights):
     omega_delta = float(np.mean(np.diff(omega_series / float(pipeline.omega_max)) ** 2))
 
     return np.array(
-        [tracking, vtw * velocity, iw * input_loss, idw * input_delta, odw * omega_delta]
+        [
+            ptw * position_tracking,
+            htw * heading_tracking,
+            lvtw * linear_velocity,
+            avtw * angular_velocity,
+            iw * input_loss,
+            idw * input_delta,
+            odw * omega_delta,
+        ]
     )
 
 
@@ -330,7 +361,10 @@ def evaluate_pipeline_progress(experiment, benchmark_dir=None, static_controller
     """
     config = _resolve_gain_tuning_config(experiment)
     weights = (
-        float(config["velocity_tracking_weight"]),
+        float(config["position_tracking_weight"]),
+        float(config["heading_tracking_weight"]),
+        float(config["linear_velocity_tracking_weight"]),
+        float(config["angular_velocity_tracking_weight"]),
         float(config["input_weight"]),
         float(config["input_delta_weight"]),
         float(config.get("omega_delta_weight", 0.0)),

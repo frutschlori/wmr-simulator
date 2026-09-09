@@ -224,17 +224,17 @@ def test_identity_objective_matches_static():
     static_terms = np.asarray(
         closed_loop_objective_terms(
             pipeline, base, robot_keys, est_keys,
-            velocity_tracking_weight=0.05, input_delta_weight=0.1,
+            linear_velocity_tracking_weight=0.05, angular_velocity_tracking_weight=0.05, input_delta_weight=0.1,
         )
     )
     parametrized_terms = np.asarray(
         scheduled_closed_loop_objective_terms(
             pipeline, base, params, robot_keys, est_keys,
-            velocity_tracking_weight=0.05, input_delta_weight=0.1, gain_delta_weight=1.0,
+            linear_velocity_tracking_weight=0.05, angular_velocity_tracking_weight=0.05, input_delta_weight=0.1, gain_delta_weight=1.0,
         )
     )
-    np.testing.assert_allclose(parametrized_terms[:5], static_terms, atol=1e-5)
-    assert parametrized_terms[5] == pytest.approx(0.0, abs=1e-7)
+    np.testing.assert_allclose(parametrized_terms[:7], static_terms, atol=1e-5)
+    assert parametrized_terms[7] == pytest.approx(0.0, abs=1e-7)
 
 
 def test_static_tune_runs_independently_of_parametrized_run():
@@ -347,7 +347,7 @@ def test_gradient_wrt_theta_is_finite_and_nonzero_at_identity():
         return jnp.sum(
             scheduled_closed_loop_objective_terms(
                 pipeline, base, params, robot_keys, est_keys,
-                velocity_tracking_weight=0.05, input_delta_weight=0.1,
+                linear_velocity_tracking_weight=0.05, angular_velocity_tracking_weight=0.05, input_delta_weight=0.1,
             )
         )
 

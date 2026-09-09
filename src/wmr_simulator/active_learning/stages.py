@@ -21,9 +21,12 @@ CLI stays responsive for bookkeeping commands like status.
 
 from __future__ import annotations
 
+import contextlib
 import copy
+import io
 import math
 import shutil
+import tempfile
 from pathlib import Path
 
 from wmr_simulator.active_learning import baseline_runs
@@ -974,6 +977,141 @@ def _list_log_csvs(paths: IterationPaths) -> list[Path]:
         return []
 
 
+def plot_run_directory_logs(experiment: Experiment) -> list[Path]:
+    """Summary-plot every ``data/`` subdirectory recording of every iteration.
+
+    Recordings directly in ``data/`` are the identification logs and are plotted
+    by the decode-logs stage; the *subdirectories* hold the runs of a fixed
+    reference -- the benchmark stage's two variants, or a hand-recorded shape --
+    and nothing plotted those. They also arrive late: a real robot's benchmark
+    logs are copied off the SD card long after the iteration that recorded them
+    was finalized, and a MuJoCo benchmark is recorded for an iteration the loop
+    then leaves behind. So the whole experiment is rescanned whenever the loop
+    proceeds, and each recording gets one plot in the iteration's own
+    ``visualize/logs/<the same subdirectory>/`` -- beside the identification
+    logs' plots, which decode-logs writes straight into ``visualize/logs/``.
+    Plots that already exist are kept, so a rescan of a finished experiment
+    costs nothing.
+    """
+    written: list[Path] = []
+    for iteration in experiment.iteration_indices():
+        written.extend(_plot_run_directory_logs(experiment, experiment.paths(iteration)))
+    return written
+
+
+def _plot_run_directory_logs(experiment: Experiment, paths: IterationPaths) -> list[Path]:
+    from wmr_simulator.pololu.log_loader import load_imu_gyro_z, load_pololu_traj_control_log
+    from wmr_simulator.visualization.pololu import plot_logged_summary
+
+    if not paths.data_dir.is_dir():
+        return []
+    clip = experiment.config["log_loading"]["clip_after_first_trajectory"]
+    written: list[Path] = []
+    for directory in _run_directories(paths.data_dir):
+        relative = directory.relative_to(paths.data_dir)
+        out_dir = paths.visualize_dir / "logs" / relative
+        base_gains, gain_params = _run_directory_gains(paths, relative)
+        with tempfile.TemporaryDirectory(prefix="run_log_plots_") as temp_name:
+            for log_path in _run_log_csvs(directory, Path(temp_name), out_dir):
+                try:
+                    log = load_pololu_traj_control_log(log_path, clip_after_first_trajectory=clip)
+                    imu_time, imu_gyro_z = load_imu_gyro_z(log_path, clip_after_first_trajectory=clip)
+                except ValueError as error:
+                    print(f"Log summary plot skipped for {relative / log_path.stem}: {error}")
+                    continue
+                gains = None
+                if gain_params is not None:
+                    # Recover the applied (scheduled) gains offline; the firmware
+                    # does not log them.
+                    from wmr_simulator.pololu.gain_reconstruction import applied_gains_over_log
+
+                    gains = applied_gains_over_log(log, base_gains, gain_params)
+                plot_path = plot_logged_summary(
+                    log,
+                    out_prefix=log_path.stem,
+                    out_dir=out_dir,
+                    imu_time_s=imu_time,
+                    imu_gyro_z=imu_gyro_z,
+                    gains=gains,
+                )
+                print(f"Run log summary plot: {plot_path}")
+                written.append(Path(plot_path))
+    return written
+
+
+def _run_directories(data_dir: Path) -> list[Path]:
+    """Every subdirectory of ``data/`` holding recordings directly."""
+    return sorted(
+        path
+        for path in data_dir.rglob("*")
+        if path.is_dir() and any(child.is_file() for child in path.glob("TR*"))
+    )
+
+
+def _run_log_csvs(directory: Path, temporary_dir: Path, out_dir: Path) -> list[Path]:
+    """csv paths of the recordings in ``directory`` that still need a plot.
+
+    Benchmark recordings are normally kept in the firmware's binary SD-card
+    format, so anything that is not already a csv is decoded into
+    ``temporary_dir``: plotting an iteration must not write into its data/.
+    """
+    from wmr_simulator.pololu.decode_binary import decode_file
+
+    log_paths = sorted(path for path in directory.glob("TR*") if path.is_file())
+    # A decoded csv sits next to its binary as TRxx.csv, so both spellings of
+    # the same run are in the glob; the csv is the one to read.
+    decoded = {path.stem for path in log_paths if path.suffix.lower() == ".csv"}
+    log_paths = [path for path in log_paths if path.suffix.lower() == ".csv" or path.name not in decoded]
+
+    csv_paths: list[Path] = []
+    for log_path in log_paths:
+        if (out_dir / f"{log_path.stem}.pdf").exists():
+            continue
+        if log_path.suffix.lower() == ".csv":
+            csv_paths.append(log_path)
+            continue
+        csv_path = temporary_dir / f"{log_path.name}.csv"
+        with contextlib.redirect_stdout(io.StringIO()):
+            decoded_ok = decode_file(str(log_path), str(csv_path))
+        if decoded_ok:
+            csv_paths.append(csv_path)
+        else:
+            print(f"Log summary plot skipped, unreadable log: {log_path}")
+    return csv_paths
+
+
+def _run_directory_gains(paths: IterationPaths, relative: Path):
+    """Base gains + gain parametrization the runs in ``data/<relative>/`` were
+    driven under (``None`` params for a static-gain recording).
+
+    The parametrized variant is the benchmark stage's ``benchmark/`` and the
+    hand-recorded ``with gain MLP/`` tree -- baseline_runs' own rule for which
+    controller a run directory holds. Every other subdirectory was recorded
+    without a network on the card, so it is plotted against the iteration's
+    static gains rather than the problem yaml's, which are the parametrized
+    run's base gains and not a controller anybody drove.
+
+    An iteration with no problem.yaml -- an archived recording kept for its
+    logs alone -- is plotted without the gain overlay rather than refused.
+    """
+    if not paths.problem.is_file():
+        return None, None
+
+    from wmr_simulator.active_learning.baseline_runs import (
+        BENCHMARK_DIRECTORY_NAMES,
+        GAIN_MLP_DIRECTORY_NAMES,
+        PARAMETRIZED_VARIANT,
+    )
+
+    top = relative.parts[0]
+    if top == BENCHMARK_DIRECTORY_NAMES[PARAMETRIZED_VARIANT] or top in GAIN_MLP_DIRECTORY_NAMES:
+        return _log_gain_parametrization(paths)
+    static_gains = _static_design_gains(paths)
+    if static_gains is None:
+        static_gains = [float(gain) for gain in load_yaml(paths.problem)["controller"]["gains"]]
+    return static_gains, None
+
+
 # ---------------------------------------------------------------------------
 # identification
 # ---------------------------------------------------------------------------
@@ -1384,7 +1522,8 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
         validation_split=float(config["validation_split"]),
         position_tracking_weight=float(config.get("position_tracking_weight", 1.0)),
         heading_tracking_weight=float(config.get("heading_tracking_weight", 1.0)),
-        velocity_tracking_weight=float(config["velocity_tracking_weight"]),
+        linear_velocity_tracking_weight=float(config["linear_velocity_tracking_weight"]),
+        angular_velocity_tracking_weight=float(config["angular_velocity_tracking_weight"]),
         input_weight=float(config["input_weight"]),
         input_delta_weight=float(config["input_delta_weight"]),
         omega_delta_weight=float(config.get("omega_delta_weight", 0.0)),
@@ -1751,6 +1890,11 @@ def _run_iteration(
     """
     paths = experiment.paths(iteration)
     status = iteration_status(experiment, iteration)
+
+    # Benchmark recordings turn up in *earlier* iterations' data/ long after
+    # those iterations were finalized (a person copies them off the SD card),
+    # so the whole experiment is rescanned every time the loop proceeds.
+    plot_run_directory_logs(experiment)
 
     if not status["plan-id-trajectory"]:
         stage_plan_identification_trajectory(experiment, iteration)

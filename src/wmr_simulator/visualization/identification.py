@@ -765,6 +765,17 @@ def _set_symmetric_ylim(ax, values: np.ndarray) -> None:
     ax.set_ylim(-1.05 * limit, 1.05 * limit)
 
 
+def _summed_series(component_history, *names) -> np.ndarray:
+    """Several weighted loss-term histories added into one curve.
+
+    The objective splits pose tracking into position and heading and velocity
+    tracking into its linear and angular channels, each with its own weight;
+    this panel plots one tracking curve against one velocity curve, which is
+    what the two summed pairs give."""
+
+    return sum(np.asarray(component_history[name], dtype=float) for name in names)
+
+
 def plot_loss_history(
     loss_history,
     validation_loss_history=None,
@@ -789,7 +800,7 @@ def plot_loss_history(
     if loss_component_history is not None:
         velocity_ax = ax.twinx()
 
-        tracking_values = np.asarray(loss_component_history["tracking"], dtype=float)
+        tracking_values = _summed_series(loss_component_history, "position_tracking", "heading_tracking")
         tracking_steps = np.arange(1, len(tracking_values) + 1)
         line = ax.plot(
             tracking_steps,
@@ -801,7 +812,9 @@ def plot_loss_history(
         )[0]
         legend_handles.append(line)
 
-        velocity_values = np.asarray(loss_component_history["velocity_tracking"], dtype=float)
+        velocity_values = _summed_series(
+            loss_component_history, "linear_velocity_tracking", "angular_velocity_tracking"
+        )
         velocity_steps = np.arange(1, len(velocity_values) + 1)
         line = velocity_ax.plot(
             velocity_steps,
@@ -814,8 +827,10 @@ def plot_loss_history(
         legend_handles.append(line)
 
         if validation_loss_component_history is not None:
-            if "tracking" in validation_loss_component_history:
-                values = np.asarray(validation_loss_component_history["tracking"], dtype=float)
+            if "position_tracking" in validation_loss_component_history:
+                values = _summed_series(
+                    validation_loss_component_history, "position_tracking", "heading_tracking"
+                )
                 validation_steps = np.arange(1, len(values) + 1)
                 line = ax.plot(
                     validation_steps,
@@ -826,8 +841,12 @@ def plot_loss_history(
                     label="Validation tracking",
                 )[0]
                 legend_handles.append(line)
-            if "velocity_tracking" in validation_loss_component_history:
-                values = np.asarray(validation_loss_component_history["velocity_tracking"], dtype=float)
+            if "linear_velocity_tracking" in validation_loss_component_history:
+                values = _summed_series(
+                    validation_loss_component_history,
+                    "linear_velocity_tracking",
+                    "angular_velocity_tracking",
+                )
                 validation_steps = np.arange(1, len(values) + 1)
                 line = velocity_ax.plot(
                     validation_steps,

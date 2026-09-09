@@ -1,21 +1,21 @@
 """Cross-iteration summary of a full active-learning pipeline run.
 
-One figure, three panels:
+One figure, a full-width gain panel over a 2x3 grid of loss panels:
 
-- a gain-history line plot (one line per gain: kx, ky, kth, kpmotor,
-  kimotor), x = iteration, styled like the joint-tuning gain-history plot
+- the gain history (one line per gain: kx, ky, kth, kpmotor, kimotor),
+  x = iteration, styled like the joint-tuning gain-history plot
   (``visualization.joint_tuning.plot_joint_tuning_history``, whose gain panel
   it shares a helper with); gains are the *static* controller gains deployed to
   record each iteration -- a gain parametrization scales them per sample, so
   its base gains are not a number worth plotting (see ``_static_gains``);
-- two loss panels laid out exactly like the gain-tuning loss-history plot,
-  evaluated on the fixed-baseline benchmark runs (one point = run mean)
-  (``visualization.identification.plot_loss_history``): panel 1 carries the
-  tracking loss (left) and velocity-tracking loss (right); panel 2 carries the
-  total objective (left) and input-delta loss (right). Solid = closed-loop sim
-  of the recording controller, dashed = the actual recorded run, one point per
-  iteration, with a shaded band over the individual runs behind the recorded
-  mean -- the runs are chained, so one of them diverging is a result rather
+- one small panel per plotted loss term (``PLOTTED_TERMS``: every weighted term
+  of the objective except the input-energy one, six of them, which is what the
+  2x3 grid is sized from), evaluated on the fixed-baseline benchmark runs (one
+  point = run mean). A panel each rather than pairs sharing a twin axis: the
+  terms span orders of magnitude, so any two of them on one pair of axes leaves
+  the smaller unreadable. Solid = closed-loop sim of the recording controller,
+  dashed = the actual recorded run, one point per iteration, with a shaded band
+  over the individual runs behind the recorded mean -- the runs are chained, so one of them diverging is a result rather
   than scatter an average may quietly absorb.
 
 The per-iteration records (gains + sim/real loss terms) are computed by
@@ -31,13 +31,20 @@ matplotlib.use("Agg", force=False)
 import matplotlib.pyplot as plt
 import numpy as np
 
+from wmr_simulator.active_learning.progress import TERM_NAMES
 from wmr_simulator.gain_tuning.optimizers import _GAIN_NAMES
 from wmr_simulator.visualization.joint_tuning import _plot_gain_lines
 
+# Every loss term gets a panel except the input energy: it is a regularizer on
+# how hard the controller drives the motors, not a measure of how the iteration
+# did, and it is weighted 0 in the shipped defaults. The remaining six are what
+# the 2x3 grid below is sized for.
+PLOTTED_TERMS = tuple(name for name in TERM_NAMES if name != "input")
 
-def _plot_metric_pair(ax, right_ax, records, left_key, right_key, left_color, right_color, left_label, right_label):
-    """Plot one sim/real metric on ``ax`` (left) and another on ``right_ax``
-    (twin), solid for sim and dashed for real, one point per iteration.
+
+def _plot_metric(ax, records, key, color, label):
+    """Plot one sim/real loss term on ``ax``, solid for sim and dashed for
+    real, one point per iteration.
 
     The recorded curve is the mean over an iteration's benchmark runs; the band
     behind it spans the individual runs, so an iteration whose runs disagree
@@ -45,19 +52,21 @@ def _plot_metric_pair(ax, right_ax, records, left_key, right_key, left_color, ri
     """
     handles = []
     xs = [rec["index"] for rec in records]
-    for axis, key, color, label in (
-        (ax, left_key, left_color, left_label),
-        (right_ax, right_key, right_color, right_label),
-    ):
-        sim = [rec["sim"][key] for rec in records]
-        real = [rec["real"][key] for rec in records]
-        handles.append(axis.plot(xs, sim, color=color, linestyle="-", linewidth=1.9, label=f"Sim {label}")[0])
-        handles.append(axis.plot(xs, real, color=color, linestyle="--", linewidth=1.7, label=f"Real {label}")[0])
-        runs = [[run[key] for run in rec["real_runs"]] for rec in records]
-        if any(len(values) > 1 for values in runs):
-            lower = [min(values) if values else np.nan for values in runs]
-            upper = [max(values) if values else np.nan for values in runs]
-            axis.fill_between(xs, lower, upper, color=color, alpha=0.15, linewidth=0)
+    sim = [rec["sim"][key] for rec in records]
+    real = [rec["real"][key] for rec in records]
+    # marker="o": a pipeline can be a single iteration, where a bare line draws
+    # nothing at all (the same reason the gain panel carries markers).
+    handles.append(
+        ax.plot(xs, sim, color=color, linestyle="-", marker="o", markersize=3.5, linewidth=1.9, label=f"Sim {label}")[0]
+    )
+    handles.append(
+        ax.plot(xs, real, color=color, linestyle="--", marker="o", markersize=3.5, linewidth=1.7, label=f"Real {label}")[0]
+    )
+    runs = [[run[key] for run in rec["real_runs"]] for rec in records]
+    if any(len(values) > 1 for values in runs):
+        lower = [min(values) if values else np.nan for values in runs]
+        upper = [max(values) if values else np.nan for values in runs]
+        ax.fill_between(xs, lower, upper, color=color, alpha=0.15, linewidth=0)
     return handles
 
 
@@ -83,11 +92,16 @@ def plot_pipeline_progress(records, experiment_root, out_path=None, out_prefix="
     else:
         os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
 
-    fig = plt.figure(figsize=(16, 9))
+    # Three rows: the gain history across the top, then the loss terms in a
+    # 2x3 grid below it. The panels are small on purpose -- the terms differ by
+    # orders of magnitude, so one axis each is what makes them readable at all.
+    fig = plt.figure(figsize=(16, 11))
     fig.suptitle(f"Pipeline Progress: {experiment_root.name} (baseline benchmark)", fontsize=16)
-    ax_gains = plt.subplot2grid((2, 2), (0, 0), colspan=2, fig=fig)
-    ax_track = plt.subplot2grid((2, 2), (1, 0), fig=fig)
-    ax_total = plt.subplot2grid((2, 2), (1, 1), fig=fig)
+    ax_gains = plt.subplot2grid((3, 3), (0, 0), colspan=3, fig=fig)
+    loss_axes = [
+        plt.subplot2grid((3, 3), (1 + index // 3, index % 3), fig=fig)
+        for index in range(len(PLOTTED_TERMS))
+    ]
 
     # --- gain history line plot ---------------------------------------------
     if gain_records:
@@ -104,45 +118,23 @@ def plot_pipeline_progress(records, experiment_root, out_path=None, out_prefix="
         ax_gains.text(0.5, 0.5, "no static gains", ha="center", va="center", transform=ax_gains.transAxes)
         ax_gains.set_title("Static controller gains over iterations")
 
-    # --- loss panels (sim solid, real dashed) --------------------------------
+    # --- one loss panel per weighted term (sim solid, real dashed) -----------
     if loss_records:
         loss_indices = [rec["index"] for rec in loss_records]
-
-        # Panel 1: tracking (left, C0) + velocity tracking (right, C1).
-        velocity_ax = ax_track.twinx()
-        handles = _plot_metric_pair(
-            ax_track, velocity_ax, loss_records,
-            "tracking", "velocity_tracking", "C0", "C1", "tracking", "velocity tracking",
-        )
-        ax_track.set_ylabel("Tracking loss", color="C0")
-        velocity_ax.set_ylabel("Velocity tracking loss", color="C1")
-        ax_track.tick_params(axis="y", colors="C0")
-        velocity_ax.tick_params(axis="y", colors="C1")
-        ax_track.spines["left"].set_color("C0")
-        velocity_ax.spines["right"].set_color("C1")
-        ax_track.set_xlabel("iteration")
-        ax_track.set_xticks(loss_indices)
-        ax_track.set_title("Tracking loss over iterations")
-        ax_track.legend(handles=handles, loc="best", fontsize="small")
-
-        # Panel 2: total objective (left, C2) + input-delta (right, C3).
-        input_delta_ax = ax_total.twinx()
-        handles = _plot_metric_pair(
-            ax_total, input_delta_ax, loss_records,
-            "total", "input_delta", "C2", "C3", "total", "input delta",
-        )
-        ax_total.set_ylabel("Total objective", color="C2")
-        input_delta_ax.set_ylabel("Input delta loss", color="C3")
-        ax_total.tick_params(axis="y", colors="C2")
-        input_delta_ax.tick_params(axis="y", colors="C3")
-        ax_total.spines["left"].set_color("C2")
-        input_delta_ax.spines["right"].set_color("C3")
-        ax_total.set_xlabel("iteration")
-        ax_total.set_xticks(loss_indices)
-        ax_total.set_title("Objective over iterations")
-        ax_total.legend(handles=handles, loc="best", fontsize="small")
+        for index, (ax, term) in enumerate(zip(loss_axes, PLOTTED_TERMS)):
+            label = term.replace("_", " ")
+            color = f"C{index}"
+            handles = _plot_metric(ax, loss_records, term, color, label)
+            ax.set_ylabel(f"{label} loss", color=color, fontsize="small")
+            ax.tick_params(axis="y", colors=color, labelsize="small")
+            ax.tick_params(axis="x", labelsize="small")
+            ax.spines["left"].set_color(color)
+            ax.set_xlabel("iteration", fontsize="small")
+            ax.set_xticks(loss_indices)
+            ax.set_title(f"{label} loss".capitalize(), fontsize="medium")
+            ax.legend(handles=handles, loc="best", fontsize="x-small")
     else:
-        for ax in (ax_track, ax_total):
+        for ax in loss_axes:
             ax.text(0.5, 0.5, "no benchmark runs", ha="center", va="center", transform=ax.transAxes)
 
     fig.tight_layout(rect=[0, 0, 1, 0.96])

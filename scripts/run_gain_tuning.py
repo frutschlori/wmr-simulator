@@ -24,12 +24,21 @@ def print_loss_breakdown(label: str, component_history: dict[str, list[float]] |
     final_terms = {name: float(values[-1]) for name, values in component_history.items()}
     total = sum(final_terms.values())
     print(label)
-    for name in ("tracking", "velocity_tracking", "input", "input_delta", "gain_delta"):
+    for name in (
+        "position_tracking",
+        "heading_tracking",
+        "linear_velocity_tracking",
+        "angular_velocity_tracking",
+        "input",
+        "input_delta",
+        "omega_delta",
+        "gain_delta",
+    ):
         if name not in final_terms:
             continue
         value = final_terms[name]
         share = 100.0 * value / total if total > 0.0 else 0.0
-        print(f"  {name:<16}: {value:.8f} ({share:.2f}%)")
+        print(f"  {name:<26}: {value:.8f} ({share:.2f}%)")
 
 
 def save_tuning_result(out_path: str, problem_path: str, result: dict) -> None:
@@ -96,7 +105,16 @@ def main():
     # Loss weights
     parser.add_argument("--position-tracking-weight", type=float, default=GAIN_TUNING_DEFAULTS["position_tracking_weight"])
     parser.add_argument("--heading-tracking-weight", type=float, default=GAIN_TUNING_DEFAULTS["heading_tracking_weight"])
-    parser.add_argument("--velocity-tracking-weight", type=float, default=GAIN_TUNING_DEFAULTS["velocity_tracking_weight"])
+    parser.add_argument(
+        "--linear-velocity-tracking-weight",
+        type=float,
+        default=GAIN_TUNING_DEFAULTS["linear_velocity_tracking_weight"],
+    )
+    parser.add_argument(
+        "--angular-velocity-tracking-weight",
+        type=float,
+        default=GAIN_TUNING_DEFAULTS["angular_velocity_tracking_weight"],
+    )
     parser.add_argument("--input-weight", type=float, default=GAIN_TUNING_DEFAULTS["input_weight"])
     parser.add_argument("--input-delta-weight", type=float, default=GAIN_TUNING_DEFAULTS["input_delta_weight"])
     # Penalty on step-to-step yaw-rate change (normalized by omega_max); discourages
@@ -163,7 +181,8 @@ def main():
         validation_split=args.validation_split,
         position_tracking_weight=args.position_tracking_weight,
         heading_tracking_weight=args.heading_tracking_weight,
-        velocity_tracking_weight=args.velocity_tracking_weight,
+        linear_velocity_tracking_weight=args.linear_velocity_tracking_weight,
+        angular_velocity_tracking_weight=args.angular_velocity_tracking_weight,
         input_weight=args.input_weight,
         input_delta_weight=args.input_delta_weight,
         omega_delta_weight=args.omega_delta_weight,
@@ -194,7 +213,8 @@ def main():
     print_controller_gains("Optimized gains:", result["optimized_gains"])
     print(f"Position tracking weight: {args.position_tracking_weight:.8g}")
     print(f"Heading tracking weight: {args.heading_tracking_weight:.8g}")
-    print(f"Velocity tracking weight: {args.velocity_tracking_weight:.8g}")
+    print(f"Linear velocity tracking weight: {args.linear_velocity_tracking_weight:.8g}")
+    print(f"Angular velocity tracking weight: {args.angular_velocity_tracking_weight:.8g}")
     print(f"Input regularization weight: {args.input_weight:.8g}")
     print(f"Input delta regularization weight: {args.input_delta_weight:.8g}")
     print(f"Omega delta regularization weight: {args.omega_delta_weight:.8g}")

@@ -135,23 +135,23 @@ def _reference_targets(pipeline, reference_states: jax.Array):
     return reference_poses, reference_velocity, reference_pose_indices
 
 
-def pose_tracking_loss(
+def pose_tracking_losses(
     predicted_poses: jax.Array,
     reference_poses: jax.Array,
-    position_tracking_weight: float,
-    heading_tracking_weight: float,
-) -> jax.Array:
-    """Pose-tracking loss with position and heading weighted separately.
+) -> tuple[jax.Array, jax.Array]:
+    """The position and heading tracking losses, unweighted and separate.
 
     Same two residuals as ``SimulationPipeline.pose_mse`` (squared position
-    error and the SO(2) heading error ``2 - 2cos``), but each carries its own
-    weight """
+    error and the SO(2) heading error ``2 - 2cos``), returned individually so
+    each can carry its own weight and stay its own entry in the loss-term
+    vector -- they are different quantities in different units, and summing
+    them hides which of the two a controller traded away."""
 
     pos_error = predicted_poses[:, :2] - reference_poses[:, :2]
     angle_error = predicted_poses[:, 2] - reference_poses[:, 2]
     position_loss = jnp.mean(jnp.sum(pos_error**2, axis=1))
     heading_loss = jnp.mean(2.0 - 2.0 * jnp.cos(angle_error))
-    return position_tracking_weight * position_loss + heading_tracking_weight * heading_loss
+    return position_loss, heading_loss
 
 
 def _base_loss_terms(
@@ -162,25 +162,27 @@ def _base_loss_terms(
     reference_pose_indices,
     position_tracking_weight: float,
     heading_tracking_weight: float,
-    velocity_tracking_weight: float,
+    linear_velocity_tracking_weight: float,
+    angular_velocity_tracking_weight: float,
     input_weight: float,
     input_delta_weight: float,
     omega_delta_weight: float,
 ) -> jax.Array:
     predicted_poses = predicted_log.pose.states[reference_pose_indices]
-    tracking_loss = pose_tracking_loss(
-        predicted_poses,
-        reference_poses,
-        position_tracking_weight,
-        heading_tracking_weight,
+    position_tracking_loss, heading_tracking_loss = pose_tracking_losses(
+        predicted_poses, reference_poses
     )
     predicted_velocity = predicted_log.wheel.vel_omega[reference_pose_indices]
     # Normalize [v, omega] by their limits so the two channels are commensurate
-    # (raw omega ~10 would otherwise swamp v ~1) and velocity_tracking_weight is an
-    # interpretable relative weight rather than a unit-reconciliation constant.
+    # (raw omega ~10 would otherwise swamp v ~1) and the two velocity weights are
+    # interpretable relative weights rather than unit-reconciliation constants.
+    # The channels carry separate weights because they are separate tracking
+    # objectives: the linear one is what the along-track gain kx buys, the
+    # angular one what ky/kth and the inner loop buy.
     velocity_scale = jnp.asarray([pipeline.v_max, pipeline.omega_max], dtype=jnp.float32)
     velocity_error = (predicted_velocity - reference_velocity) / velocity_scale
-    velocity_tracking_loss = jnp.mean(jnp.sum(velocity_error**2, axis=1))
+    linear_velocity_tracking_loss = jnp.mean(velocity_error[:, 0] ** 2)
+    angular_velocity_tracking_loss = jnp.mean(velocity_error[:, 1] ** 2)
     duty_cycle = predicted_log.wheel.duty_cycle[:-1]
 
     input_loss = jnp.mean(jnp.sum(duty_cycle**2, axis=1))         # minimize input energy
@@ -197,8 +199,10 @@ def _base_loss_terms(
     omega_delta_loss = jnp.mean(jnp.diff(omega) ** 2)
     return jnp.asarray(
         [
-            tracking_loss,
-            velocity_tracking_weight * velocity_tracking_loss,
+            position_tracking_weight * position_tracking_loss,
+            heading_tracking_weight * heading_tracking_loss,
+            linear_velocity_tracking_weight * linear_velocity_tracking_loss,
+            angular_velocity_tracking_weight * angular_velocity_tracking_loss,
             input_weight * input_loss,
             input_delta_weight * input_delta_loss,
             omega_delta_weight * omega_delta_loss,
@@ -214,7 +218,8 @@ def closed_loop_objective(
     replay_estimator_keys: jax.Array,
     position_tracking_weight: float = 1.0,
     heading_tracking_weight: float = 1.0,
-    velocity_tracking_weight: float = 0.0,
+    linear_velocity_tracking_weight: float = 0.0,
+    angular_velocity_tracking_weight: float = 0.0,
     input_weight: float = 0.0,
     input_delta_weight: float = 0.0,
     omega_delta_weight: float = 0.0,
@@ -229,7 +234,8 @@ def closed_loop_objective(
             replay_estimator_keys,
             position_tracking_weight=position_tracking_weight,
             heading_tracking_weight=heading_tracking_weight,
-            velocity_tracking_weight=velocity_tracking_weight,
+            linear_velocity_tracking_weight=linear_velocity_tracking_weight,
+            angular_velocity_tracking_weight=angular_velocity_tracking_weight,
             input_weight=input_weight,
             input_delta_weight=input_delta_weight,
             omega_delta_weight=omega_delta_weight,
@@ -246,7 +252,8 @@ def closed_loop_objective_terms(
     replay_estimator_keys: jax.Array,
     position_tracking_weight: float = 1.0,
     heading_tracking_weight: float = 1.0,
-    velocity_tracking_weight: float = 0.0,
+    linear_velocity_tracking_weight: float = 0.0,
+    angular_velocity_tracking_weight: float = 0.0,
     input_weight: float = 0.0,
     input_delta_weight: float = 0.0,
     omega_delta_weight: float = 0.0,
@@ -276,7 +283,8 @@ def closed_loop_objective_terms(
             reference_pose_indices,
             position_tracking_weight,
             heading_tracking_weight,
-            velocity_tracking_weight,
+            linear_velocity_tracking_weight,
+            angular_velocity_tracking_weight,
             input_weight,
             input_delta_weight,
             omega_delta_weight,
@@ -294,7 +302,8 @@ def scheduled_closed_loop_objective(
     replay_estimator_keys: jax.Array,
     position_tracking_weight: float = 1.0,
     heading_tracking_weight: float = 1.0,
-    velocity_tracking_weight: float = 0.0,
+    linear_velocity_tracking_weight: float = 0.0,
+    angular_velocity_tracking_weight: float = 0.0,
     input_weight: float = 0.0,
     input_delta_weight: float = 0.0,
     omega_delta_weight: float = 0.0,
@@ -312,7 +321,8 @@ def scheduled_closed_loop_objective(
             replay_estimator_keys,
             position_tracking_weight=position_tracking_weight,
             heading_tracking_weight=heading_tracking_weight,
-            velocity_tracking_weight=velocity_tracking_weight,
+            linear_velocity_tracking_weight=linear_velocity_tracking_weight,
+            angular_velocity_tracking_weight=angular_velocity_tracking_weight,
             input_weight=input_weight,
             input_delta_weight=input_delta_weight,
             omega_delta_weight=omega_delta_weight,
@@ -332,7 +342,8 @@ def scheduled_closed_loop_objective_terms(
     replay_estimator_keys: jax.Array,
     position_tracking_weight: float = 1.0,
     heading_tracking_weight: float = 1.0,
-    velocity_tracking_weight: float = 0.0,
+    linear_velocity_tracking_weight: float = 0.0,
+    angular_velocity_tracking_weight: float = 0.0,
     input_weight: float = 0.0,
     input_delta_weight: float = 0.0,
     omega_delta_weight: float = 0.0,
@@ -343,9 +354,10 @@ def scheduled_closed_loop_objective_terms(
 ):
     """Loss terms for the scheduled controller.
 
-    Returns a 6-vector: the five static terms (tracking, velocity_tracking,
-    input, input_delta, omega_delta) plus a rate-scaled gain-schedule smoothness
-    penalty. The penalty is a pure function of the reference trajectory
+    Returns an 8-vector: the seven static terms (position_tracking,
+    heading_tracking, linear_velocity_tracking, angular_velocity_tracking,
+    input, input_delta, omega_delta) plus a rate-scaled gain-schedule
+    smoothness penalty. The penalty is a pure function of the reference trajectory
     (independent of rollout noise). With ``gain_delta_weight = 0`` and an
     identity schedule (W = 0, b = 0) this reproduces the static objective terms
     padded with a trailing zero.
@@ -373,7 +385,8 @@ def scheduled_closed_loop_objective_terms(
             reference_pose_indices,
             position_tracking_weight,
             heading_tracking_weight,
-            velocity_tracking_weight,
+            linear_velocity_tracking_weight,
+            angular_velocity_tracking_weight,
             input_weight,
             input_delta_weight,
             omega_delta_weight,

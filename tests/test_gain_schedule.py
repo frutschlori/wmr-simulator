@@ -138,17 +138,17 @@ def test_disabled_schedule_objective_matches_static():
     static_terms = np.asarray(
         closed_loop_objective_terms(
             pipeline, base, robot_keys, est_keys,
-            velocity_tracking_weight=0.05, input_delta_weight=0.1,
+            linear_velocity_tracking_weight=0.05, angular_velocity_tracking_weight=0.05, input_delta_weight=0.1,
         )
     )
     scheduled_terms = np.asarray(
         scheduled_closed_loop_objective_terms(
             pipeline, base, params, robot_keys, est_keys,
-            velocity_tracking_weight=0.05, input_delta_weight=0.1, gain_delta_weight=1.0,
+            linear_velocity_tracking_weight=0.05, angular_velocity_tracking_weight=0.05, input_delta_weight=0.1, gain_delta_weight=1.0,
         )
     )
-    np.testing.assert_allclose(scheduled_terms[:5], static_terms, atol=1e-5)
-    assert scheduled_terms[5] == pytest.approx(0.0, abs=1e-7)  # gain_delta zero at W=0
+    np.testing.assert_allclose(scheduled_terms[:7], static_terms, atol=1e-5)
+    assert scheduled_terms[7] == pytest.approx(0.0, abs=1e-7)  # gain_delta zero at W=0
 
 
 def test_gradient_wrt_W_is_finite_and_nonzero():
@@ -163,7 +163,7 @@ def test_gradient_wrt_W_is_finite_and_nonzero():
         return jnp.sum(
             scheduled_closed_loop_objective_terms(
                 pipeline, base, params, robot_keys, est_keys,
-                velocity_tracking_weight=0.05, input_delta_weight=0.1,
+                linear_velocity_tracking_weight=0.05, angular_velocity_tracking_weight=0.05, input_delta_weight=0.1,
             )
         )
 
