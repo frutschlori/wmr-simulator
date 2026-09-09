@@ -59,19 +59,47 @@ GAIN_TUNING_DEFAULTS: dict = {
     # outliers) and frozen at the initial gains, so the objective stays smooth.
     # 0 disables.
     "outlier_loss_factor": 10.0,
-    # Loss weights
+    # Loss weights. Set 2026-09-09 by scoring the sim's loss terms against what
+    # the MuJoCo plant actually does: 267 gain vectors driven on circle_fast
+    # (15 runs each) against their unweighted loss components on three
+    # iterations' tuning sets. Rank correlation of each term with plant pose
+    # RMSE -- position +0.17, heading +0.23, linear velocity +0.56, angular
+    # velocity +0.49, input +0.42, omega_delta +0.14 -- i.e. the previous
+    # weighting spent its three largest weights on its three *worst*
+    # predictors. Re-tuning six archived iterations and benchmarking the result
+    # on the plant, median pose RMSE / rollouts over 0.3 m out of 90:
+    # old weights 0.082 / 10, these 0.063 / 1.
     "position_tracking_weight": 1.0,
-    "heading_tracking_weight": 1.0,
+    # Measured, not an oversight: heading tracking on the designed tuning set is
+    # a near-zero predictor of plant behaviour (+0.05 and +0.12 on two of the
+    # three iterations). Raising it back is what pushes kth up, and the plant
+    # wants kth <= 8. Do not restore it to 1.0 without re-measuring.
+    "heading_tracking_weight": 0.2,
     # Velocity tracking is split by channel: [v, omega] are each normalized by
     # their own limit (v_max, omega_max) before being squared, so these two are
     # relative weights on commensurate errors. Separate because the linear and
     # angular channels are tracked by different gains (kx against ky/kth and
-    # the inner loop) and because omega_max scales the angular channel.
-    "linear_velocity_tracking_weight": 0.1,
-    "angular_velocity_tracking_weight": 0.5,
-    "input_weight": 0.0,
+    # the inner loop) and because omega_max scales the angular channel. These
+    # two are the only terms that stay informative about the plant on *every*
+    # iteration's design, which is why they now carry the objective.
+    "linear_velocity_tracking_weight": 1.0,
+    "angular_velocity_tracking_weight": 1.0,
+    # Small but nonzero: duty magnitude correlates +0.42 with plant pose RMSE
+    # (saturation is what the aggressive gains buy), and at 0 the objective has
+    # nothing pricing actuator authority at all.
+    "input_weight": 0.05,
     "input_delta_weight": 0.0,
-    "omega_delta_weight": 1.5, # Penalty on step-to-step change in the robot yaw rate, discourages gains that oscillate omega
+    # Penalty on the step-to-step change in the robot yaw rate. It was 1.5 --
+    # the largest weight in the set -- on the theory that it prices the theta
+    # ringing seen on hardware. Measured, it cannot: it reads
+    # `predicted_log.wheel.vel_omega`, the *true* plant twist off a PT1, which
+    # is smooth by construction here. Same four gain vectors, sim vs MuJoCo
+    # alpha_rms: 2.6/11.4, 5.8/16.1, 5.9/45.4, 5.1/22.2 -- the sim is 4-8x
+    # smaller and, over kth 12/20/stock, completely flat where the plant
+    # separates 4x. Kept small rather than 0 so it still damps the one thing it
+    # can see; making it price real ringing needs phase lag in the wheel loop,
+    # not a larger weight here.
+    "omega_delta_weight": 0.1,
     "gain_delta_weight": 1e-4,
     "k_min_stab": 1e-3,
     "k_max_stab": 20.0,
