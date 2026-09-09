@@ -58,7 +58,7 @@ GAIN_TUNING_DEFAULTS: dict = {
     # unchanged. Applied to training only (the held-out score keeps its
     # outliers) and frozen at the initial gains, so the objective stays smooth.
     # 0 disables.
-    "outlier_loss_factor": 20.0,
+    "outlier_loss_factor": 10.0,
     # Loss weights
     "position_tracking_weight": 1.0,
     "heading_tracking_weight": 1.0,

@@ -544,6 +544,42 @@ def plot_validation_trajectory_summary(
     )
 
 
+def plot_tuning_trajectory_histograms(pipeline, out_prefix="tuning_trajectory_histograms"):
+    """Velocity/acceleration histograms of the tuning trajectory set.
+
+    The gains a run ships are only as transferable as the motion they were tuned
+    on, so this is the set's own envelope -- what a held-out benchmark's
+    histogram (visualization.motion_histograms, written beside its logs) is read
+    against. Training and validation are separate datasets: they are a random
+    split of one design batch, so a difference between them is a sampling
+    accident worth seeing rather than a design decision.
+    """
+    from wmr_simulator.visualization.motion_histograms import (
+        motion_channels_from_reference_states,
+        plot_motion_histograms,
+    )
+
+    datasets = []
+    for label, trajectories in (
+        ("training", np.asarray(pipeline.training_reference_trajectories, dtype=float)),
+        ("validation", np.asarray(pipeline.validation_reference_trajectories, dtype=float)),
+    ):
+        if trajectories.shape[0] == 0:
+            continue
+        datasets.append(
+            (
+                f"{label} ({trajectories.shape[0]} traj)",
+                motion_channels_from_reference_states(trajectories, pipeline.dt),
+            )
+        )
+    return plot_motion_histograms(
+        datasets,
+        out_prefix=out_prefix,
+        title="Tuning Trajectory Motion Distributions",
+        robot_cfg=pipeline.robot_cfg,
+    )
+
+
 def plot_controller_tuning_errors(pipeline, init_log, tuned_log, static_log=None, out_prefix="ctrl_tuning"):
     os.makedirs("visualize", exist_ok=True)
     pdf_filename = os.path.join("visualize", f"{out_prefix}_tracking_errors.pdf")

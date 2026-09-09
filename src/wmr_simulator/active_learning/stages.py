@@ -1011,13 +1011,24 @@ def _plot_run_directory_logs(experiment: Experiment, paths: IterationPaths) -> l
         relative = directory.relative_to(paths.data_dir)
         out_dir = paths.visualize_dir / "logs" / relative
         base_gains, gain_params = _run_directory_gains(paths, relative)
+        # The histogram is of the whole recording set, so a missing one is a
+        # reason to load every run of the directory again -- otherwise only the
+        # runs still missing a summary plot are decoded, and a rescan of a
+        # finished experiment stays free.
+        histogram_path = out_dir / "motion_histograms.pdf"
+        logs = []
         with tempfile.TemporaryDirectory(prefix="run_log_plots_") as temp_name:
-            for log_path in _run_log_csvs(directory, Path(temp_name), out_dir):
+            for log_path in _run_log_csvs(
+                directory, Path(temp_name), out_dir, needed_only=histogram_path.exists()
+            ):
                 try:
                     log = load_pololu_traj_control_log(log_path, clip_after_first_trajectory=clip)
                     imu_time, imu_gyro_z = load_imu_gyro_z(log_path, clip_after_first_trajectory=clip)
                 except ValueError as error:
                     print(f"Log summary plot skipped for {relative / log_path.stem}: {error}")
+                    continue
+                logs.append(log)
+                if (out_dir / f"{log_path.stem}.pdf").exists():
                     continue
                 gains = None
                 if gain_params is not None:
@@ -1036,7 +1047,45 @@ def _plot_run_directory_logs(experiment: Experiment, paths: IterationPaths) -> l
                 )
                 print(f"Run log summary plot: {plot_path}")
                 written.append(Path(plot_path))
+        if logs and not histogram_path.exists():
+            plot_path = _plot_run_motion_histograms(paths, relative, logs, out_dir)
+            if plot_path is not None:
+                written.append(plot_path)
     return written
+
+
+def _plot_run_motion_histograms(
+    paths: IterationPaths, relative: Path, logs: list, out_dir: Path
+) -> Path | None:
+    """Motion histogram of one recording set (the benchmark, or a hand-recorded
+    baseline), pooled over its runs.
+
+    This is the held-out side of the comparison the tune-gains stage's
+    ``gain tuning/tuning_trajectory_histograms.pdf`` is the training side of:
+    the gains were tuned on that envelope and are judged on this one. Both the
+    reference the runs were driving and what they actually drove are shown,
+    since the two differ by exactly the tracking error under investigation.
+    """
+    from wmr_simulator.visualization.motion_histograms import (
+        measured_motion_channels_from_log,
+        plot_motion_histograms,
+        pool_motion_channels,
+        reference_motion_channels_from_log,
+    )
+
+    # Only for the limit lines, and an iteration problem always carries a robot
+    # block -- but this is a best-effort figure, so a missing one just drops them.
+    robot_cfg = load_yaml(paths.problem).get("robot") if paths.problem.is_file() else None
+    return plot_motion_histograms(
+        [
+            ("reference", pool_motion_channels([reference_motion_channels_from_log(log) for log in logs])),
+            ("measured", pool_motion_channels([measured_motion_channels_from_log(log) for log in logs])),
+        ],
+        out_prefix="motion_histograms",
+        out_dir=out_dir,
+        title=f"Motion Distributions: {relative} ({len(logs)} runs)",
+        robot_cfg=robot_cfg,
+    )
 
 
 def _run_directories(data_dir: Path) -> list[Path]:
@@ -1048,8 +1097,11 @@ def _run_directories(data_dir: Path) -> list[Path]:
     )
 
 
-def _run_log_csvs(directory: Path, temporary_dir: Path, out_dir: Path) -> list[Path]:
-    """csv paths of the recordings in ``directory`` that still need a plot.
+def _run_log_csvs(
+    directory: Path, temporary_dir: Path, out_dir: Path, needed_only: bool = True
+) -> list[Path]:
+    """csv paths of the recordings in ``directory``, by default only those that
+    still need a summary plot (``needed_only=False`` returns them all).
 
     Benchmark recordings are normally kept in the firmware's binary SD-card
     format, so anything that is not already a csv is decoded into
@@ -1065,7 +1117,7 @@ def _run_log_csvs(directory: Path, temporary_dir: Path, out_dir: Path) -> list[P
 
     csv_paths: list[Path] = []
     for log_path in log_paths:
-        if (out_dir / f"{log_path.stem}.pdf").exists():
+        if needed_only and (out_dir / f"{log_path.stem}.pdf").exists():
             continue
         if log_path.suffix.lower() == ".csv":
             csv_paths.append(log_path)
@@ -1455,6 +1507,7 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
         plot_controller_tuning_errors,
         plot_gain_tuning_summary,
         plot_training_trajectory_summary,
+        plot_tuning_trajectory_histograms,
         plot_validation_trajectory_summary,
         realization_keys_for_set,
         rollout_realizations,
@@ -1672,6 +1725,9 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
             init_schedule_params=result["init_schedule_params"],
             out_prefix="summary_validation",
         )
+        # The envelope the gains were tuned on, to read the benchmark's own
+        # histogram (visualize/logs/<recording>/motion_histograms.pdf) against.
+        plot_tuning_trajectory_histograms(pipeline)
         plot_controller_tuning_errors(
             pipeline=pipeline,
             init_log=result["init_hidden_log"],

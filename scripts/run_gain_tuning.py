@@ -11,6 +11,7 @@ from wmr_simulator.visualization.gain_tuning import (
     plot_controller_tuning_errors,
     plot_gain_tuning_summary,
     plot_training_trajectory_summary,
+    plot_tuning_trajectory_histograms,
     plot_validation_trajectory_summary,
     realization_keys_for_set,
     rollout_realizations,
@@ -324,6 +325,7 @@ def main():
         init_schedule_params=result["init_schedule_params"],
         out_prefix="summary_validation",
     )
+    plot_tuning_trajectory_histograms(pipeline)
     plot_controller_tuning_errors(
         pipeline=pipeline,
         init_log=result["init_hidden_log"],
