@@ -72,9 +72,24 @@ def test_earlier_iterations_are_rescanned(experiment):
 
     written = stages.plot_run_directory_logs(exp)
 
-    assert len(written) == 2
+    # One summary plot and one motion histogram per recording directory.
+    assert len(written) == 4
     assert (exp.paths(1).visualize_dir / "logs" / "benchmark" / "TR00.pdf").is_file()
     assert (exp.paths(3).visualize_dir / "logs" / "benchmark" / "TR00.pdf").is_file()
+
+
+def test_each_recording_set_gets_one_motion_histogram(experiment):
+    """The velocity/acceleration envelope of a recording set, pooled over its
+    runs: the held-out side of the comparison against the tuning trajectories'
+    own histogram."""
+    exp = experiment()
+    paths = exp.paths(1)
+    write_run_csv(paths.data_dir / "benchmark" / "TR00.csv")
+    write_run_csv(paths.data_dir / "benchmark" / "TR01.csv", radial_offset=0.05)
+
+    stages.plot_run_directory_logs(exp)
+
+    assert (paths.visualize_dir / "logs" / "benchmark" / "motion_histograms.pdf").is_file()
 
 
 def test_existing_plots_are_kept(experiment):
@@ -85,5 +100,9 @@ def test_existing_plots_are_kept(experiment):
     plot_path = exp.paths(1).visualize_dir / "logs" / "benchmark" / "TR00.pdf"
     stamp = plot_path.stat().st_mtime_ns
 
+    histogram_path = exp.paths(1).visualize_dir / "logs" / "benchmark" / "motion_histograms.pdf"
+    histogram_stamp = histogram_path.stat().st_mtime_ns
+
     assert stages.plot_run_directory_logs(exp) == []
     assert plot_path.stat().st_mtime_ns == stamp
+    assert histogram_path.stat().st_mtime_ns == histogram_stamp
