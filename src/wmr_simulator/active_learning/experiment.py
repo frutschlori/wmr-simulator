@@ -129,10 +129,10 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         # did not come back, so the next one cannot start where it left off --
         # it is placed by hand again instead, exactly as it would be on the
         # robot.
-        "divergence_radius": 0.15,
+        "divergence_radius": 0.2,
         # Hand-placement spread, the same distribution the identification
         # deployment and the gain tuner's start offsets use.
-        "start_offset_radius": 0.05,
+        "start_offset_radius": 0.1,
         "start_offset_angle": 0.2,
         # A reference that does not end where it starts gets a wait + bridge
         # path back appended (pololu.bridge_exporter), which is what makes
