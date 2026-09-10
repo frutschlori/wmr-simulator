@@ -70,6 +70,7 @@ def optimize_control_points(
     constraint_weight: float = 1.0,
     constraint_component_weights: dict | None = None,
     constraint_smooth_max_beta: float = 20.0,
+    min_speed=0.0,
     verbose: bool = True,
 ):
     from wmr_simulator.trajectory_optimization.pipeline import OptimizationSnapshot
@@ -97,6 +98,7 @@ def optimize_control_points(
             constraint_weight=constraint_weight,
             constraint_component_weights=constraint_component_weights,
             constraint_smooth_max_beta=constraint_smooth_max_beta,
+            min_speed=min_speed,
         )
 
     initial_loss = loss_fn(initial_decision_variables)
@@ -194,6 +196,7 @@ def optimize_control_points_batch(
     constraint_weight: float = 1.0,
     constraint_component_weights: dict | None = None,
     constraint_smooth_max_beta: float = 20.0,
+    min_speed=0.0,
     realizations_batch=None,
     verbose: bool = True,
 ):
@@ -208,6 +211,12 @@ def optimize_control_points_batch(
         jnp.asarray(constraint_weight, dtype=jnp.float32),
         (initial_decision_variables.shape[0],),
     )
+    # Per-trajectory lower bound on mean speed, broadcast the same way: a batch
+    # deliberately spreads it so the set covers fast and slow regimes at once.
+    min_speeds = jnp.broadcast_to(
+        jnp.asarray(min_speed, dtype=jnp.float32),
+        (initial_decision_variables.shape[0],),
+    )
     num_control_points = pipeline.control_points_from_decision_variables(
         initial_decision_variables[0]
     ).shape[0]
@@ -218,7 +227,7 @@ def optimize_control_points_batch(
     # The objective normalizes itself (see trajectory_objective); there is no
     # round-0 loss_scale here either.
     if realizations_batch is None:
-        def loss_fn(decision_variables, current_constraint_weight):
+        def loss_fn(decision_variables, current_constraint_weight, current_min_speed):
             return pipeline.loss_from_decision_variables(
                 decision_variables,
                 window_length=window_length,
@@ -226,9 +235,10 @@ def optimize_control_points_batch(
                 constraint_weight=current_constraint_weight,
                 constraint_component_weights=constraint_component_weights,
                 constraint_smooth_max_beta=constraint_smooth_max_beta,
+                min_speed=current_min_speed,
             )
     else:
-        def loss_fn(decision_variables, current_constraint_weight, realizations):
+        def loss_fn(decision_variables, current_constraint_weight, current_min_speed, realizations):
             return pipeline.loss_from_decision_variables(
                 decision_variables,
                 window_length=window_length,
@@ -236,38 +246,44 @@ def optimize_control_points_batch(
                 constraint_weight=current_constraint_weight,
                 constraint_component_weights=constraint_component_weights,
                 constraint_smooth_max_beta=constraint_smooth_max_beta,
+                min_speed=current_min_speed,
                 realizations=realizations,
             )
 
     clamp_decision_variables_batch = jax.vmap(pipeline.clamp_decision_variables)
     control_points_from_decision_variables_batch = jax.vmap(pipeline.control_points_from_decision_variables)
     if realizations_batch is None:
-        loss_values_fn = jax.vmap(loss_fn, in_axes=(0, 0))
-
-        def step_one(decision_variables, optimizer_state, current_constraint_weight):
-            loss_value, grads = jax.value_and_grad(loss_fn)(decision_variables, current_constraint_weight)
-            updates, next_optimizer_state = optimizer.update(grads, optimizer_state, decision_variables)
-            return optax.apply_updates(decision_variables, updates), next_optimizer_state, loss_value
-
-        step_batch = jax.vmap(step_one, in_axes=(0, 0, 0))
-    else:
         loss_values_fn = jax.vmap(loss_fn, in_axes=(0, 0, 0))
 
-        def step_one(decision_variables, optimizer_state, current_constraint_weight, realizations):
+        def step_one(decision_variables, optimizer_state, current_constraint_weight, current_min_speed):
             loss_value, grads = jax.value_and_grad(loss_fn)(
-                decision_variables, current_constraint_weight, realizations
+                decision_variables, current_constraint_weight, current_min_speed
             )
             updates, next_optimizer_state = optimizer.update(grads, optimizer_state, decision_variables)
             return optax.apply_updates(decision_variables, updates), next_optimizer_state, loss_value
 
         step_batch = jax.vmap(step_one, in_axes=(0, 0, 0, 0))
+    else:
+        loss_values_fn = jax.vmap(loss_fn, in_axes=(0, 0, 0, 0))
 
-    def optimize_batch(initial_decision_variables, current_constraint_weights, realizations_batch):
+        def step_one(decision_variables, optimizer_state, current_constraint_weight,
+                     current_min_speed, realizations):
+            loss_value, grads = jax.value_and_grad(loss_fn)(
+                decision_variables, current_constraint_weight, current_min_speed, realizations
+            )
+            updates, next_optimizer_state = optimizer.update(grads, optimizer_state, decision_variables)
+            return optax.apply_updates(decision_variables, updates), next_optimizer_state, loss_value
+
+        step_batch = jax.vmap(step_one, in_axes=(0, 0, 0, 0, 0))
+
+    def optimize_batch(initial_decision_variables, current_constraint_weights, current_min_speeds,
+                       realizations_batch):
         initial_decision_variables = clamp_decision_variables_batch(initial_decision_variables)
         initial_loss = (
-            loss_values_fn(initial_decision_variables, current_constraint_weights)
+            loss_values_fn(initial_decision_variables, current_constraint_weights, current_min_speeds)
             if realizations_batch is None
-            else loss_values_fn(initial_decision_variables, current_constraint_weights, realizations_batch)
+            else loss_values_fn(initial_decision_variables, current_constraint_weights,
+                                current_min_speeds, realizations_batch)
         )
         initial_opt_state = jax.vmap(optimizer.init)(initial_decision_variables)
 
@@ -282,11 +298,12 @@ def optimize_control_points_batch(
             def run_step(_):
                 if realizations_batch is None:
                     next_decision_variables, next_optimizer_state, loss_values = step_batch(
-                        decision_variables, optimizer_state, current_constraint_weights
+                        decision_variables, optimizer_state, current_constraint_weights, current_min_speeds
                     )
                 else:
                     next_decision_variables, next_optimizer_state, loss_values = step_batch(
-                        decision_variables, optimizer_state, current_constraint_weights, realizations_batch
+                        decision_variables, optimizer_state, current_constraint_weights,
+                        current_min_speeds, realizations_batch
                     )
                 next_decision_variables = clamp_decision_variables_batch(next_decision_variables)
                 # At the end of each window, score the improvement against the
@@ -337,6 +354,7 @@ def optimize_control_points_batch(
     best_decision_variables, loss_history_by_trajectory, converged, initial_loss = optimize_batch(
         initial_decision_variables,
         constraint_weights,
+        min_speeds,
         realizations_batch,
     )
     optimized_control_points = control_points_from_decision_variables_batch(best_decision_variables)

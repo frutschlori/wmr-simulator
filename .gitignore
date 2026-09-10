@@ -2,6 +2,7 @@
 .env/
 *.pyc
 venv/
+.cache
 
 # Test simulation runs
 Pololu Data/test*

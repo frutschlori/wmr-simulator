@@ -95,6 +95,7 @@ def baseline_params_from_args(args) -> dict:
             "total_time": args.time,
             "max_speed": args.max_speed,
             "cycles": args.cycles,
+            "rotation": args.rotation,
             **common,
         }
     return {
@@ -102,7 +103,12 @@ def baseline_params_from_args(args) -> dict:
         "cycles": args.cycles,
         "speed_rate": args.speed_rate,
         "amplitude": args.amplitude,
-        "max_speed": args.max_speed,
+        # In ramp mode max_speed *overrides* the amplitude (it rescales the path
+        # to hit that peak), so --no-max-speed is how you ask for a curve of a
+        # given size and let the speed follow from the duration. Without this
+        # the argument's own default silently discarded --amplitude.
+        "max_speed": None if args.no_max_speed else args.max_speed,
+        "rotation": args.rotation,
         "ramp_up_fraction": args.ramp_up_fraction,
         "ramp_down_fraction": args.ramp_down_fraction,
         **common,
@@ -203,7 +209,14 @@ def main():
     # Lemniscate parameters
     parser.add_argument("--max-speed", type=float, default=2.0,
                         help="Peak speed in m/s (required for lemniscate, optional amplitude override for ramp).")
+    parser.add_argument("--no-max-speed", action="store_true", default=False,
+                        help="Ramp mode: keep --amplitude and let the speed follow from --time.")
     parser.add_argument("--cycles", type=int, default=1, help="Figure-eight cycles (lemniscate modes).")
+    # A lemniscate is twice as long as it is wide, so on an environment that is
+    # taller than it is wide --rotation 1.5708 buys a much bigger figure-8 for
+    # the same speed. Radians, about the path centre.
+    parser.add_argument("--rotation", type=float, default=0.0,
+                        help="Rotate the lemniscate about its center, in radians.")
 
     # Lemniscate ramp parameters
     parser.add_argument("--speed-rate", type=float, default=1.0,

@@ -259,7 +259,11 @@ def test_the_figure_is_written_for_every_shape(experiment):
         "baseline_runs_benchmark.pdf",
         "baseline_runs_circle.pdf",
     ]
-    assert all((paths.visualize_dir / name.rsplit("/", 1)[-1]).is_file() for name in written)
+    # Their own subdirectory: a benchmark set produces one figure per reference,
+    # and half a dozen of those loose in visualize/ buries everything else.
+    figures = paths.visualize_dir / "baseline runs"
+    assert all((figures / name.rsplit("/", 1)[-1]).is_file() for name in written)
+    assert not list(paths.visualize_dir.glob("baseline_runs_*.pdf"))
 
 
 def test_an_experiment_without_baseline_runs_plots_nothing(experiment):

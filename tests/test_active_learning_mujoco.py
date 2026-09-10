@@ -105,6 +105,20 @@ def test_a_second_deployment_appends_instead_of_overwriting(experiment_with_traj
     assert [path.name for path in written] == ["TR01"]
 
 
+def _deployment_placement(exp) -> dict:
+    """The hand-placement spread the simulate-deployment stage draws under.
+
+    It is not run_deployment's own default -- the two are allowed to differ, and
+    a replay under a different spread draws a different placement and so is not
+    a replay of that run at all.
+    """
+    config = exp.config["mujoco_deployment"]
+    return {
+        "start_offset_radius": float(config["start_offset_radius"]),
+        "start_offset_angle": float(config["start_offset_angle"]),
+    }
+
+
 def test_runs_are_chained_and_reproducible(experiment_with_trajectory, capsys):
     """Only the first run is placed by hand; the rest start where the last ended."""
     from wmr_simulator.mujoco_sim.deploy import run_deployment
@@ -119,13 +133,16 @@ def test_runs_are_chained_and_reproducible(experiment_with_trajectory, capsys):
 
     # The second run really did start from the first one's final pose.
     trajectory = _identification_trajectory_jsn(paths)
+    # Same spread the simulate-deployment stage drew under; see the benchmark test.
+    offsets = _deployment_placement(experiment)
     replay = run_deployment(
         paths.robotcfg_cfg, trajectory, paths.data_dir,
-        seed=_deployment_seed(experiment, 1, 0), log_name="REPLAY",
+        seed=_deployment_seed(experiment, 1, 0), log_name="REPLAY", **offsets,
     )
     repeat = run_deployment(
         paths.robotcfg_cfg, trajectory, paths.data_dir,
         seed=_deployment_seed(experiment, 1, 1), start_pose=replay.final_pose, log_name="REPEAT",
+        **offsets,
     )
     assert repeat.log_path.read_bytes() == second.read_bytes()
 
@@ -148,6 +165,7 @@ def test_a_run_that_did_not_come_back_is_placed_by_hand_again(tmp_path, capsys):
     hand_placed = run_deployment(
         paths.robotcfg_cfg, _identification_trajectory_jsn(paths), paths.data_dir,
         seed=_deployment_seed(experiment, 1, 1), log_name="REPLACED",
+        **_deployment_placement(experiment),
     )
     assert hand_placed.log_path.read_bytes() == second.read_bytes()
 

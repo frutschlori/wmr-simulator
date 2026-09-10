@@ -250,7 +250,18 @@ def _load_benchmark_logs(paths, benchmark_dir=None) -> list:
     directory = _benchmark_directory(paths, benchmark_dir)
     if directory is None:
         return []
-    return [log for _, log in load_run_logs(directory)]
+    logs = [log for _, log in load_run_logs(directory)]
+    if logs:
+        return logs
+    # A benchmark *set* keeps one subdirectory per reference, so the runs are one
+    # level further down. The progress point then pools the whole set, which is
+    # what makes it a transfer score rather than a score on one shape -- the
+    # per-shape breakdown is what the baseline-runs figures are for.
+    return [
+        log
+        for shape_dir in sorted(path for path in directory.glob("*") if path.is_dir())
+        for _, log in load_run_logs(shape_dir)
+    ]
 
 
 def _evaluate_iteration(

@@ -126,7 +126,16 @@ def baseline_run_directories(paths) -> dict[str, dict[str, Path]]:
     for variant, name in BENCHMARK_DIRECTORY_NAMES.items():
         directory = paths.data_dir / name
         if _holds_runs(directory):
+            # One reference: the runs sit straight in the variant directory and
+            # the shape is not recoverable from the path, so it is just
+            # "benchmark".
             directories.setdefault(BENCHMARK_SHAPE, {})[variant] = directory
+            continue
+        # A benchmark *set*: one subdirectory per reference, named after it, so
+        # the shape is the directory name and each gets its own figure.
+        for shape_dir in sorted(path for path in directory.glob("*") if path.is_dir()):
+            if _holds_runs(shape_dir):
+                directories.setdefault(shape_dir.name, {})[variant] = shape_dir
 
     for child in sorted(path for path in paths.data_dir.iterdir() if path.is_dir()):
         if child.name in BENCHMARK_DIRECTORY_NAMES.values():
