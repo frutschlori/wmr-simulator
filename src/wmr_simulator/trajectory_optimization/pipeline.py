@@ -21,6 +21,7 @@ from wmr_simulator.trajectory_optimization.constraints import (
     constraint_loss_components_from_reference_states,
     constraint_loss_from_reference_states,
     constraint_weights,
+    min_speeds_for_batch,
     motion_limits_from_robot_config,
 )
 from wmr_simulator.trajectory_optimization.fim import (
@@ -565,11 +566,21 @@ class TrajectoryOptimizationPipeline:
     def default_measurement_variances(self) -> np.ndarray:
         return default_measurement_variances(self.problem.estimator_cfg)
 
-    def motion_limits(self) -> dict[str, jnp.ndarray]:
+    def motion_limits(self, min_speed=None) -> dict[str, jnp.ndarray]:
+        """The bar the constraint term holds the curve under.
+
+        ``min_speed`` overrides the ``v_min`` lower bound for one trajectory. It
+        is an argument rather than part of the config because a batch design
+        deliberately spreads it across the batch -- some trajectories fast, some
+        left free -- so it is per *trajectory*, not per pipeline.
+        """
         robot_cfg = self.problem.robot_cfg
         if self.motion_limit_overrides:
             robot_cfg = {**robot_cfg, **self.motion_limit_overrides}
-        return motion_limits_from_robot_config(robot_cfg)
+        limits = motion_limits_from_robot_config(robot_cfg)
+        if min_speed is not None:
+            limits = {**limits, "v_min": jnp.asarray(min_speed, dtype=jnp.float32)}
+        return limits
 
     def constraint_weights(self, scale: float = 1.0, component_weights: dict | None = None) -> dict[str, jnp.ndarray]:
         return constraint_weights(scale=scale, component_weights=component_weights)
@@ -1057,6 +1068,7 @@ class TrajectoryOptimizationPipeline:
         criterion: str | None = None,
         gains: jnp.ndarray | None = None,
         realizations: Realizations | None = None,
+        min_speed=0.0,
     ) -> jnp.ndarray:
         control_points = self.clamp_control_points(control_points)
         reference_states = self.reference_states_from_control_points(control_points)
@@ -1083,7 +1095,7 @@ class TrajectoryOptimizationPipeline:
             fim_factor=fim_factor,
             reference_states=reference_states,
             dt=self.problem.dt,
-            limits=self.motion_limits(),
+            limits=self.motion_limits(min_speed=min_speed),
             weights=self.constraint_weights(
                 scale=constraint_weight,
                 component_weights=constraint_component_weights,
@@ -1108,6 +1120,7 @@ class TrajectoryOptimizationPipeline:
         constraint_violation_tolerance: float = DEFAULT_CONSTRAINT_VIOLATION_TOLERANCE,
         criterion: str | None = None,
         gains: jnp.ndarray | None = None,
+        min_speed=0.0,
     ) -> dict[str, jnp.ndarray]:
         """The objective's two terms, separately, in the same units it sums them.
 
@@ -1130,7 +1143,7 @@ class TrajectoryOptimizationPipeline:
         constraint_term = constraint_loss_from_reference_states(
             reference_states=reference_states,
             dt=self.problem.dt,
-            limits=self.motion_limits(),
+            limits=self.motion_limits(min_speed=min_speed),
             weights=self.constraint_weights(
                 scale=constraint_weight,
                 component_weights=constraint_component_weights,
@@ -1161,13 +1174,14 @@ class TrajectoryOptimizationPipeline:
         constraint_weight: float = 1.0,
         constraint_component_weights: dict | None = None,
         constraint_smooth_max_beta: float = 20.0,
+        min_speed=0.0,
     ) -> dict[str, jnp.ndarray]:
         control_points = self.clamp_control_points(control_points)
         reference_states = self.reference_states_from_control_points(control_points)
         return constraint_loss_components_from_reference_states(
             reference_states=reference_states,
             dt=self.problem.dt,
-            limits=self.motion_limits(),
+            limits=self.motion_limits(min_speed=min_speed),
             weights=self.constraint_weights(
                 scale=constraint_weight,
                 component_weights=constraint_component_weights,
@@ -1299,6 +1313,8 @@ class TrajectoryOptimizationPipeline:
         constraint_weight: float = 1.0,
         constraint_component_weights: dict | None = None,
         constraint_smooth_max_beta: float = 20.0,
+        min_speed: float = 0.0,
+        min_speed_fraction: float = 0.5,
         verbose: bool = True,
     ):
         # Build the basis before anything is traced; see _spline_plan.
@@ -1315,6 +1331,16 @@ class TrajectoryOptimizationPipeline:
         high = 1.0 + float(constraint_weight_jitter)
         constraint_weight_factors = rng.uniform(low, high, size=num_trajectories)
         constraint_weights_per_trajectory = constraint_weight * constraint_weight_factors
+        min_speeds_per_trajectory = min_speeds_for_batch(
+            num_trajectories, min_speed, min_speed_fraction
+        )
+        if verbose and float(min_speed) > 0.0:
+            constrained = int(np.count_nonzero(min_speeds_per_trajectory))
+            print(
+                f"Minimum mean speed on {constrained}/{num_trajectories} trajectories: "
+                f"{np.round(min_speeds_per_trajectory[min_speeds_per_trajectory > 0.0], 2).tolist()} m/s "
+                f"(the rest are left unconstrained, so the set still covers the slow regime)"
+            )
         batch_frozen_start_offsets = self.batch_frozen_start_offsets(num_trajectories, seed)
 
         if vectorized:
@@ -1357,6 +1383,7 @@ class TrajectoryOptimizationPipeline:
                 constraint_weight=group_constraint_weights,
                 constraint_component_weights=constraint_component_weights,
                 constraint_smooth_max_beta=constraint_smooth_max_beta,
+                min_speed=jnp.asarray(min_speeds_per_trajectory, dtype=jnp.float32),
                 realizations_batch=batch_realizations,
                 verbose=verbose,
             )
@@ -1372,6 +1399,7 @@ class TrajectoryOptimizationPipeline:
             for trajectory_index in range(num_trajectories):
                 optimized_control_points_one = optimized_control_points[trajectory_index]
                 candidate_constraint_weight = float(constraint_weights_per_trajectory[trajectory_index])
+                candidate_min_speed = float(min_speeds_per_trajectory[trajectory_index])
                 # Scored under this trajectory's own offsets, which is what it
                 # was optimized against.
                 candidate_realizations = self.realizations._replace(
@@ -1385,6 +1413,7 @@ class TrajectoryOptimizationPipeline:
                     constraint_component_weights=constraint_component_weights,
                     constraint_smooth_max_beta=constraint_smooth_max_beta,
                     realizations=candidate_realizations,
+                    min_speed=candidate_min_speed,
                 )
                 if not np.isfinite(float(final_loss)):
                     # The trajectory diverged and never recorded a finite point.
@@ -1404,6 +1433,7 @@ class TrajectoryOptimizationPipeline:
                         constraint_component_weights=constraint_component_weights,
                         constraint_smooth_max_beta=constraint_smooth_max_beta,
                         realizations=candidate_realizations,
+                        min_speed=candidate_min_speed,
                         )
                 # Final objective value, comparable across trajectories for
                 # best-candidate selection (they differ only in their constraint
@@ -1415,9 +1445,10 @@ class TrajectoryOptimizationPipeline:
             candidate_start_offsets = []
             histories = []
             final_losses = []
-            for control_points, candidate_constraint_weight in zip(
+            for control_points, candidate_constraint_weight, candidate_min_speed in zip(
                 initial_control_point_candidates,
                 constraint_weights_per_trajectory,
+                min_speeds_per_trajectory,
             ):
                 trajectory_index = len(optimized)
                 if self.start_offset_mode == START_OFFSET_MODE_RANDOM:
@@ -1434,6 +1465,7 @@ class TrajectoryOptimizationPipeline:
                     constraint_weight=float(candidate_constraint_weight),
                     constraint_component_weights=constraint_component_weights,
                     constraint_smooth_max_beta=constraint_smooth_max_beta,
+                    min_speed=float(candidate_min_speed),
                     verbose=verbose,
                 )
                 final_loss = self.fim_loss_from_control_points(

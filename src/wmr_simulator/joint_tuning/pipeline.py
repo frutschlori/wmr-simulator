@@ -128,6 +128,7 @@ from wmr_simulator.trajectory_optimization.start_offsets import (
     static_start_offsets,
 )
 from wmr_simulator.trajectory_optimization.constraints import (
+    DEFAULT_CONSTRAINT_WEIGHTS,
     constraint_loss_components_from_reference_states,
     constraint_loss_from_reference_states,
 )
@@ -151,7 +152,11 @@ from wmr_simulator.trajectory_optimization.pipeline import (
 
 
 GAIN_NAMES = ("kx", "ky", "kth", "kpmotor", "kimotor")
-CONSTRAINT_COMPONENT_NAMES = ("v", "a", "lateral", "omega", "alpha")
+# Derived, not spelled out: the standalone designer sums every component
+# constraints.py defines, and a pinning test compares the two objectives. A
+# hand-written tuple here would silently drop any component added there (the
+# mean-speed lower bound was added exactly that way) and the two would diverge.
+CONSTRAINT_COMPONENT_NAMES = tuple(DEFAULT_CONSTRAINT_WEIGHTS)
 
 # How the two blocks are interleaved. ``alternating`` is the scheme this package
 # exists for; ``sequential`` is the baseline it has to beat -- the same two

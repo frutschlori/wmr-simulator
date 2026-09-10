@@ -8,6 +8,8 @@ DEFAULT_CONSTRAINT_WEIGHTS = {
     "lateral": 1.0,
     "omega": 1.0,
     "alpha": 1.0,
+    # Lower bound on the trajectory's *mean* speed; see min_speed_loss.
+    "v_min": 1.0,
 }
 
 
@@ -31,7 +33,38 @@ def motion_limits_from_robot_config(robot_cfg: dict) -> dict[str, jnp.ndarray]:
         "a_lat_max": jnp.asarray(robot_cfg.get("a_max_lateral", robot_cfg["a_max"]), dtype=jnp.float32),
         "omega_max": jnp.asarray(robot_cfg["omega_max"], dtype=jnp.float32),
         "alpha_max": jnp.asarray(robot_cfg["alpha_max"], dtype=jnp.float32),
+        # Lower bound, 0 = off. Not a property of the robot -- it is a property
+        # of the *experiment being designed*, so the pipeline substitutes a
+        # per-trajectory value; the robot config only supplies a fallback.
+        "v_min": jnp.asarray(robot_cfg.get("v_min", 0.0), dtype=jnp.float32),
     }
+
+
+def min_speeds_for_batch(num_trajectories: int, min_speed: float, fraction: float = 0.5):
+    """Per-trajectory ``v_min`` for a batch design: some fast, some left free.
+
+    A design set exists to be informative *and* to cover the regimes the
+    controller is judged in, and those pull in opposite directions -- an
+    unconstrained FIM buys slow tight wiggles, and a set that is uniformly fast
+    stops covering the slow regime at all. So ``fraction`` of the batch carries
+    a minimum and the rest carries none, and the constrained ones are spread
+    linearly over ``[0.5 * min_speed, min_speed]`` so the fast group is itself a
+    range rather than one operating point.
+
+    ``min_speed <= 0`` or ``fraction <= 0`` returns all zeros, which the
+    constraint reads as "off".
+    """
+    import numpy as np
+
+    speeds = np.zeros(int(num_trajectories), dtype=float)
+    if float(min_speed) <= 0.0 or float(fraction) <= 0.0 or num_trajectories <= 0:
+        return speeds
+    count = int(np.clip(round(float(fraction) * num_trajectories), 1, num_trajectories))
+    if count == 1:
+        speeds[0] = float(min_speed)
+        return speeds
+    speeds[:count] = float(min_speed) * np.linspace(0.5, 1.0, count)
+    return speeds
 
 
 def constraint_weights(scale: float = 1.0, component_weights: dict | None = None) -> dict[str, jnp.ndarray]:
@@ -79,6 +112,33 @@ def constraint_loss(
     return sum(components.values())
 
 
+def min_speed_loss(v_norm: jnp.ndarray, v_min, smooth_max_beta: float = 20.0) -> jnp.ndarray:
+    """Squared fractional shortfall of the *mean* speed below ``v_min``.
+
+    Every other limit here is an upper bound read off the worst sample, but a
+    minimum speed cannot be: under the s-curve time scaling the reference is at
+    rest at both ends by construction, so a worst-sample rule would be violated
+    on every feasible design and would only fight the time scaling. The mean is
+    the statistic that expresses "this trajectory is driven fast" without
+    saying anything about how it starts and stops.
+
+    ``sim_time`` is fixed and not a decision variable, so mean speed is
+    arc length / sim_time: the only way the optimizer can satisfy this is to
+    lay out a *longer* path, which is exactly the intent -- long sustained
+    sweeps instead of the tight slow wiggles an unconstrained FIM prefers.
+    It is a quadratic penalty, not a barrier, so an infeasible ``v_min`` (one
+    that would need more arc than the environment box holds) trades off against
+    the FIM rather than breaking the run.
+
+    ``v_min <= 0`` disables it and returns exactly 0, so a design that does not
+    ask for a minimum speed is bit-identical to one from before this existed.
+    """
+    v_min = jnp.asarray(v_min, dtype=v_norm.dtype)
+    shortfall = 1.0 - jnp.mean(v_norm) / jnp.maximum(v_min, 1e-6)
+    loss = smooth_positive_max(jnp.reshape(shortfall, (1,)), beta=smooth_max_beta) ** 2
+    return jnp.where(v_min > 0.0, loss, jnp.zeros_like(loss))
+
+
 def constraint_loss_components(
     v: jnp.ndarray,
     a: jnp.ndarray,
@@ -110,6 +170,8 @@ def constraint_loss_components(
         "lateral": weights["lateral"] * lateral_loss,
         "omega": weights["omega"] * omega_loss,
         "alpha": weights["alpha"] * alpha_loss,
+        "v_min": weights["v_min"]
+        * min_speed_loss(v_norm, limits.get("v_min", 0.0), smooth_max_beta=smooth_max_beta),
     }
 
 

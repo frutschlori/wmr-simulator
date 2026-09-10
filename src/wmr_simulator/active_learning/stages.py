@@ -23,9 +23,11 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import hashlib
 import io
 import math
 import shutil
+import statistics
 import tempfile
 from pathlib import Path
 
@@ -392,6 +394,8 @@ def stage_plan_tuning_trajectories(experiment: Experiment, iteration: int) -> li
             window_length=config["window_length"],
             constraint_component_weights=constraint_component_weights,
             constraint_smooth_max_beta=constraint_smooth_max_beta,
+            min_speed=float(config["min_speed"]),
+            min_speed_fraction=float(config["min_speed_fraction"]),
             verbose=False,
         )
         final_losses = np.asarray(pipeline.batch_final_losses, dtype=float)
@@ -624,40 +628,56 @@ def stage_run_benchmark(
     config = experiment.config["benchmark"]
     count = int(config["num_runs"] if num_runs is None else num_runs)
 
-    trajectory = _benchmark_reference(paths, config)
-    reference_start = _reference_start_pose(trajectory)
-
+    sources = _benchmark_sources(config)
     # Ground truth the logs do not carry, kept out of data/ so nothing
     # downstream can read the hidden plant through it (mujoco_sim.deploy). One
-    # variant's recording is left alone when the other one is added later.
+    # variant's recording is left alone when the other one is added later, and
+    # so is one shape's when another is added to the set.
     report = load_yaml(paths.benchmark_result) if paths.benchmark_result.is_file() else {}
-    report["trajectory"] = str(trajectory)
     report["divergence_radius"] = float(config["divergence_radius"])
-    report.setdefault("variants", {})
+    report.setdefault("trajectories", {})
+
+    if len(sources) > 1:
+        print(f"Benchmark set: {len(sources)} held-out reference(s) -- {', '.join(p.stem for p in sources)}")
 
     written: list[Path] = []
     recorded_any = False
-    for variant, robot_config_source, data_dir in _benchmark_variant_specs(paths):
-        existing = _run_log_paths(data_dir)
-        if existing:
-            print(f"Benchmark ({variant}) already recorded ({len(existing)} run(s) in {data_dir}); skipping.")
-            written.extend(existing)
-            continue
-        robot_config = _staged_benchmark_config(paths, variant, robot_config_source)
-        variant_written, runs = _record_benchmark_runs(
-            experiment, iteration, variant, robot_config, trajectory, data_dir, count, config, reference_start
-        )
-        written.extend(variant_written)
-        report["variants"][variant] = {
-            "robot_config": robot_config_source.name,
-            "data": str(data_dir.relative_to(paths.root)),
-            "num_diverged": sum(1 for run in runs if run["diverged"]),
-            "mean_tracking_rmse": (
-                float(sum(run["tracking_rmse"] for run in runs) / len(runs)) if runs else None
-            ),
-            "runs": runs,
-        }
-        recorded_any = True
+    for source in sources:
+        shape = source.stem
+        trajectory = _benchmark_reference(paths, config, source)
+        reference_start = _reference_start_pose(trajectory)
+        entry = report["trajectories"].setdefault(shape, {})
+        entry["trajectory"] = str(trajectory)
+        entry.setdefault("variants", {})
+        for variant, robot_config_source, data_dir in _benchmark_variant_specs(paths, shape, len(sources)):
+            existing = _run_log_paths(data_dir)
+            if existing:
+                named = f" {shape}" if len(sources) > 1 else ""
+                print(
+                    f"Benchmark{named} ({variant}) already recorded "
+                    f"({len(existing)} run(s) in {data_dir}); skipping."
+                )
+                written.extend(existing)
+                continue
+            robot_config = _staged_benchmark_config(paths, variant, robot_config_source)
+            variant_written, runs = _record_benchmark_runs(
+                experiment, iteration, variant, robot_config, trajectory, data_dir, count, config,
+                reference_start, shape=shape if len(sources) > 1 else None,
+            )
+            written.extend(variant_written)
+            entry["variants"][variant] = {
+                "robot_config": robot_config_source.name,
+                "data": str(data_dir.relative_to(paths.root)),
+                "num_diverged": sum(1 for run in runs if run["diverged"]),
+                "mean_tracking_rmse": (
+                    float(sum(run["tracking_rmse"] for run in runs) / len(runs)) if runs else None
+                ),
+                "median_tracking_rmse": (
+                    float(statistics.median(run["tracking_rmse"] for run in runs)) if runs else None
+                ),
+                "runs": runs,
+            }
+            recorded_any = True
 
     if recorded_any:
         save_yaml(paths.benchmark_result, report)
@@ -675,6 +695,7 @@ def _record_benchmark_runs(
     count: int,
     config: dict,
     reference_start: tuple[float, float, float],
+    shape: str | None = None,
 ) -> tuple[list[Path], list[dict]]:
     """Drive ``count`` chained runs of ``trajectory`` under one controller."""
     from wmr_simulator.mujoco_sim.deploy import run_deployment
@@ -692,11 +713,15 @@ def _record_benchmark_runs(
         f"Benchmark ({variant}): {count} consecutive run(s) of {trajectory.name} "
         f"under {robot_config.name}{network} -> {data_dir}"
     )
+    # Distinct per shape, so two references in a set never draw the same hand
+    # placement -- but still paired across variants, which is what makes the two
+    # controllers a like-for-like comparison.
+    shape_offset = _benchmark_shape_offset(shape)
     written: list[Path] = []
     runs: list[dict] = []
     start_pose = None  # the first run is placed by hand
     for index in range(count):
-        seed = _benchmark_seed(experiment, iteration, index)
+        seed = _benchmark_seed(experiment, iteration, index) + shape_offset
         result = run_deployment(
             robot_config,
             trajectory,
@@ -738,7 +763,9 @@ def _record_benchmark_runs(
     return written, runs
 
 
-def _benchmark_variant_specs(paths: IterationPaths) -> list[tuple[str, Path, Path]]:
+def _benchmark_variant_specs(
+    paths: IterationPaths, shape: str | None = None, num_shapes: int = 1
+) -> list[tuple[str, Path, Path]]:
     """``(variant, robot config, data dir)`` per controller this iteration ships.
 
     Always a static-gain set, in ``data/benchmark_static/``. **Iteration 1's
@@ -766,11 +793,20 @@ def _benchmark_variant_specs(paths: IterationPaths) -> list[tuple[str, Path, Pat
     network leaves them), and driving them bare would benchmark an artifact
     instead of the alternative actually on offer.
     """
+    # A set of references gets one subdirectory per shape under each variant's
+    # directory, because two shapes are not comparable and the figures group by
+    # shape. A single reference keeps writing straight into the variant
+    # directory, so every recording made before the set existed still reads.
+    def data_dir(base: Path) -> Path:
+        return base if shape is None or num_shapes <= 1 else base / shape
+
     if not paths.robotcfg_static_cfg.is_file():
-        return [(baseline_runs.STATIC_VARIANT, paths.robotcfg_cfg, paths.benchmark_static_data_dir)]
+        return [
+            (baseline_runs.STATIC_VARIANT, paths.robotcfg_cfg, data_dir(paths.benchmark_static_data_dir))
+        ]
     return [
-        (baseline_runs.STATIC_VARIANT, paths.robotcfg_static_cfg, paths.benchmark_static_data_dir),
-        (baseline_runs.PARAMETRIZED_VARIANT, paths.robotcfg_cfg, paths.benchmark_data_dir),
+        (baseline_runs.STATIC_VARIANT, paths.robotcfg_static_cfg, data_dir(paths.benchmark_static_data_dir)),
+        (baseline_runs.PARAMETRIZED_VARIANT, paths.robotcfg_cfg, data_dir(paths.benchmark_data_dir)),
     ]
 
 
@@ -792,7 +828,62 @@ def _staged_benchmark_config(paths: IterationPaths, variant: str, source: Path) 
     return Path(shutil.copy2(source, staged_dir / paths.robotcfg_cfg.name))
 
 
-def _benchmark_reference(paths: IterationPaths, config: dict) -> Path:
+def _benchmark_set_description(config: dict) -> str:
+    """How the status line names the benchmark: one reference, or the set."""
+    try:
+        sources = _benchmark_sources(config)
+    except FileNotFoundError:
+        return f"{config['trajectory']} (missing)"
+    if len(sources) == 1:
+        return str(sources[0])
+    return f"each of {len(sources)} held-out references in {config['trajectory']}"
+
+
+def _benchmark_sources(config: dict) -> list[Path]:
+    """The reference(s) ``benchmark.trajectory`` names, in a stable order.
+
+    A *directory* is a held-out cross-validation set: every ``.JSN``/``.pkl`` in
+    it is driven, each under both controller variants, so one iteration's
+    benchmark says how the controller transfers across several unseen shapes
+    rather than one. A single file keeps the previous behaviour exactly. Editing
+    the set is then adding or removing a file, which is the point -- nothing in
+    here enumerates shapes.
+    """
+    source = Path(config["trajectory"])
+    if source.is_file():
+        return [source]
+    if source.is_dir():
+        references = sorted(
+            path
+            for path in source.iterdir()
+            if path.is_file() and path.suffix.lower() in (".jsn", ".pkl")
+            # A bridged copy is generated from its own reference below; driving
+            # it as a set member too would benchmark the same shape twice.
+            and not path.stem.endswith("_bridge")
+        )
+        if not references:
+            raise FileNotFoundError(
+                f"No .JSN or .pkl references in benchmark trajectory directory {source}."
+            )
+        # The stem names the shape -- the data subdirectory, the results key and
+        # the figure -- so two files sharing one would silently collapse into a
+        # single shape, and the second would be skipped as "already recorded".
+        duplicates = sorted(
+            {path.stem for path in references if [p.stem for p in references].count(path.stem) > 1}
+        )
+        if duplicates:
+            raise ValueError(
+                f"Benchmark trajectory directory {source} has more than one file per shape: "
+                f"{duplicates}. Each reference names its own shape, so keep one file per shape."
+            )
+        return references
+    raise FileNotFoundError(
+        f"Benchmark trajectory not found: {source} (benchmark.trajectory in experiment.yaml). "
+        "Point it at a reference file, or at a directory of them for a cross-validation set."
+    )
+
+
+def _benchmark_reference(paths: IterationPaths, config: dict, source: Path | None = None) -> Path:
     """The baseline JSN as this iteration drives it, copied into ``benchmark/``.
 
     Bridged when the reference does not close on itself, since chaining a
@@ -800,7 +891,7 @@ def _benchmark_reference(paths: IterationPaths, config: dict) -> Path:
     the start pose. The copy is per iteration so the directory records what was
     actually driven, even if ``benchmark.trajectory`` is edited later.
     """
-    source = Path(config["trajectory"])
+    source = Path(config["trajectory"]) if source is None else Path(source)
     if not source.is_file():
         raise FileNotFoundError(
             f"Benchmark trajectory not found: {source} (benchmark.trajectory in experiment.yaml)."
@@ -851,14 +942,35 @@ def _run_log_paths(directory: Path) -> list[Path]:
     return sorted(path for path in directory.glob("TR*") if path.is_file())
 
 
-def _benchmark_recorded(paths: IterationPaths) -> bool:
+def _benchmark_recorded(paths: IterationPaths, config: dict) -> bool:
     """Whether every controller variant of this iteration has its runs.
 
     Both sets are needed for the comparison, so an iteration that recorded only
     the deployed controller is not done -- rerunning the stage adds the missing
     variant without touching the one it has.
     """
-    return all(_run_log_paths(data_dir) for _, _, data_dir in _benchmark_variant_specs(paths))
+    try:
+        sources = _benchmark_sources(config)
+    except FileNotFoundError:
+        return False
+    return all(
+        _run_log_paths(data_dir)
+        for source in sources
+        for _, _, data_dir in _benchmark_variant_specs(paths, source.stem, len(sources))
+    )
+
+
+def _benchmark_shape_offset(shape: str | None) -> int:
+    """A stable per-shape seed offset, so two references in the set never draw
+    the same hand placement while each stays reproducible across reruns.
+
+    Zero for a single-reference benchmark, which keeps every seed such an
+    experiment has ever used exactly where it was.
+    """
+    if not shape:
+        return 0
+    digest = hashlib.sha256(shape.encode("utf-8")).digest()
+    return 1 + int.from_bytes(digest[:4], "big") % 100_000
 
 
 def _benchmark_seed(experiment: Experiment, iteration: int, index: int) -> int:
@@ -1791,11 +1903,16 @@ def _plot_baseline_runs(experiment: Experiment, paths: IterationPaths) -> list[s
         collected = collect_baseline_runs(experiment)
         if not collected:
             return written
-        for shape, records in collected.items():
+        # Their own subdirectory: a benchmark *set* produces one figure per
+        # reference, and half a dozen of them alongside everything else the
+        # iteration writes makes visualize/ unreadable.
+        output_dir = paths.visualize_dir / "baseline runs"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        for shape, records in sorted(collected.items()):
             plot_path = plot_baseline_runs(
                 records,
                 variant_panels(records),
-                paths.visualize_dir / f"baseline_runs_{shape}.pdf",
+                output_dir / f"baseline_runs_{shape}.pdf",
                 shape=shape,
             )
             written.append(plot_path)
@@ -1844,7 +1961,7 @@ def iteration_status(experiment: Experiment, iteration: int) -> dict[str, bool]:
         "train-residual": paths.residual_model.is_file() or not experiment.config["use_residual_model"],
         "plan-tuning-trajectories": any(paths.tuning_trajectories_dir.glob("*.pkl")),
         "tune-gains": paths.gains_result.is_file(),
-        "benchmark": _benchmark_recorded(paths),
+        "benchmark": _benchmark_recorded(paths, experiment.config["benchmark"]),
     }
 
 
@@ -1868,7 +1985,7 @@ def stage_status(experiment: Experiment) -> None:
     )
     print(
         f"  benchmark:               {int(experiment.config['benchmark']['num_runs'])} run(s) of "
-        f"{experiment.config['benchmark']['trajectory']} per iteration"
+        f"{_benchmark_set_description(experiment.config['benchmark'])} per iteration"
     )
     print(
         f"  iterations:              {len(experiment.iteration_indices())} of "

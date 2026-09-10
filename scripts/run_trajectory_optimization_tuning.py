@@ -51,6 +51,14 @@ def main():
     # Settings for multiple trajectory synthesis
     parser.add_argument("--num-trajectories", type=int, default=10)
     parser.add_argument("--constraint-weight-jitter", type=float, default=0.4) # factor for diverse constraints
+    # Lower bound on a design's *mean* speed [m/s], 0 disables. The FIM alone
+    # buys slow tight wiggles well below the regime the benchmark judges the
+    # controller in; this is what pushes some of the batch into it. Only
+    # --min-speed-fraction of the trajectories carry it, so the set keeps
+    # covering the slow regime too. Kept in step with the tuning_trajectories
+    # block of the active-learning experiment config by hand.
+    parser.add_argument("--min-speed", type=float, default=1.0)
+    parser.add_argument("--min-speed-fraction", type=float, default=0.5)
     parser.add_argument("--vectorize-trajectories", action="store_true", default=True)
     # Path settings
     parser.add_argument("--time-scaling", choices=["s-curve", "linear"], default="s-curve")
@@ -223,6 +231,8 @@ def main():
                 constraint_weight=args.constraint_weight,
                 constraint_component_weights=constraint_component_weights,
                 constraint_smooth_max_beta=args.constraint_smooth_max_beta,
+                min_speed=args.min_speed,
+                min_speed_fraction=args.min_speed_fraction,
                 verbose=False,
             )
             final_losses = np.asarray(pipeline.batch_final_losses, dtype=float)

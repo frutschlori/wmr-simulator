@@ -123,9 +123,18 @@ def test_ground_truth_stays_out_of_the_data_directory(experiment):
     import yaml
 
     report = yaml.safe_load(paths.benchmark_result.read_text())
-    static = report["variants"]["static"]
+    static = report["trajectories"]["benchmark_circle"]["variants"]["static"]
     assert len(static["runs"]) == 2
     assert {"tracking_rmse", "diverged", "distance_to_start"} <= set(static["runs"][0])
+
+
+def _benchmark_placement(exp) -> dict:
+    """The hand-placement spread the benchmark stage draws under."""
+    config = exp.config["benchmark"]
+    return {
+        "start_offset_radius": float(config["start_offset_radius"]),
+        "start_offset_angle": float(config["start_offset_angle"]),
+    }
 
 
 def test_a_run_that_came_back_is_where_the_next_one_starts(experiment):
@@ -138,13 +147,18 @@ def test_a_run_that_came_back_is_where_the_next_one_starts(experiment):
 
     first, second = stage_run_benchmark(exp, 1)
 
+    # The hand placement is drawn from the *experiment's* offsets, not
+    # run_deployment's own defaults -- a replay under a different spread is not
+    # a replay of this run, and the two defaults are allowed to differ.
+    offsets = _benchmark_placement(exp)
     replay = run_deployment(
         paths.robotcfg_cfg, trajectory, paths.benchmark_static_data_dir,
-        seed=_benchmark_seed(exp, 1, 0), log_name="REPLAY",
+        seed=_benchmark_seed(exp, 1, 0), log_name="REPLAY", **offsets,
     )
     repeat = run_deployment(
         paths.robotcfg_cfg, trajectory, paths.benchmark_static_data_dir,
         seed=_benchmark_seed(exp, 1, 1), start_pose=replay.final_pose, log_name="REPEAT",
+        **offsets,
     )
     assert replay.log_path.read_bytes() == first.read_bytes()
     assert repeat.log_path.read_bytes() == second.read_bytes()
@@ -167,7 +181,7 @@ def test_a_run_that_diverged_is_placed_by_hand_again(experiment, capsys):
 
     hand_placed = run_deployment(
         paths.robotcfg_cfg, trajectory, paths.benchmark_static_data_dir,
-        seed=_benchmark_seed(exp, 1, 1), log_name="REPLACED",
+        seed=_benchmark_seed(exp, 1, 1), log_name="REPLACED", **_benchmark_placement(exp),
     )
     assert hand_placed.log_path.read_bytes() == second.read_bytes()
 
@@ -324,8 +338,8 @@ def test_both_controllers_are_driven_when_the_iteration_ships_two(experiment):
     import yaml
 
     report = yaml.safe_load(paths.benchmark_result.read_text())
-    assert set(report["variants"]) == {"parametrized", "static"}
-    assert report["variants"]["static"]["robot_config"] == "ROBOTCFG_static.CFG"
+    assert set(report["trajectories"]["benchmark_circle"]["variants"]) == {"parametrized", "static"}
+    assert report["trajectories"]["benchmark_circle"]["variants"]["static"]["robot_config"] == "ROBOTCFG_static.CFG"
 
 
 def test_the_static_variant_is_driven_without_the_deployed_gain_network(experiment):
@@ -361,12 +375,12 @@ def test_the_two_variants_share_their_seeds(experiment):
     report = yaml.safe_load(paths.benchmark_result.read_text())
     seeds = {
         variant: [run["seed"] for run in payload["runs"]]
-        for variant, payload in report["variants"].items()
+        for variant, payload in report["trajectories"]["benchmark_circle"]["variants"].items()
     }
     assert seeds["static"] == seeds["parametrized"]
     assert (
-        report["variants"]["static"]["runs"][0]["start_offset"]
-        == report["variants"]["parametrized"]["runs"][0]["start_offset"]
+        report["trajectories"]["benchmark_circle"]["variants"]["static"]["runs"][0]["start_offset"]
+        == report["trajectories"]["benchmark_circle"]["variants"]["parametrized"]["runs"][0]["start_offset"]
     )
 
 
@@ -410,3 +424,57 @@ def test_an_iteration_is_not_benchmarked_until_both_variants_are_recorded(experi
 
     stage_run_benchmark(exp, 1)
     assert iteration_status(exp, 1)["benchmark"]
+
+
+def test_a_directory_of_references_is_driven_as_a_cross_validation_set(experiment, tmp_path):
+    """``benchmark.trajectory`` pointing at a directory drives every reference in
+    it, each under both controller variants, into its own data subdirectory."""
+    reference_dir = tmp_path / "benchmark_set"
+    reference_dir.mkdir()
+    write_circle_jsn(reference_dir / "small_circle.JSN")
+    write_circle_jsn(reference_dir / "other_circle.JSN")
+
+    exp = experiment(trajectory=str(reference_dir))
+    paths = exp.paths(1)
+    stage_run_benchmark(exp, 1)
+
+    for shape in ("small_circle", "other_circle"):
+        runs = sorted(path.name for path in (paths.benchmark_static_data_dir / shape).iterdir())
+        assert runs == ["TR00", "TR01"], f"{shape} recorded {runs}"
+
+    import yaml
+
+    report = yaml.safe_load(paths.benchmark_result.read_text())
+    assert set(report["trajectories"]) == {"small_circle", "other_circle"}
+    for shape, entry in report["trajectories"].items():
+        assert len(entry["variants"]["static"]["runs"]) == 2, shape
+        assert entry["variants"]["static"]["median_tracking_rmse"] is not None
+
+
+def test_two_references_in_a_set_do_not_share_a_hand_placement(experiment, tmp_path):
+    """Each shape gets its own placement draw -- two identical references must
+    not produce byte-identical runs, or the set would be one shape recorded
+    twice. They stay paired *across variants*, which is the comparison."""
+    reference_dir = tmp_path / "benchmark_set"
+    reference_dir.mkdir()
+    write_circle_jsn(reference_dir / "shape_a.JSN")
+    write_circle_jsn(reference_dir / "shape_b.JSN")
+
+    exp = experiment(trajectory=str(reference_dir))
+    paths = exp.paths(1)
+    stage_run_benchmark(exp, 1)
+
+    a = (paths.benchmark_static_data_dir / "shape_a" / "TR00").read_bytes()
+    b = (paths.benchmark_static_data_dir / "shape_b" / "TR00").read_bytes()
+    assert a != b
+
+
+def test_a_single_reference_still_records_where_it_always_did(experiment):
+    """The set is a generalization, not a migration: one reference keeps writing
+    straight into the variant directory, so recordings made before the set
+    existed still read."""
+    exp = experiment()
+    paths = exp.paths(1)
+    stage_run_benchmark(exp, 1)
+
+    assert sorted(path.name for path in paths.benchmark_static_data_dir.iterdir()) == ["TR00", "TR01"]

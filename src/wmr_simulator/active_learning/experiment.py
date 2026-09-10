@@ -121,7 +121,13 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
     # mujoco_deployment.enabled (or `run --simulate-deployment`); on the real
     # robot the equivalent runs are recorded by hand into data/<name>/.
     "benchmark": {
-        "trajectory": "trajectory_exports/baselines/circle_fast.JSN",
+        # A file drives one reference; a *directory* drives every .JSN/.pkl in
+        # it, each under both controller variants, which is what makes the
+        # benchmark a held-out cross-validation set rather than a score on one
+        # shape. Editing the set is adding or removing a file -- nothing in the
+        # code enumerates shapes. Runs land in data/benchmark[_static]/<shape>/
+        # and each shape gets its own figure under visualize/baseline runs/.
+        "trajectory": "trajectory_exports/benchmark_set",
         # Consecutive runs per iteration, chained the way the robot repeats a
         # reference: only the first is placed by hand.
         "num_runs": 5,
@@ -232,9 +238,37 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         "num_trajectories": 15,
         "opt_steps": 75,
         "learning_rate": 1e-2,
-        "num_control_points": 7,
+        # 5, not 7: see the min_speed note below -- a stiffer curve is what makes
+        # the faster designs trackable. Also the bspline default (curves.py).
+        "num_control_points": 5,
         "time_scaling": "s-curve",
         "constraint_weight_jitter": 0.4,
+        # Lower bound on a designed trajectory's *mean* speed [m/s], and the
+        # share of the batch that carries one. The FIM on its own buys slow,
+        # tight, high-yaw-rate wiggles: measured over three iterations' designs,
+        # median |v| 0.36-0.43 m/s and max |alpha| 12-20 rad/s^2, against the
+        # circle_fast benchmark's 1.33 m/s and 1.45 rad/s^2. So the tuner was
+        # never scored in the regime the benchmark judges it in, and the sim's
+        # own optimum on those designs (kth ~ 12) is one it *also* calls
+        # divergent when rolled out on circle_fast. 1.0 m/s is roughly
+        # circle_medium's regime -- inside the friction limit, unlike
+        # circle_fast, which the robot visibly burns on. Only `fraction` of the
+        # batch is constrained (and those are spread over half the bound to the
+        # bound), so the set still covers the slow regime.
+        # Measured 2026-09-09 over 4-trajectory designs at 250 steps, mean |v|
+        # per trajectory against max |alpha| as a fraction of alpha_max (designs
+        # over ~1.03x alpha_max do not track -- see the divergence entry in
+        # CLAUDE.md):
+        #   7 CPs, no minimum   0.38-0.78 m/s, alpha up to 1.41x   <- today
+        #   7 CPs, min_speed 0.9  0.59-0.83, alpha up to 1.14x
+        #   5 CPs, min_speed 1.1  0.62-0.87, alpha 0.69-0.80x      <- this
+        # The two knobs work together: a stiffer curve (fewer control points)
+        # is what lets the design go faster *and* stay inside the angular
+        # acceleration limit, because a faster path at the same wiggle needs
+        # more alpha than the robot has. Raising min_speed at 7 control points
+        # buys speed by spending alpha budget the closed loop cannot pay.
+        "min_speed": 1.1,
+        "min_speed_fraction": 0.5,
         "window_length": 50,
         "kimotor_fim_scale": 5.0,
         "start_offset_mode": "optimize",
@@ -244,6 +278,11 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
             "lateral": 1.0,
             "omega": 1.0,
             "alpha": 0.5,
+            # Below the upper limits deliberately: those are physical (the robot
+            # cannot do it), the minimum speed is only a preference about which
+            # regime to design in, and a preference must never outvote a limit.
+            # At 1.0 the designs ran to 1.5x alpha_max.
+            "v_min": 0.5,
         },
         # Sharpness of the smooth max in the constraint penalty. It is
         # logsumexp(beta*g)/beta, which overshoots the true max by up to

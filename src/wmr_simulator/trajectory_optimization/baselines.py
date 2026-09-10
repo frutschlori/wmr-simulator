@@ -88,6 +88,20 @@ def _lemniscate_path(u: np.ndarray, amplitude: float) -> tuple[np.ndarray, np.nd
     return position, dpos_du, d2pos_du2
 
 
+def _place(position, dpos, d2pos, center, rotation: float = 0.0):
+    """Rotate a path about the origin, then translate it to ``center``.
+
+    Rotation is applied to the derivatives as well, so headings, velocities and
+    accelerations come out consistent with the rotated path -- the reference is
+    assembled from these, not re-differentiated.
+    """
+    if rotation:
+        cos_r, sin_r = np.cos(rotation), np.sin(rotation)
+        rotate = np.array([[cos_r, -sin_r], [sin_r, cos_r]], dtype=float)
+        position, dpos, d2pos = position @ rotate.T, dpos @ rotate.T, d2pos @ rotate.T
+    return position + np.asarray(center, dtype=float)[None, :], dpos, d2pos
+
+
 def circle_reference(
     radius: float,
     total_time: float,
@@ -118,7 +132,15 @@ def lemniscate_reference(
     dt: float,
     cycles: int = 1,
     center: tuple[float, float] = (0.0, 0.0),
+    rotation: float = 0.0,
 ) -> np.ndarray:
+    """A Gerono lemniscate, optionally rotated about its centre.
+
+    The curve spans ``2a`` along its own x axis but only ``a`` along y, so an
+    environment taller than it is wide fits a far larger figure-8 at
+    ``rotation = pi/2`` than at 0 -- on the shipped 2.6 x 4.6 m box that is a
+    ~4 m long curve against the ~1.9 m the unrotated form is capped at.
+    """
     if max_speed <= 0.0:
         raise ValueError("max_speed must be positive.")
     if cycles < 1:
@@ -137,7 +159,7 @@ def lemniscate_reference(
     amplitude = max_speed / peak_unit_speed
 
     position, dpos_du, d2pos_du2 = _lemniscate_path(u, amplitude)
-    position = position + np.asarray(center, dtype=float)[None, :]
+    position, dpos_du, d2pos_du2 = _place(position, dpos_du, d2pos_du2, center, rotation)
     return _assemble_reference(position, dpos_du, d2pos_du2, u_dot, u_ddot)
 
 
@@ -201,6 +223,7 @@ def lemniscate_ramp_reference(
     ramp_up_fraction: float = 0.2,
     ramp_down_fraction: float = 0.1,
     center: tuple[float, float] = (0.0, 0.0),
+    rotation: float = 0.0,
 ) -> np.ndarray:
     """Figure-eight whose phase rate grows by speed_rate per completed cycle.
 
@@ -255,7 +278,7 @@ def lemniscate_ramp_reference(
         amplitude = max_speed / peak_unit_speed
 
     position, dpos_du, d2pos_du2 = _lemniscate_path(u, amplitude)
-    position = position + np.asarray(center, dtype=float)[None, :]
+    position, dpos_du, d2pos_du2 = _place(position, dpos_du, d2pos_du2, center, rotation)
     return _assemble_reference(position, dpos_du, d2pos_du2, u_dot, u_ddot)
 
 
