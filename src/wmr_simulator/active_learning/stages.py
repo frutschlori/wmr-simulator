@@ -26,9 +26,13 @@ import copy
 import hashlib
 import io
 import math
+import multiprocessing
+import os
 import shutil
 import statistics
+import sys
 import tempfile
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 from wmr_simulator.active_learning import baseline_runs
@@ -317,7 +321,7 @@ def stage_plan_tuning_trajectories(experiment: Experiment, iteration: int) -> li
     paths = experiment.paths(iteration)
     paths.create_directories()
     config = experiment.config["tuning_trajectories"]
-    problem_path = _identified_problem(paths)
+    problem_path = _tuning_problem(paths, config)
 
     if not experiment.config["optimize_trajectories"]:
         baseline_dir = experiment.config.get("baseline_tuning_trajectories_dir")
@@ -352,6 +356,9 @@ def stage_plan_tuning_trajectories(experiment: Experiment, iteration: int) -> li
     design_gains = _static_design_gains(paths)
     if design_gains is not None:
         print(f"Designing at the static-tune gains: {design_gains}")
+    motion_limits = {name: float(value) for name, value in config.get("motion_limits", {}).items()}
+    if motion_limits:
+        print(f"Designing inside overridden motion limits: {motion_limits}")
     pipeline = TrajectoryOptimizationPipeline(
         str(problem_path),
         time_scaling=config["time_scaling"],
@@ -363,6 +370,7 @@ def stage_plan_tuning_trajectories(experiment: Experiment, iteration: int) -> li
         # static ones, not the parametrized run's base gains.
         controller_gains=design_gains,
         residual_model=residual_model,
+        motion_limits=motion_limits or None,
     )
     constraint_component_weights = {
         name: float(value) for name, value in config["constraint_component_weights"].items()
@@ -640,8 +648,12 @@ def stage_run_benchmark(
     if len(sources) > 1:
         print(f"Benchmark set: {len(sources)} held-out reference(s) -- {', '.join(p.stem for p in sources)}")
 
+    # Two passes: decide every chain first (which also writes the bridged
+    # references and stages the configs -- both parent-only), then drive them.
+    # The chains share nothing, so the second pass can run several at once.
     written: list[Path] = []
-    recorded_any = False
+    jobs: list[dict] = []
+    job_targets: list[tuple[dict, str, Path, Path]] = []
     for source in sources:
         shape = source.stem
         trajectory = _benchmark_reference(paths, config, source)
@@ -660,24 +672,32 @@ def stage_run_benchmark(
                 written.extend(existing)
                 continue
             robot_config = _staged_benchmark_config(paths, variant, robot_config_source)
-            variant_written, runs = _record_benchmark_runs(
-                experiment, iteration, variant, robot_config, trajectory, data_dir, count, config,
-                reference_start, shape=shape if len(sources) > 1 else None,
+            jobs.append(
+                _benchmark_chain_job(
+                    experiment, iteration, variant, robot_config, trajectory, data_dir, count,
+                    config, reference_start, shape=shape if len(sources) > 1 else None,
+                )
             )
-            written.extend(variant_written)
-            entry["variants"][variant] = {
-                "robot_config": robot_config_source.name,
-                "data": str(data_dir.relative_to(paths.root)),
-                "num_diverged": sum(1 for run in runs if run["diverged"]),
-                "mean_tracking_rmse": (
-                    float(sum(run["tracking_rmse"] for run in runs) / len(runs)) if runs else None
-                ),
-                "median_tracking_rmse": (
-                    float(statistics.median(run["tracking_rmse"] for run in runs)) if runs else None
-                ),
-                "runs": runs,
-            }
-            recorded_any = True
+            job_targets.append((entry, variant, robot_config_source, data_dir))
+
+    results = _run_benchmark_chains(jobs, config.get("max_workers", 0)) if jobs else []
+    for (entry, variant, robot_config_source, data_dir), (chain_written, runs, lines) in zip(job_targets, results):
+        for line in lines:
+            print(line)
+        written.extend(chain_written)
+        entry["variants"][variant] = {
+            "robot_config": robot_config_source.name,
+            "data": str(data_dir.relative_to(paths.root)),
+            "num_diverged": sum(1 for run in runs if run["diverged"]),
+            "mean_tracking_rmse": (
+                float(sum(run["tracking_rmse"] for run in runs) / len(runs)) if runs else None
+            ),
+            "median_tracking_rmse": (
+                float(statistics.median(run["tracking_rmse"] for run in runs)) if runs else None
+            ),
+            "runs": runs,
+        }
+    recorded_any = bool(jobs)
 
     if recorded_any:
         save_yaml(paths.benchmark_result, report)
@@ -698,10 +718,76 @@ def _record_benchmark_runs(
     shape: str | None = None,
 ) -> tuple[list[Path], list[dict]]:
     """Drive ``count`` chained runs of ``trajectory`` under one controller."""
+    written, runs, lines = _drive_benchmark_chain(
+        _benchmark_chain_job(
+            experiment, iteration, variant, robot_config, trajectory, data_dir, count, config,
+            reference_start, shape,
+        )
+    )
+    for line in lines:
+        print(line)
+    return written, runs
+
+
+def _benchmark_chain_job(
+    experiment: Experiment,
+    iteration: int,
+    variant: str,
+    robot_config: Path,
+    trajectory: Path,
+    data_dir: Path,
+    count: int,
+    config: dict,
+    reference_start: tuple[float, float, float],
+    shape: str | None = None,
+) -> dict:
+    """Everything one chain needs, as plain data.
+
+    The seeds are resolved here rather than inside the chain so the job carries
+    no ``Experiment``: chains are driven in worker *processes*, and the seeds
+    are what make a run reproducible, so they must be decided in one place
+    whether or not the pool is used.
+    """
+    # Distinct per shape, so two references in a set never draw the same hand
+    # placement -- but still paired across variants, which is what makes the two
+    # controllers a like-for-like comparison.
+    shape_offset = _benchmark_shape_offset(shape)
+    return {
+        "variant": variant,
+        "robot_config": Path(robot_config),
+        "trajectory": Path(trajectory),
+        "data_dir": Path(data_dir),
+        "reference_start": tuple(float(value) for value in reference_start),
+        "divergence_radius": float(config["divergence_radius"]),
+        "start_offset_radius": float(config["start_offset_radius"]),
+        "start_offset_angle": float(config["start_offset_angle"]),
+        "seeds": [
+            _benchmark_seed(experiment, iteration, index) + shape_offset for index in range(count)
+        ],
+    }
+
+
+def _drive_benchmark_chain(job: dict) -> tuple[list[Path], list[dict], list[str]]:
+    """Drive one (shape, variant) chain of runs under a single controller.
+
+    Returns its console output instead of printing it: several chains run at
+    once (``_run_benchmark_chains``) and interleaved progress lines would be
+    unreadable, so the parent replays them in job order.
+
+    Module level and taking only plain data, so it is picklable into a worker
+    process. Runs *within* a chain stay sequential by construction -- each one
+    starts where the last left the robot.
+    """
     from wmr_simulator.mujoco_sim.deploy import run_deployment
     from wmr_simulator.mujoco_sim.firmware import GAIN_MLP_FILENAME
 
-    divergence_radius = float(config["divergence_radius"])
+    robot_config = job["robot_config"]
+    trajectory = job["trajectory"]
+    data_dir = job["data_dir"]
+    variant = job["variant"]
+    divergence_radius = job["divergence_radius"]
+    reference_start = job["reference_start"]
+
     # Named rather than implied: a static-variant run *with* a network beside it
     # is iteration 1, where that network is still the identity, and the line
     # would otherwise read as a contradiction.
@@ -709,27 +795,22 @@ def _record_benchmark_runs(
     if (robot_config.parent / GAIN_MLP_FILENAME).is_file():
         identity = " (identity)" if variant == baseline_runs.STATIC_VARIANT else ""
         network = f" + {GAIN_MLP_FILENAME}{identity}"
-    print(
-        f"Benchmark ({variant}): {count} consecutive run(s) of {trajectory.name} "
+    lines = [
+        f"Benchmark ({variant}): {len(job['seeds'])} consecutive run(s) of {trajectory.name} "
         f"under {robot_config.name}{network} -> {data_dir}"
-    )
-    # Distinct per shape, so two references in a set never draw the same hand
-    # placement -- but still paired across variants, which is what makes the two
-    # controllers a like-for-like comparison.
-    shape_offset = _benchmark_shape_offset(shape)
+    ]
     written: list[Path] = []
     runs: list[dict] = []
     start_pose = None  # the first run is placed by hand
-    for index in range(count):
-        seed = _benchmark_seed(experiment, iteration, index) + shape_offset
+    for seed in job["seeds"]:
         result = run_deployment(
             robot_config,
             trajectory,
             data_dir,
             seed=seed,
             start_pose=start_pose,
-            start_offset_radius=float(config["start_offset_radius"]),
-            start_offset_angle=float(config["start_offset_angle"]),
+            start_offset_radius=job["start_offset_radius"],
+            start_offset_angle=job["start_offset_angle"],
         )
         written.append(result.log_path)
         placement = "placed by hand" if start_pose is None else "left by the previous run"
@@ -740,7 +821,7 @@ def _record_benchmark_runs(
         # picked up and placed again.
         start_pose = None if diverged else result.final_pose
         offset = result.start_offset
-        print(
+        lines.append(
             f"  {result.log_path.name}  seed {seed}  {placement} "
             f"{1000 * offset[0]:+.0f}/{1000 * offset[1]:+.0f} mm, {offset[2]:+.3f} rad  "
             f"| truth: RMSE {result.tracking_rmse:.3f} m, ended {distance_to_start:.3f} m from the start"
@@ -760,7 +841,59 @@ def _record_benchmark_runs(
                 "duty_saturated_fraction": float(result.duty_saturated_fraction),
             }
         )
-    return written, runs
+    return written, runs, lines
+
+
+def _benchmark_worker_count(num_jobs: int, configured) -> int:
+    """How many chains to drive at once. 0/None = one per job, capped by CPUs."""
+    if num_jobs <= 1:
+        return 1
+    configured = 0 if configured is None else int(configured)
+    if configured == 1:
+        return 1
+    available = os.cpu_count() or 1
+    # Leave a core for the parent; a chain is one process pinned to one core
+    # (the MuJoCo step and the firmware port are both single-threaded here).
+    auto = max(1, min(num_jobs, available - 1))
+    return auto if configured <= 0 else min(configured, num_jobs)
+
+
+def _run_benchmark_chains(jobs: list[dict], max_workers) -> list[tuple[list[Path], list[dict], list[str]]]:
+    """Drive independent chains, in parallel when there is more than one.
+
+    A benchmark set is ``shapes x variants`` chains that share nothing: each
+    writes into its own ``data/`` directory and draws from its own seeds, so the
+    results are identical however they are interleaved. Only the runs *inside* a
+    chain are ordered, because each starts where the last one finished.
+
+    Processes rather than threads: the deployment is a Python control loop
+    around single MuJoCo steps, so it holds the GIL almost the whole time.
+
+    Spawned rather than forked. By the time this stage runs the parent has JAX
+    up, and JAX warns outright that forking it "will likely lead to a deadlock"
+    -- the child inherits its thread pools' locks without their threads. The
+    cost is that a spawned child re-imports ``__main__``, which only exists when
+    the entry point is a file (it is: ``scripts/run_active_learning.py``, under
+    a ``__main__`` guard). Driven from a REPL or a heredoc there is nothing to
+    re-import, so those fall back to driving the chains in this process -- the
+    results are identical either way, only slower.
+    """
+    workers = _benchmark_worker_count(len(jobs), max_workers)
+    main_module = sys.modules.get("__main__")
+    spawnable = getattr(main_module, "__file__", None) is not None
+    if workers <= 1 or not spawnable:
+        if workers > 1:
+            print(
+                f"Driving {len(jobs)} benchmark chain(s) in this process: the entry point is not a "
+                f"file, so worker processes cannot re-import it."
+            )
+        return [_drive_benchmark_chain(job) for job in jobs]
+    print(f"Driving {len(jobs)} benchmark chain(s) on {workers} worker process(es).")
+    context = multiprocessing.get_context("spawn")
+    with ProcessPoolExecutor(max_workers=workers, mp_context=context) as pool:
+        # Submission order is preserved, so the parent's report and console
+        # output come out exactly as they would from the serial path.
+        return list(pool.map(_drive_benchmark_chain, jobs))
 
 
 def _benchmark_variant_specs(
@@ -1638,7 +1771,9 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
     # active-learning intent and always comes from the experiment's own
     # gain_tuning block, independent of the standalone hyperparameter swap above.
     refine = experiment.config["gain_tuning"]
-    problem_path = _identified_problem(paths)
+    # The tuning trajectories were designed on this grid, so the tuner has to
+    # roll out on it too -- see _tuning_problem.
+    problem_path = _tuning_problem(paths, experiment.config["tuning_trajectories"])
     if not any(paths.tuning_trajectories_dir.glob("*.pkl")):
         raise FileNotFoundError(
             f"No tuning trajectories in {paths.tuning_trajectories_dir}; run plan-tuning-trajectories first."
@@ -2107,6 +2242,49 @@ def _run_iteration(
         stage_tune_gains(experiment, iteration)
     stage_finalize(experiment, iteration)
     return True
+
+
+def _tuning_problem(paths: IterationPaths, config: dict) -> Path:
+    """The problem the tuning half of the loop runs against.
+
+    ``tuning_trajectories.sim_time`` (0/absent = leave it alone) shortens the
+    *designed* trajectories without touching the identification trajectory,
+    which reads the same yaml but is driven under completely different
+    conditions -- placed by hand and driven open loop on the robot, where a
+    short run is simply less data.
+
+    It has to be one file shared by ``plan-tuning-trajectories`` and
+    ``tune-gains``: ``sim_time`` sets the designer's time grid *and* the
+    tuner's, and a tuner whose grid disagrees with the references it loads is
+    not rolling out the trajectory that was designed.
+
+    Measured 2026-09-11 on test19/iteration_03 (design -> tune static gains ->
+    benchmark on the plant, 6 shapes x 5 runs, median pose RMSE):
+
+    | sim_time | 3.0 | 3.5 | 4.0 | 4.5 | 5.5 | 6.0 | 7.0 |
+    |---|---|---|---|---|---|---|---|
+    | at design alpha_max 16 | .0489 | .0466 | **.0428** | .0493 | .0537 | .0544 | .0554 |
+
+    i.e. an interior optimum at 4.0 s, 21% better than the 7.0 s the loop
+    shipped. The far side is not a gentle roll-off: below 4 s the designs start
+    demanding more yaw acceleration than the robot has (1.05-1.26x alpha_max at
+    3.0 s) and the tuner is then scoring gains on references nothing can track
+    -- 3.0 s / alpha_max 20 returns the *lowest* ky of the whole sweep (4.76)
+    and the *worst* benchmark (0.0592). Keep the designs inside alpha_max and
+    take the shortest clock that does.
+    """
+    problem_path = _identified_problem(paths)
+    sim_time = float(config.get("sim_time") or 0.0)
+    if sim_time <= 0.0:
+        return problem_path
+    problem = load_yaml(problem_path)
+    if float(problem.get("sim_time", 0.0)) == sim_time:
+        return problem_path
+    tuning_path = problem_path.with_name("problem_tuning.yaml")
+    problem["sim_time"] = sim_time
+    save_yaml(tuning_path, problem)
+    print(f"Tuning half runs at sim_time {sim_time} s (identification keeps the problem's own).")
+    return tuning_path
 
 
 def _identified_problem(paths: IterationPaths) -> Path:

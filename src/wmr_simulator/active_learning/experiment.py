@@ -107,10 +107,10 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         # did not come back along its bridge, so the next one cannot start
         # where it left off -- it is placed by hand again instead, exactly as
         # it would be on the robot. Same rule as benchmark.divergence_radius.
-        "divergence_radius": 0.2,
+        "divergence_radius": 0.25,
         # Hand-placement spread of the first run's start pose, the deployment
         # driver's own defaults (mujoco_sim.deploy, measured off exp04/exp05).
-        "start_offset_radius": 0.1,
+        "start_offset_radius": 0.15,
         "start_offset_angle": 0.2,
     },
     # Fixed baseline reference every iteration is scored on. Unlike the
@@ -135,16 +135,22 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         # did not come back, so the next one cannot start where it left off --
         # it is placed by hand again instead, exactly as it would be on the
         # robot.
-        "divergence_radius": 0.2,
+        "divergence_radius": 0.25,
         # Hand-placement spread, the same distribution the identification
         # deployment and the gain tuner's start offsets use.
-        "start_offset_radius": 0.1,
+        "start_offset_radius": 0.15,
         "start_offset_angle": 0.2,
         # A reference that does not end where it starts gets a wait + bridge
         # path back appended (pololu.bridge_exporter), which is what makes
         # chaining possible at all; a self-closing one is driven as it is.
         "bridge_wait_time": 1.5,
         "bridge_time": 8.5,
+        # Worker processes for the shapes x variants chains, which share
+        # nothing. 0 = one per chain, capped at CPUs - 1; 1 = serial, which is
+        # what to set when a deployment needs to be debugged. Results do not
+        # depend on it -- every run's seed is decided up front, so the parallel
+        # and serial reports are identical (measured, bit-for-bit).
+        "max_workers": 0,
     },
     "identification_trajectory": {
         # Design on the residual-augmented plant, using the *previous*
@@ -236,6 +242,18 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         # model was trained (use_residual_model off).
         "use_residual_model": True,
         "num_trajectories": 15,
+        # The min_speed term is satisfied only by laying out a *longer* path,
+        # and Adam walks the control points there slowly -- from a short random
+        # line that used to cost ~250 steps, i.e. 84 s for this batch. The
+        # initialization now lays the curve out at roughly the right length
+        # first (bspline.stretch_control_points_to_arc), so the steps go to the
+        # FIM instead. Measured 2026-09-11, 15 trajectories, achieved mean speed
+        # as a fraction of target on the 8 constrained ones:
+        #   line init, 250 steps  0.97 1.02 1.33 0.84 0.86 0.88 0.65 0.79  84 s
+        #   bowed init,  75 steps 1.05 0.92 1.02 0.86 1.10 1.03 0.91 0.58  38 s
+        #   bowed init, 120 steps 1.07 1.00 1.06 0.96 1.12 1.04 0.94 0.73  49 s
+        # ~20 s of that is JIT and pipeline construction, so the marginal cost
+        # is ~0.23 s/step: below ~75 there is little left to win.
         "opt_steps": 75,
         "learning_rate": 1e-2,
         # 5, not 7: see the min_speed note below -- a stiffer curve is what makes
@@ -267,8 +285,42 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         # acceleration limit, because a faster path at the same wiggle needs
         # more alpha than the robot has. Raising min_speed at 7 control points
         # buys speed by spending alpha budget the closed loop cannot pay.
+        # Duration of a designed tuning trajectory [s], 0 = the problem yaml's
+        # own sim_time. Separate from it because the identification trajectory
+        # reads the same yaml and is driven under completely different
+        # conditions, where a short run is just less data (_tuning_problem in
+        # stages.py carries the measurement behind 4.0).
+        "sim_time": 4.0,
         "min_speed": 1.1,
         "min_speed_fraction": 0.5,
+        # Motion limits the *constraint term* of this design is written
+        # against, overriding the problem yaml's robot block; the plant, the
+        # controller and the gain-parametrization feature scale all still read
+        # the yaml. The identification design has had this for the same reason
+        # (the two are driven under different conditions); here it is the knob
+        # that decides how demanding the tuning set is, and that turns out to
+        # be what makes ky identifiable at all.
+        #
+        # Measured 2026-09-11 on test19/iteration_03's plant, 15 designs, the
+        # static gains held fixed but ky swept 3 -> 20, as a multiple of the
+        # best loss over that range:
+        #   sim_time 7.0, alpha_max 20, min_speed 1.1   1.10 1.03 1.00 1.01 1.03 1.06
+        #   sim_time 5.5, alpha_max 12, min_speed 1.0   1.06 1.00 1.03 3.19 4.75 9.18
+        #   sim_time 5.0, alpha_max 10, min_speed 0.9   1.05 1.00 1.00 1.05 1.11 1.22
+        # The shipped setting is the flat one: ky costs 6% across its whole
+        # search range, which is one noise sigma, so the solver is free to put
+        # it anywhere and BFGS walks it to the box. Nothing about the objective
+        # weights causes that -- same weights, same gains, different designs,
+        # 9.2x instead of 1.06x. Note it is not simply "faster is better":
+        # the 5.0 s row is faster than the 7.0 s one and flat again.
+        # Empty = the problem yaml's own limits. Measured 2026-09-11 end to end
+        # (design -> tune -> benchmark), *raising* this bar helps monotonically
+        # at every sim_time -- gentling the designs was the wrong instinct -- so
+        # the only reason to set it is to stop the smooth max's overshoot
+        # carrying the designs past what the robot can actually turn. At
+        # sim_time 4.0 the problem's own alpha_max 20 puts them at 1.12x, and
+        # 16 puts them at 0.91x and benchmarks 5% better (0.0428 vs 0.0451).
+        "motion_limits": {"alpha_max": 16.0},
         "window_length": 50,
         "kimotor_fim_scale": 5.0,
         "start_offset_mode": "optimize",

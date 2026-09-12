@@ -401,3 +401,129 @@ def compute_bspline_reference(
         time_grid, total_time, time_scaling=normalize_time_scaling(time_scaling)
     )
     return _reference_from_derivatives(position, dpos_ds, d2pos_ds2, s_dot, s_ddot)
+
+
+def sampled_arc_length(position_basis, control_points) -> float:
+    """Length of the curve ``position_basis`` samples from ``control_points``."""
+    positions = np.asarray(position_basis, dtype=float) @ np.asarray(control_points, dtype=float)
+    return float(np.sum(np.linalg.norm(np.diff(positions, axis=0), axis=1)))
+
+
+def sampled_motion_peaks(position_basis, control_points, dt: float) -> dict[str, float]:
+    """Peak speed / yaw rate / yaw acceleration of the sampled curve.
+
+    Finite differences on the sampled positions rather than the analytic
+    derivative bases: this is only used to keep an *initialization* inside the
+    motion limits, and the constraint term the optimizer actually minimizes
+    reads the same quantities off the same time grid.
+    """
+    positions = np.asarray(position_basis, dtype=float) @ np.asarray(control_points, dtype=float)
+    velocity = np.gradient(positions, dt, axis=0)
+    speed = np.linalg.norm(velocity, axis=1)
+    heading = np.unwrap(np.arctan2(velocity[:, 1], velocity[:, 0]))
+    omega = np.gradient(heading, dt)
+    return {
+        "v_peak": float(np.max(speed)),
+        "omega_peak": float(np.max(np.abs(omega))),
+        "alpha_peak": float(np.max(np.abs(np.gradient(omega, dt)))),
+    }
+
+
+def stretch_control_points_to_arc(
+    position_basis,
+    control_points,
+    target_arc: float,
+    environment_min,
+    environment_max,
+    dt: float | None = None,
+    limits: dict | None = None,
+    num_iterations: int = 40,
+):
+    """Bow the interior control points out until the curve is ``target_arc`` long.
+
+    A minimum *mean* speed is a minimum arc length -- ``sim_time`` is fixed, so
+    mean speed is arc / sim_time and nothing else. Started on the straight line
+    between two random points the optimizer therefore has to grow the path by a
+    factor of several before the penalty stops dominating, and Adam walks the
+    control points there one small step at a time: measured, that is what the
+    design's step budget was being spent on, not on shaping the curve.
+
+    Folding a bow of the right size in first makes the initial design roughly
+    feasible instead, so the steps go to the FIM. The displacement is one half
+    period of a sine along the control index, zero at both ends so the start and
+    goal stay put -- the smoothest shape that adds length -- and the amplitude
+    is bisected on the *sampled* curve rather than on the control polygon, since
+    an approximating basis pulls the curve well inside its polygon.
+
+    ``limits`` (with ``dt``) caps the bow at the largest one whose sampled curve
+    still respects ``v_max``/``omega_max``/``alpha_max``, and that cap is not
+    optional in practice: arc length and curvature both grow with the amplitude,
+    so a target the box cannot hold straight-line-wise is reached by a curve the
+    robot cannot turn. Measured without it, an initialization stretched to a
+    1.1 m/s target came out at **8.3x alpha_max** and the optimizer spent its
+    whole budget undoing it -- the same cost as before, moved.
+
+    Both bounds are one-sided in the amplitude, so the answer is the smaller of
+    the two bisections; the points are clipped into the environment box on every
+    trial, so a target the box cannot hold simply saturates rather than pushing
+    the curve outside it.
+    """
+    control_points = np.asarray(control_points, dtype=float)
+    environment_min = np.asarray(environment_min, dtype=float)
+    environment_max = np.asarray(environment_max, dtype=float)
+    num_points = control_points.shape[0]
+    if target_arc <= 0.0 or num_points < 3:
+        return control_points
+
+    span = control_points[-1] - control_points[0]
+    span_norm = float(np.linalg.norm(span))
+    if span_norm < 1e-6:
+        normal = np.array([0.0, 1.0])
+    else:
+        direction = span / span_norm
+        normal = np.array([-direction[1], direction[0]])
+
+    # One half period of a sine: zero at the endpoints, peak in the middle.
+    shape = np.sin(np.pi * np.linspace(0.0, 1.0, num_points))
+
+    def stretched(amplitude: float):
+        return np.clip(
+            control_points + amplitude * shape[:, None] * normal[None, :],
+            environment_min,
+            environment_max,
+        )
+
+    def bisect(is_below, high: float) -> float:
+        low = 0.0
+        for _ in range(int(num_iterations)):
+            mid = 0.5 * (low + high)
+            if is_below(mid):
+                low = mid
+            else:
+                high = mid
+        return high
+
+    reach = float(np.linalg.norm(environment_max - environment_min))
+    if sampled_arc_length(position_basis, control_points) >= target_arc:
+        return control_points
+
+    if sampled_arc_length(position_basis, stretched(reach)) < target_arc:
+        amplitude = reach
+    else:
+        amplitude = bisect(
+            lambda a: sampled_arc_length(position_basis, stretched(a)) < target_arc, reach
+        )
+
+    if limits and dt:
+        def feasible(amplitude_value: float) -> bool:
+            peaks = sampled_motion_peaks(position_basis, stretched(amplitude_value), float(dt))
+            return (
+                peaks["v_peak"] <= float(limits.get("v_max", np.inf))
+                and peaks["omega_peak"] <= float(limits.get("omega_max", np.inf))
+                and peaks["alpha_peak"] <= float(limits.get("alpha_max", np.inf))
+            )
+
+        if not feasible(amplitude):
+            amplitude = min(amplitude, bisect(feasible, amplitude))
+
+    return stretched(amplitude)
