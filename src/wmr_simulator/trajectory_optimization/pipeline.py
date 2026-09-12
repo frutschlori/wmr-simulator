@@ -55,6 +55,7 @@ from wmr_simulator.trajectory_optimization.bspline import (
     clamp_control_points,
     compute_bspline_reference,
     initial_line_control_points,
+    stretch_control_points_to_arc,
 )
 from wmr_simulator.trajectory_optimization.parametrization import normalize_time_scaling
 from wmr_simulator.gain_tuning.defaults import GAIN_TUNING_DEFAULTS
@@ -1222,6 +1223,7 @@ class TrajectoryOptimizationPipeline:
         self,
         rng: np.random.Generator,
         num_control_points: int,
+        min_speed: float = 0.0,
     ) -> jnp.ndarray:
         env_min = np.asarray(self.problem.environment_min, dtype=float)
         env_max = np.asarray(self.problem.environment_max, dtype=float)
@@ -1231,6 +1233,25 @@ class TrajectoryOptimizationPipeline:
         goal = rng.uniform(env_min, env_max)
         line_samples = np.linspace(0.0, 1.0, num_control_points)[:, None]
         positions = start[None, :] + line_samples * (goal[None, :] - start[None, :])
+        if float(min_speed) > 0.0:
+            # Start the curve at roughly the length the minimum mean speed asks
+            # for, instead of making Adam walk there; see
+            # bspline.stretch_control_points_to_arc.
+            plan = self._spline_plan(num_control_points, self.time_scaling)
+            limits = {
+                name: float(value)
+                for name, value in self.motion_limits().items()
+                if name in ("v_max", "omega_max", "alpha_max")
+            }
+            positions = stretch_control_points_to_arc(
+                np.asarray(plan.B0, dtype=float),
+                positions,
+                float(min_speed) * float(self.problem.sim_time),
+                env_min,
+                env_max,
+                dt=float(self.problem.dt),
+                limits=limits,
+            )
         return jnp.asarray(positions, dtype=jnp.float32)
 
     def initial_decision_variable_candidates(
@@ -1238,11 +1259,13 @@ class TrajectoryOptimizationPipeline:
         num_control_points: int,
         num_trajectories: int,
         seed: int = 0,
+        min_speeds=None,
     ) -> list[jnp.ndarray]:
         control_point_candidates = self.initial_control_point_candidates(
             num_control_points=num_control_points,
             num_trajectories=num_trajectories,
             seed=seed,
+            min_speeds=min_speeds,
         )
         return [
             self.decision_variables_from_control_points(control_points)
@@ -1254,16 +1277,30 @@ class TrajectoryOptimizationPipeline:
         num_control_points: int,
         num_trajectories: int,
         seed: int = 0,
+        min_speeds=None,
     ) -> list[jnp.ndarray]:
+        """One initial control-point set per trajectory.
+
+        ``min_speeds`` is the batch's per-trajectory lower bound on mean speed
+        (``constraints.min_speeds_for_batch``). It only reaches the *shape* of
+        the initial curve: a trajectory that has to be driven fast is started on
+        a path already about that long, which is what keeps the step budget
+        small. Unconstrained trajectories keep the plain random line.
+        """
         if num_trajectories <= 0:
             raise ValueError("num_trajectories must be positive.")
         if num_control_points < 2:
             raise ValueError("num_control_points must be >= 2.")
+        if min_speeds is None:
+            min_speeds = np.zeros(num_trajectories, dtype=float)
+        min_speeds = np.broadcast_to(np.asarray(min_speeds, dtype=float), (num_trajectories,))
         rng = np.random.default_rng(seed)
         candidates = []
-        for _ in range(num_trajectories):
+        for index in range(num_trajectories):
             if self.objective_mode == OBJECTIVE_MODE_GAIN_TUNING:
-                control_points = self._random_gain_tuning_control_points(rng, num_control_points)
+                control_points = self._random_gain_tuning_control_points(
+                    rng, num_control_points, min_speed=float(min_speeds[index])
+                )
             else:
                 control_points = self.initial_control_points(num_control_points)
             candidates.append(self.clamp_control_points(control_points))
@@ -1319,10 +1356,16 @@ class TrajectoryOptimizationPipeline:
     ):
         # Build the basis before anything is traced; see _spline_plan.
         self._spline_plan(num_control_points, self.time_scaling)
+        # Before the candidates: a trajectory's minimum mean speed decides how
+        # long its initial curve is laid out (initial_control_point_candidates).
+        min_speeds_per_trajectory = min_speeds_for_batch(
+            num_trajectories, min_speed, min_speed_fraction
+        )
         initial_control_point_candidates = self.initial_control_point_candidates(
             num_control_points=num_control_points,
             num_trajectories=num_trajectories,
             seed=seed,
+            min_speeds=min_speeds_per_trajectory,
         )
         rng = np.random.default_rng(seed + 1)
         if constraint_weight_jitter < 0.0:
@@ -1331,9 +1374,6 @@ class TrajectoryOptimizationPipeline:
         high = 1.0 + float(constraint_weight_jitter)
         constraint_weight_factors = rng.uniform(low, high, size=num_trajectories)
         constraint_weights_per_trajectory = constraint_weight * constraint_weight_factors
-        min_speeds_per_trajectory = min_speeds_for_batch(
-            num_trajectories, min_speed, min_speed_fraction
-        )
         if verbose and float(min_speed) > 0.0:
             constrained = int(np.count_nonzero(min_speeds_per_trajectory))
             print(
@@ -1351,6 +1391,7 @@ class TrajectoryOptimizationPipeline:
                     num_control_points=num_control_points,
                     num_trajectories=num_trajectories,
                     seed=seed,
+                    min_speeds=min_speeds_per_trajectory,
                 ),
                 axis=0,
             )
