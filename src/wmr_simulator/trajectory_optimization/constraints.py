@@ -217,3 +217,122 @@ def constraint_loss_components_from_reference_states(
         weights=weights,
         smooth_max_beta=smooth_max_beta,
     )
+
+
+# Where the motion limits come from -----------------------------------------
+
+GRAVITY = 9.81
+
+
+def derive_motion_limits(
+    robot_cfg: dict,
+    mass: float,
+    stall_torque: float,
+    yaw_inertia: float | None = None,
+    chassis_radius: float = 0.048,
+    speed_headroom: float = 0.6,
+) -> dict[str, dict]:
+    """Motion limits derived from the robot rather than chosen by hand.
+
+    Every value comes back with the quantity that produced it, because the four
+    limits are set by three *different* physical mechanisms and knowing which
+    one binds is most of the value:
+
+    ``v_max``   wheel-speed budget. ``r * max_wheel_speed`` is what the wheels
+                can do; the reference must leave the controller room to correct
+                on top of it *and* room for the yaw differential, since the real
+                constraint is per wheel: ``|v| + |omega| * L/2 <= r * w_max``.
+                ``speed_headroom`` is the share of that budget the reference is
+                allowed to claim.
+
+    ``a_max``   two ceilings, and they mean different things. Motor torque
+                (``2 * tau(omega) / (r * m)``, ``tau`` falling linearly with
+                wheel speed) is a hard one: the robot cannot exceed it at all.
+                Traction (``a_slip_max``) is not -- past it the tires slip, and
+                the burnout model in ``robot.py`` is there precisely to
+                represent that. On this robot torque is the larger of the two
+                everywhere below ~3.3 m/s, so ``grip`` is what a reference meets
+                first.
+
+                **Setting ``a_max`` above ``a_slip_max`` is therefore a
+                deliberate choice, not an inconsistency.** The robot does break
+                traction on the real benchmark circles, so a design envelope
+                that stops at the grip limit would never produce a tuning or
+                identification run in the regime the controller actually has to
+                survive -- and the residual model cannot learn drift dynamics
+                from logs that never drift. What ``a_slip_max`` marks is where
+                the plant stops being kinematic, not where the design has to
+                stop. The value to keep well clear of is the *torque* ceiling.
+
+    ``a_max_lateral``  the same argument. Longitudinal and lateral draw on one
+                friction budget (``sqrt(a_long^2 + a_lat^2) <= a_slip_max``), so
+                this is where the tires let go laterally; exceeding it buys
+                cornering slip on purpose.
+
+    ``omega_max``  the wheel-speed budget again, and it is never the binding
+                constraint in practice: lateral traction caps ``omega`` at
+                ``a_slip_max / v``, which is 1.2-3.0 rad/s over the speeds these
+                references run at, against the tens of rad/s the wheels allow.
+                It is reported for completeness.
+
+    ``alpha_max``  **not derivable, and this function says so.** The traction
+                bound is ``a_slip_max * m * L / (2 * I_zz)`` -- 80-110 rad/s^2
+                here -- which is 5-7x above any value that has ever worked.
+                What actually limits it is whether the closed loop can *track*
+                the yaw acceleration, measured rather than derived (designs past
+                ~1.0x the configured value stop being trackable). So the
+                returned entry carries the physical ceiling and a note, not a
+                recommendation: it is a tuning constant, and it should be
+                labelled as one rather than sitting in the robot block looking
+                like a property of the hardware.
+
+    ``yaw_inertia`` defaults to a uniform disc of ``chassis_radius``, which is
+    the weakest input here; a measured value would tighten only ``alpha_max``,
+    which is the one number this function declines to set anyway.
+    """
+    r = float(robot_cfg["wheel_radius"])
+    wheelbase = float(robot_cfg["base_diameter"])
+    wheel_speed = float(robot_cfg["max_wheel_speed"])
+    a_slip = float(robot_cfg.get("a_slip_max", 0.0)) or GRAVITY
+    inertia = float(yaw_inertia) if yaw_inertia else 0.5 * mass * chassis_radius**2
+
+    wheel_budget = r * wheel_speed
+    torque_at_rest = 2.0 * stall_torque / (r * mass)
+    # Linear DC-motor torque falloff, evaluated where the reference actually
+    # cruises rather than at stall.
+    cruise = speed_headroom * wheel_budget
+    torque_at_cruise = 2.0 * stall_torque * (1.0 - cruise / wheel_budget) / (r * mass)
+    yaw_traction = a_slip * mass * wheelbase / (2.0 * inertia)
+
+    return {
+        "v_max": {
+            "value": speed_headroom * wheel_budget,
+            "binds": "wheel-speed budget",
+            "detail": f"r*w_max = {wheel_budget:.2f} m/s, {speed_headroom:.0%} to the reference",
+        },
+        "a_max": {
+            "value": torque_at_cruise,
+            "binds": "motor torque (hard); traction is a choice",
+            "detail": f"torque {torque_at_rest:.1f} at rest / {torque_at_cruise:.1f} at "
+                      f"{cruise:.2f} m/s is the hard ceiling; grip ends at {a_slip:.2f} and "
+                      f"going past it buys slip on purpose",
+        },
+        "a_max_lateral": {
+            "value": torque_at_cruise,
+            "binds": "motor torque (hard); traction is a choice",
+            "detail": f"grip ends at {a_slip:.2f}, shared with a_max via "
+                      f"sqrt(a_long^2 + a_lat^2) <= {a_slip:.2f}",
+        },
+        "omega_max": {
+            "value": 2.0 * (wheel_budget - speed_headroom * wheel_budget) / wheelbase,
+            "binds": "wheel-speed budget, but lateral traction binds first",
+            "detail": f"traction caps omega at a_slip/v = {a_slip / max(speed_headroom * wheel_budget, 1e-9):.2f}"
+                      f" rad/s at v_max",
+        },
+        "alpha_max": {
+            "value": None,
+            "binds": "closed-loop trackability, not physics",
+            "detail": f"traction ceiling is {yaw_traction:.0f} rad/s^2 (I_zz = {inertia:.2e} kg m^2); "
+                      f"the working value is 5-7x below it and has to be measured",
+        },
+    }

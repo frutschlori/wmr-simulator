@@ -35,6 +35,8 @@ import tempfile
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
+import numpy as np
+
 from wmr_simulator.active_learning import baseline_runs
 from wmr_simulator.active_learning.experiment import (
     ITERATION_PREFIX,
@@ -258,7 +260,7 @@ def stage_plan_identification_trajectory(experiment: Experiment, iteration: int)
         if design_gains is not None:
             print(f"Designing at the static-tune gains: {design_gains}")
         pipeline = TrajectoryOptimizationPipeline(
-            str(paths.problem),
+            str(_identification_problem(paths, config)),
             time_scaling=config["time_scaling"],
             objective_mode="identification",
             fim_a_slip_max=bool(config["fim_a_slip_max"]),
@@ -361,7 +363,6 @@ def stage_plan_tuning_trajectories(experiment: Experiment, iteration: int) -> li
         print(f"Designing inside overridden motion limits: {motion_limits}")
     pipeline = TrajectoryOptimizationPipeline(
         str(problem_path),
-        time_scaling=config["time_scaling"],
         objective_mode="gain-tuning",
         kimotor_fim_scale=float(config["kimotor_fim_scale"]),
         start_offset_mode=str(config["start_offset_mode"]),
@@ -371,6 +372,7 @@ def stage_plan_tuning_trajectories(experiment: Experiment, iteration: int) -> li
         controller_gains=design_gains,
         residual_model=residual_model,
         motion_limits=motion_limits or None,
+        time_scaling=config["time_scaling"],
     )
     constraint_component_weights = {
         name: float(value) for name, value in config["constraint_component_weights"].items()
@@ -2244,6 +2246,44 @@ def _run_iteration(
     return True
 
 
+def _problem_at_sim_time(source: Path, sim_time: float, name: str, label: str) -> Path:
+    """``source`` with ``sim_time`` overridden, written next to it as ``name``.
+
+    Returns ``source`` unchanged when the override is off (0/absent) or already
+    equal, so a run that does not ask for one is byte-identical to before and
+    no extra file appears in the iteration.
+    """
+    sim_time = float(sim_time or 0.0)
+    if sim_time <= 0.0:
+        return source
+    problem = load_yaml(source)
+    if float(problem.get("sim_time", 0.0)) == sim_time:
+        return source
+    problem["sim_time"] = sim_time
+    target = source.with_name(name)
+    save_yaml(target, problem)
+    print(f"{label} runs at sim_time {sim_time} s (the problem yaml's own is {problem.get('sim_time')}).")
+    return target
+
+
+def _identification_problem(paths: IterationPaths, config: dict) -> Path:
+    """The problem the identification design runs against.
+
+    ``identification_trajectory.sim_time`` is its own knob because the two
+    designs are driven under conditions that have nothing in common: a tuning
+    trajectory is rolled out in sim from a small start offset and wants the
+    shortest clock whose designs stay inside ``alpha_max`` (see
+    ``_tuning_problem``), while this one is placed by hand and driven open loop
+    on the robot, where a shorter run is simply less data per log. Nothing has
+    measured what it costs identification to shorten it, which is exactly why
+    it must not ride along on the tuning number.
+    """
+    return _problem_at_sim_time(
+        paths.problem, config.get("sim_time"), "problem_identification.yaml",
+        "Identification design",
+    )
+
+
 def _tuning_problem(paths: IterationPaths, config: dict) -> Path:
     """The problem the tuning half of the loop runs against.
 
@@ -2273,18 +2313,10 @@ def _tuning_problem(paths: IterationPaths, config: dict) -> Path:
     and the *worst* benchmark (0.0592). Keep the designs inside alpha_max and
     take the shortest clock that does.
     """
-    problem_path = _identified_problem(paths)
-    sim_time = float(config.get("sim_time") or 0.0)
-    if sim_time <= 0.0:
-        return problem_path
-    problem = load_yaml(problem_path)
-    if float(problem.get("sim_time", 0.0)) == sim_time:
-        return problem_path
-    tuning_path = problem_path.with_name("problem_tuning.yaml")
-    problem["sim_time"] = sim_time
-    save_yaml(tuning_path, problem)
-    print(f"Tuning half runs at sim_time {sim_time} s (identification keeps the problem's own).")
-    return tuning_path
+    return _problem_at_sim_time(
+        _identified_problem(paths), config.get("sim_time"), "problem_tuning.yaml",
+        "Tuning half",
+    )
 
 
 def _identified_problem(paths: IterationPaths) -> Path:
