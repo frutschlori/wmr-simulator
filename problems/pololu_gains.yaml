@@ -60,14 +60,14 @@ robot:
   a_max: 5.0          # m/s^2
   a_max_lateral: 7.0  # m/s^2
   omega_max: 10.0      # rad/s
-  alpha_max: 16.0     # rad/s^2
+  alpha_max: 20.0     # rad/s^2
 noise_enabled: true # false zeroes the estimator measurement noise everywhere (sim, gain tuning, traj-opt FIM)
 estimator:
   type: "kf"              # estimator type: "kf" (Kalman Filter) or "dr" (Dead Reckoning)
   wheel_radius: 0.016     # estimator's wheel_radius [m]
   base_diameter: 0.0842   # estimator's base_diameter [m]
-  noise_pos: 0.001        # position measurement noise [m] (from mocap almost no noise)
-  noise_angle: 0.03       # orientation noise [rad] ~ 1 degrees
+  noise_pos: 0.002        # position measurement noise [m] (from mocap almost no noise)
+  noise_angle: 0.04       # orientation noise [rad] ~ 1 degrees
   enc_angle_noise: 0.03   # encoder noise [rad]
   wheel_lp_tau: 0.053     # [s] first-order low-pass on encoder wheel speeds fed to the controller (mirrors firmware; ~30 ms lag). 0 disables.
 

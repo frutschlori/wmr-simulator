@@ -160,6 +160,14 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         # the nominal robot parameters being identified, and the previous
         # residual corrects a plant that has since been re-identified.
         "use_residual_model": False,
+        # Duration of the identification trajectory [s], 0 = the problem yaml's
+        # own sim_time. Its own knob for the same reason the tuning design has
+        # one, and set explicitly here because the *tuning* number (4.0) was
+        # measured and this one was not: this trajectory is placed by hand and
+        # driven open loop on the robot, where a shorter run is simply fewer
+        # samples per log, so it should not inherit a duration chosen to make
+        # closed-loop rollouts informative about gains.
+        "sim_time": 7.0,
         "opt_steps": 750,
         "learning_rate": 5e-3,
         "num_control_points": 6,
@@ -259,6 +267,10 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         # 5, not 7: see the min_speed note below -- a stiffer curve is what makes
         # the faster designs trackable. Also the bspline default (curves.py).
         "num_control_points": 5,
+        # "s-curve" | "linear". A free (optimized) speed profile was tried
+        # 2026-09-12 and deleted: eight unpinned decision variables made the
+        # designs seed-unstable (2.2x spread) and never beat the quintic on the
+        # benchmark, even though the design-side FIM loss improved.
         "time_scaling": "s-curve",
         "constraint_weight_jitter": 0.4,
         # Lower bound on a designed trajectory's *mean* speed [m/s], and the
@@ -293,6 +305,12 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         "sim_time": 4.0,
         "min_speed": 1.1,
         "min_speed_fraction": 0.5,
+        # A one-sided term holding a share of the batch to the benchmark set's
+        # |v| / |omega| quantiles was tried 2026-09-12 and deleted: it lifted the
+        # yaw-rate tail (p90 0.66 -> 1.47 rad/s) but not the mean speed, which is
+        # what correlates with the benchmark, and scored 0.0415-0.0424 against
+        # min_speed alone at 0.0406. The regime gap it measured is real (tuning
+        # designs reach |omega| p90 1.67 against the benchmark's 2.63).
         # Motion limits the *constraint term* of this design is written
         # against, overriding the problem yaml's robot block; the plant, the
         # controller and the gain-parametrization feature scale all still read
@@ -313,14 +331,38 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         # weights causes that -- same weights, same gains, different designs,
         # 9.2x instead of 1.06x. Note it is not simply "faster is better":
         # the 5.0 s row is faster than the 7.0 s one and flat again.
-        # Empty = the problem yaml's own limits. Measured 2026-09-11 end to end
-        # (design -> tune -> benchmark), *raising* this bar helps monotonically
-        # at every sim_time -- gentling the designs was the wrong instinct -- so
-        # the only reason to set it is to stop the smooth max's overshoot
-        # carrying the designs past what the robot can actually turn. At
-        # sim_time 4.0 the problem's own alpha_max 20 puts them at 1.12x, and
-        # 16 puts them at 0.91x and benchmarks 5% better (0.0428 vs 0.0451).
-        "motion_limits": {"alpha_max": 16.0},
+        # Empty = the problem yaml's own limits, which is now the right answer:
+        # the override this used to carry made the designs *gentler*, and
+        # measured end to end that is the wrong direction on both axes.
+        #
+        # Swept 2026-09-12, design alpha_max x (a_max, a_max_lateral), two
+        # design seeds per cell, benchmark median over the 6-shape set:
+        #
+        #   alpha \ a      3/3      5/7     9/12    row mean
+        #      12        0.0484   0.0502   0.0477    0.0488
+        #      16        0.0465   0.0420   0.0441    0.0442   <- the old override
+        #      20        0.0450   0.0410   0.0409    0.0423
+        #      24        0.0434   0.0433   0.0406    0.0424
+        #   col mean     0.0458   0.0441   0.0433
+        #
+        # Two findings. Holding the design inside the *traction* limit (a = 3/3)
+        # is the worst column at every alpha_max above 12 -- the robot breaks
+        # traction on the real benchmark circles, so a design envelope that
+        # stops at grip never produces a run in the regime the controller has to
+        # survive, and the residual cannot learn drift from logs that never
+        # drift. And alpha_max improves strongly to 20 and then goes flat, so
+        # with the problem yaml at 20 the override has nothing left to add.
+        #
+        # 9/12 is marginally better again (0.0406) but puts a_max_lateral past
+        # the *motor torque* ceiling, ~7.2 m/s^2 at cruise
+        # (constraints.derive_motion_limits), and that one is hard rather than
+        # soft: the robot cannot deliver it at all, where exceeding grip merely
+        # slips. Not worth the last 1%.
+        #
+        # Note the winning designs run at ~30 rad/s^2 actual. The old "designs
+        # above ~1.03x alpha_max do not track" rule was about tuning *rollouts*
+        # diverging and no longer binds -- 0 divergences in all 900 runs here.
+        "motion_limits": {},
         "window_length": 50,
         "kimotor_fim_scale": 5.0,
         "start_offset_mode": "optimize",
