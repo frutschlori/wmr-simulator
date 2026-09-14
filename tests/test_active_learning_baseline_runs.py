@@ -20,6 +20,7 @@ from wmr_simulator.active_learning.baseline_runs import (
     collect_baseline_runs,
     load_run_logs,
     run_tracking_rmse,
+    run_yaw_ringing,
     variant_panels,
 )
 from wmr_simulator.active_learning.experiment import Experiment
@@ -29,12 +30,14 @@ CIRCLE_RADIUS = 0.5
 CIRCLE_RATE = 1.0
 
 
-def write_run_csv(path, *, radial_offset=0.0, duration=6.5, dt=0.02):
+def write_run_csv(path, *, radial_offset=0.0, duration=6.5, dt=0.02, yaw_ringing_amplitude=None):
     """A traj-control recording of a circle, tracked with a radial offset.
 
     The reference is the exact circle and the mocap track the same circle at
     ``radius + radial_offset``, so the run's position RMSE against its reference
-    is ``|radial_offset|`` by construction.
+    is ``|radial_offset|`` by construction. ``yaw_ringing_amplitude`` [rad/s]
+    adds an IMU stream: the constant circle yaw rate plus a 4 Hz oscillation of
+    that amplitude (0 for a clean turn, None for no IMU samples at all).
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     rows = []
@@ -57,6 +60,9 @@ def write_run_csv(path, *, radial_offset=0.0, duration=6.5, dt=0.02):
         )
         row.update(omega_l_meas="10.0", omega_r_meas="12.0", omega_l_cmd="10.0", omega_r_cmd="12.0")
         row.update(v_actual="0.5", w_actual="1.0", duty_l="0.3", duty_r="0.35")
+        if yaw_ringing_amplitude is not None:
+            yaw_rate = CIRCLE_RATE + yaw_ringing_amplitude * np.sin(2.0 * np.pi * 4.0 * t)
+            row["gyro_z"] = f"{np.rad2deg(yaw_rate):.6f}"
         rows.append(row)
 
     lines = [",".join(POLOLU_TRAJ_CONTROL_COLUMNS)]
@@ -156,7 +162,7 @@ def test_only_five_runs_of_a_group_are_kept(experiment):
 
     logs = load_run_logs(paths.benchmark_data_dir, max_runs=MAX_RUNS_PER_ITERATION)
 
-    assert [name for name, _ in logs] == [f"TR{index:02d}" for index in range(MAX_RUNS_PER_ITERATION)]
+    assert [run.name for run in logs] == [f"TR{index:02d}" for index in range(MAX_RUNS_PER_ITERATION)]
 
 
 def test_a_decoded_log_is_read_once_not_twice(experiment):
@@ -167,7 +173,7 @@ def test_a_decoded_log_is_read_once_not_twice(experiment):
     write_run_csv(paths.benchmark_data_dir / "TR00.csv")
     (paths.benchmark_data_dir / "TR00").write_bytes(b"binary source of TR00.csv")
 
-    assert [name for name, _ in load_run_logs(paths.benchmark_data_dir)] == ["TR00"]
+    assert [run.name for run in load_run_logs(paths.benchmark_data_dir)] == ["TR00"]
 
 
 def test_the_tracking_error_is_measured_against_the_reference_the_run_tracked(experiment):
@@ -177,9 +183,26 @@ def test_the_tracking_error_is_measured_against_the_reference_the_run_tracked(ex
     paths = exp.paths(1)
     write_run_csv(paths.benchmark_data_dir / "TR00.csv", radial_offset=0.04)
 
-    (_, log), = load_run_logs(paths.benchmark_data_dir)
+    (run,) = load_run_logs(paths.benchmark_data_dir)
 
-    assert run_tracking_rmse(log) == pytest.approx(0.04, abs=2e-3)
+    assert run_tracking_rmse(run.log) == pytest.approx(0.04, abs=2e-3)
+
+
+def test_yaw_ringing_sees_the_oscillation_and_not_the_turn(experiment):
+    """The smoothness metric beside the RMSE: a steady turn scores ~0 however
+    fast it turns, a 4 Hz yaw oscillation scores on the order of its RMS, and a
+    log without IMU samples has no score rather than a zero one."""
+    exp = experiment(1)
+    paths = exp.paths(1)
+    write_run_csv(paths.benchmark_data_dir / "TR00.csv", yaw_ringing_amplitude=0.0)
+    write_run_csv(paths.benchmark_data_dir / "TR01.csv", yaw_ringing_amplitude=2.0)
+    write_run_csv(paths.benchmark_data_dir / "TR02.csv")
+
+    clean, ringing, no_imu = load_run_logs(paths.benchmark_data_dir)
+
+    assert run_yaw_ringing(clean) == pytest.approx(0.0, abs=1e-3)
+    assert run_yaw_ringing(ringing) == pytest.approx(2.0 / np.sqrt(2.0), rel=0.25)
+    assert run_yaw_ringing(no_imu) is None
 
 
 def test_the_loops_own_shape_is_collected_as_the_pipeline_records_it(experiment):
@@ -253,7 +276,7 @@ def test_the_figure_is_written_for_every_shape(experiment):
     _write_runs(exp.paths(2).benchmark_data_dir, 2, radial_offset=0.01)
     paths = exp.paths(2)
 
-    written = _plot_baseline_runs(exp, paths)
+    written = _plot_baseline_runs(exp, 2)
 
     assert sorted(path.rsplit("/", 1)[-1] for path in written) == [
         "baseline_runs_benchmark.pdf",
@@ -273,4 +296,20 @@ def test_an_experiment_without_baseline_runs_plots_nothing(experiment):
 
     exp = experiment(1)
 
-    assert _plot_baseline_runs(exp, exp.paths(1)) == []
+    assert _plot_baseline_runs(exp, 1) == []
+
+
+def test_every_iteration_gets_the_comparison_as_it_stood(experiment):
+    """Each iteration's figure holds itself and the iterations before it, never
+    a later one -- including when the figures are written after the fact."""
+    from wmr_simulator.active_learning.stages import plot_baseline_runs_per_iteration
+
+    exp = experiment(3)
+    for index in (1, 2, 3):
+        _write_runs(exp.paths(index).benchmark_static_data_dir, 1, radial_offset=0.01 * index)
+
+    written = plot_baseline_runs_per_iteration(exp)
+
+    assert len(written) == 3
+    assert all((exp.paths(index).visualize_dir / "baseline runs" / "baseline_runs_benchmark.pdf").is_file()
+               for index in (1, 2, 3))

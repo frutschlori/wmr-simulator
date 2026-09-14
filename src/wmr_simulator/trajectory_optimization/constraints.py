@@ -10,6 +10,9 @@ DEFAULT_CONSTRAINT_WEIGHTS = {
     "alpha": 1.0,
     # Lower bound on the trajectory's *mean* speed; see min_speed_loss.
     "v_min": 1.0,
+    # Lower bound on its mean lateral acceleration; see
+    # min_lateral_acceleration_loss.
+    "a_lat_min": 1.0,
 }
 
 
@@ -37,6 +40,8 @@ def motion_limits_from_robot_config(robot_cfg: dict) -> dict[str, jnp.ndarray]:
         # of the *experiment being designed*, so the pipeline substitutes a
         # per-trajectory value; the robot config only supplies a fallback.
         "v_min": jnp.asarray(robot_cfg.get("v_min", 0.0), dtype=jnp.float32),
+        # Same story for the lower bound on mean lateral acceleration.
+        "a_lat_min": jnp.asarray(robot_cfg.get("a_lat_min", 0.0), dtype=jnp.float32),
     }
 
 
@@ -65,6 +70,35 @@ def min_speeds_for_batch(num_trajectories: int, min_speed: float, fraction: floa
         return speeds
     speeds[:count] = float(min_speed) * np.linspace(0.5, 1.0, count)
     return speeds
+
+
+def motion_floors_for_batch(
+    num_trajectories: int,
+    min_speed: float,
+    min_speed_fraction: float = 0.5,
+    min_lateral_acceleration: float = 0.0,
+    min_lateral_acceleration_fraction: float = 0.25,
+):
+    """Per-trajectory ``[v_min, a_lat_min]`` for a batch design, shape ``(T, 2)``.
+
+    Each column is spread like :func:`min_speeds_for_batch`, rising with the
+    index. The speed floors sit on the leading trajectories; the turning floors
+    are aligned to *end* where the speed floors end, so with
+    ``min_lateral_acceleration_fraction <= min_speed_fraction`` every trajectory
+    that has to turn hard also has to be fast, and the hardest turn goes to the
+    fastest one: the regime the fast circle drives (v ~ 2 m/s at omega ~ 2
+    rad/s), which a mean-speed floor alone satisfies with fast straight sweeps.
+    """
+    import numpy as np
+
+    speeds = min_speeds_for_batch(num_trajectories, min_speed, min_speed_fraction)
+    lateral_head = min_speeds_for_batch(num_trajectories, min_lateral_acceleration, min_lateral_acceleration_fraction)
+    num_lateral = int(np.count_nonzero(lateral_head))
+    num_speed = int(np.count_nonzero(speeds))
+    end = max(num_speed, num_lateral)
+    lateral = np.zeros(int(num_trajectories), dtype=float)
+    lateral[end - num_lateral : end] = lateral_head[:num_lateral]
+    return np.stack([speeds, lateral], axis=1)
 
 
 def constraint_weights(scale: float = 1.0, component_weights: dict | None = None) -> dict[str, jnp.ndarray]:
@@ -139,6 +173,27 @@ def min_speed_loss(v_norm: jnp.ndarray, v_min, smooth_max_beta: float = 20.0) ->
     return jnp.where(v_min > 0.0, loss, jnp.zeros_like(loss))
 
 
+def min_lateral_acceleration_loss(a_lat: jnp.ndarray, a_lat_min, smooth_max_beta: float = 20.0) -> jnp.ndarray:
+    """Squared fractional shortfall of the *mean* |v * omega| below ``a_lat_min``.
+
+    The turning counterpart of :func:`min_speed_loss`, and a mean for the same
+    reason (the s-curve reference rests at both ends). A mean speed floor is met
+    by long straight sweeps -- measured 2026-09-13, at v > 1.8 m/s the designs
+    kept |omega| <= 1.06 rad/s and lateral acceleration <= 2 m/s^2 -- while the
+    benchmark's fast shapes turn at 3.4-5.7 m/s^2, the regime that rings and
+    loses traction on the robot. Holding the mean |a_lat| up is only satisfiable
+    by turning *while* fast, and it is a quadratic penalty, so it trades off
+    against the FIM and the upper limits (a_lat_max, omega_max, alpha_max)
+    rather than overriding them.
+
+    ``a_lat_min <= 0`` disables it and returns exactly 0.
+    """
+    a_lat_min = jnp.asarray(a_lat_min, dtype=a_lat.dtype)
+    shortfall = 1.0 - jnp.mean(a_lat) / jnp.maximum(a_lat_min, 1e-6)
+    loss = smooth_positive_max(jnp.reshape(shortfall, (1,)), beta=smooth_max_beta) ** 2
+    return jnp.where(a_lat_min > 0.0, loss, jnp.zeros_like(loss))
+
+
 def constraint_loss_components(
     v: jnp.ndarray,
     a: jnp.ndarray,
@@ -172,6 +227,8 @@ def constraint_loss_components(
         "alpha": weights["alpha"] * alpha_loss,
         "v_min": weights["v_min"]
         * min_speed_loss(v_norm, limits.get("v_min", 0.0), smooth_max_beta=smooth_max_beta),
+        "a_lat_min": weights["a_lat_min"]
+        * min_lateral_acceleration_loss(a_lat, limits.get("a_lat_min", 0.0), smooth_max_beta=smooth_max_beta),
     }
 
 

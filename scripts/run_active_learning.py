@@ -71,8 +71,9 @@ rerun an earlier one; delete a stage's outputs to force a rerun under `run`):
     python scripts/run_active_learning.py plot-run-logs           --experiment experiments/exp01
 
 plot-run-logs is the one command that is not per iteration: it plots the
-recordings in every iteration's data/ subdirectories, which is what `run` does
-on its own each time it proceeds.
+recordings in every iteration's data/ subdirectories and rewrites every
+iteration's baseline-run figures (visualize/baseline runs/), which is what `run`
+does on its own each time it proceeds.
 
 Stage hyperparameters live in experiments/exp01/experiment.yaml (editable
 between stages). Set JAX_PLATFORMS=gpu to run the optimization stages on the GPU.
@@ -175,7 +176,8 @@ def build_parser() -> argparse.ArgumentParser:
         "finalize": "Fold the iteration results into the next iteration folder.",
         "plot-run-logs": (
             "Plot every data/ subdirectory recording of every iteration into that "
-            "iteration's visualize/logs/<same subdirectory>/ (also done by `run`)."
+            "iteration's visualize/logs/<same subdirectory>/, and rewrite each iteration's "
+            "baseline-run figures over itself and the iterations before it (also done by `run`)."
         ),
         "run": "Run all stages that can proceed; stops when robot data is needed.",
         "status": "Show per-iteration stage completion.",
@@ -266,6 +268,7 @@ def main(argv: list[str] | None = None) -> int:
         # Experiment-wide, like the cross-iteration figures: the point is the
         # iterations the loop has already left behind.
         stages.plot_run_directory_logs(experiment)
+        stages.plot_baseline_runs_per_iteration(experiment)
         return 0
 
     if args.command == "run":

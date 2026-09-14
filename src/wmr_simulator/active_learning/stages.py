@@ -406,6 +406,8 @@ def stage_plan_tuning_trajectories(experiment: Experiment, iteration: int) -> li
             constraint_smooth_max_beta=constraint_smooth_max_beta,
             min_speed=float(config["min_speed"]),
             min_speed_fraction=float(config["min_speed_fraction"]),
+            min_lateral_acceleration=float(config["min_lateral_acceleration"]),
+            min_lateral_acceleration_fraction=float(config["min_lateral_acceleration_fraction"]),
             verbose=False,
         )
         final_losses = np.asarray(pipeline.batch_final_losses, dtype=float)
@@ -2019,25 +2021,57 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
     except Exception as error:
         print(f"Pipeline progress plot skipped ({error}).")
 
-    _plot_baseline_runs(experiment, paths)
+    _plot_baseline_runs(experiment, iteration)
     return payload
 
 
-def _plot_baseline_runs(experiment: Experiment, paths: IterationPaths) -> list[str]:
+def plot_baseline_runs_per_iteration(experiment: Experiment) -> list[str]:
+    """Rewrite every iteration's baseline-run figures from the recordings on disk.
+
+    Benchmark and hand-recorded baseline runs arrive late, often after the
+    iteration's tune-gains stage wrote its figures, and an experiment that never
+    tunes (a retest of deployed configs) never writes them at all. The
+    recordings are loaded once, and each iteration gets the figures over itself
+    and every earlier iteration.
+    """
+    from wmr_simulator.active_learning.baseline_runs import collect_baseline_runs
+
+    try:
+        collected = collect_baseline_runs(experiment)
+    except Exception as error:
+        print(f"Baseline runs plots skipped ({error}).")
+        return []
+    written: list[str] = []
+    for iteration in experiment.iteration_indices():
+        written.extend(_plot_baseline_runs(experiment, iteration, collected=collected))
+    return written
+
+
+def _plot_baseline_runs(experiment: Experiment, iteration: int, collected: dict | None = None) -> list[str]:
     """Overlay every iteration's runs of each held-out baseline reference.
 
     One figure per baseline shape, drawn from all iterations up to this one and
     written into *this* iteration's visualize dir, so each iteration keeps the
     comparison as it stood when it finished. Best-effort for the same reason the
     progress plot is: a missing or unreadable recording must not abort the stage
-    that just produced this iteration's gains.
+    that just produced this iteration's gains. ``collected`` is a
+    ``collect_baseline_runs`` result to reuse across iterations.
     """
     written: list[str] = []
+    paths = experiment.paths(iteration)
     try:
         from wmr_simulator.active_learning.baseline_runs import collect_baseline_runs, variant_panels
         from wmr_simulator.visualization.baseline_runs import plot_baseline_runs
 
-        collected = collect_baseline_runs(experiment)
+        if collected is None:
+            collected = collect_baseline_runs(experiment)
+        # Later iterations' runs are not part of the comparison as it stood
+        # when this iteration finished.
+        collected = {
+            shape: [record for record in records if record.index <= iteration]
+            for shape, records in collected.items()
+        }
+        collected = {shape: records for shape, records in collected.items() if records}
         if not collected:
             return written
         # Their own subdirectory: a benchmark *set* produces one figure per
@@ -2205,6 +2239,7 @@ def _run_iteration(
     # those iterations were finalized (a person copies them off the SD card),
     # so the whole experiment is rescanned every time the loop proceeds.
     plot_run_directory_logs(experiment)
+    plot_baseline_runs_per_iteration(experiment)
 
     if not status["plan-id-trajectory"]:
         stage_plan_identification_trajectory(experiment, iteration)

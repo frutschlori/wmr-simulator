@@ -199,8 +199,15 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         "bridge_time": 8.5,
     },
     "identification": {
-        "steps": 150,
-        "learning_rate": 1e-4,
+        # 150 steps at 1e-4 (2026-09-09 to 09-13) does not converge: every
+        # identified parameter was its init plus a fixed per-iteration drift,
+        # identical across test18/19/20 (max_wheel_speed 246.42 -> 233.06, tau
+        # 0.1624 -> 0.1720 over four iterations whatever the data). Measured
+        # 2026-09-13 from the stock init on five logs: 600 steps at 1e-3 and 1500
+        # at 1e-3 agree on radius/wheelbase/max_wheel_speed/tau to <1.5%
+        # (MuJoCo test20 it5, real 2026_07_27 it4, real 2026_09_07 it3), in ~6 s.
+        "steps": 600,
+        "learning_rate": 1e-3,
         "window_length": 50,
         # Robust deviation (modified z-score) above which a log's own parameter
         # estimate counts as disagreeing with the rest of the batch and is left
@@ -208,8 +215,18 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         # 4 logs to be meaningful (identification.outliers).
         "outlier_z_threshold": 3.5,
         # Fit a_slip_max along with the rest. Disable when the recorded
-        # trajectories never approach the traction limit (slow runs)
-        "identify_a_slip_max": False,
+        # trajectories never approach the traction limit (slow runs).
+        #
+        # On since 2026-09-13. Held at the yaml's 3.0 m/s^2 it made the
+        # *nominal* JAX plant diverge on the MuJoCo identification logs it was
+        # identified from (closed-loop RMSE 0.33-0.70 m, duty pinned at 1)
+        # while 6.87 (mu*g), 0, or the freely fitted value reproduce the logs
+        # (0.051 vs 0.051 m, 0.067 fitted): the per-wheel rate limit invented
+        # slip the plant does not have, and the residual learned to cancel it.
+        # It is weakly observable (4.0 -> 4.1 on MuJoCo, 4.8 -> 7.8 on real July
+        # logs between 600 and 1500 steps, same loss), but every value from ~4
+        # up keeps the nominal loop stable, which is what matters downstream.
+        "identify_a_slip_max": True,
         # Traction limit init (m/s^2; burnout model, residual_model.burnout).
         # Used when the current robot config carries a zero value; must be
         # positive to (re-)enable identification of a_slip_max (log-space
@@ -305,6 +322,24 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         "sim_time": 4.0,
         "min_speed": 1.1,
         "min_speed_fraction": 0.5,
+        # Lower bound on a designed trajectory's *mean* lateral acceleration
+        # |v * omega| [m/s^2], and the share of the batch that carries one
+        # (spread over [0.5, 1.0] x this, on the leading, fastest trajectories;
+        # constraints.motion_floors_for_batch). min_speed alone is met by fast
+        # straight sweeps: measured on test20's designs (2026-09-13), at v > 1.8
+        # m/s they kept |omega| <= 1.06 rad/s and |a_lat| <= 2 m/s^2, mean |a_lat|
+        # p50 0.39 / max 0.91, covering 35-50% of the benchmark's fast samples --
+        # the uncovered half being exactly the fast turns (circle_fast mean
+        # |a_lat| 2.23, lemniscate_big_fast 1.84) where the robot rings. 0 = off.
+        # Measured on test20 it5's plant (2026-09-13, 75 steps): the four floored
+        # designs reach mean |a_lat| 1.00-1.53 against floors 1.0-2.0, and at
+        # v > 1.8 m/s the set now turns at up to |omega| 1.93 / |a_lat| 3.49
+        # (before 0.94 / 1.73). The shortfall on the top floor is the 5-point
+        # B-spline, which draws about half a circle in 4 s; a_lat_min weight 2.0
+        # instead of 0.5 bought nothing, 7 control points raised the benchmark
+        # coverage 0.43 -> 0.66 but reopens the cusp question.
+        "min_lateral_acceleration": 2.0,
+        "min_lateral_acceleration_fraction": 0.25,
         # A one-sided term holding a share of the batch to the benchmark set's
         # |v| / |omega| quantiles was tried 2026-09-12 and deleted: it lifted the
         # yaw-rate tail (p90 0.66 -> 1.47 rad/s) but not the mean speed, which is
@@ -377,6 +412,8 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
             # regime to design in, and a preference must never outvote a limit.
             # At 1.0 the designs ran to 1.5x alpha_max.
             "v_min": 0.5,
+            # Same reasoning for the turning floor.
+            "a_lat_min": 0.5,
         },
         # Sharpness of the smooth max in the constraint penalty. It is
         # logsumexp(beta*g)/beta, which overshoots the true max by up to

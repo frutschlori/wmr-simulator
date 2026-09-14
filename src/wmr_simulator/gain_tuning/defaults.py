@@ -83,12 +83,12 @@ GAIN_TUNING_DEFAULTS: dict = {
     # two are the only terms that stay informative about the plant on *every*
     # iteration's design, which is why they now carry the objective.
     "linear_velocity_tracking_weight": 1.0,
-    "angular_velocity_tracking_weight": 1.0,
+    "angular_velocity_tracking_weight": 1.5,
     # Small but nonzero: duty magnitude correlates +0.42 with plant pose RMSE
     # (saturation is what the aggressive gains buy), and at 0 the objective has
     # nothing pricing actuator authority at all.
-    "input_weight": 0.05,
-    "input_delta_weight": 0.0,
+    "input_weight": 0.0,
+    "input_delta_weight": 1.0,
     # Penalty on the step-to-step change in the robot yaw rate. It was 1.5 --
     # the largest weight in the set -- on the theory that it prices the theta
     # ringing seen on hardware. Measured, it cannot: it reads
@@ -99,8 +99,8 @@ GAIN_TUNING_DEFAULTS: dict = {
     # separates 4x. Kept small rather than 0 so it still damps the one thing it
     # can see; making it price real ringing needs phase lag in the wheel loop,
     # not a larger weight here.
-    "omega_delta_weight": 0.1,
-    "gain_delta_weight": 1e-4,
+    "omega_delta_weight": 0.0,
+    "gain_delta_weight": 0.0,
     "k_min_stab": 1e-3,
     "k_max_stab": 20.0,
     "k_max_rest": 20.0,

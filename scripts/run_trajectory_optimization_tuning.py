@@ -59,6 +59,11 @@ def main():
     # block of the active-learning experiment config by hand.
     parser.add_argument("--min-speed", type=float, default=1.0)
     parser.add_argument("--min-speed-fraction", type=float, default=0.5)
+    # Same idea for turning: a floor on mean |v * omega| on the leading
+    # --min-lateral-acceleration-fraction of the trajectories, so the fast ones
+    # also turn (constraints.motion_floors_for_batch). 0 disables.
+    parser.add_argument("--min-lateral-acceleration", type=float, default=2.0)
+    parser.add_argument("--min-lateral-acceleration-fraction", type=float, default=0.25)
     parser.add_argument("--vectorize-trajectories", action="store_true", default=True)
     # Path settings
     parser.add_argument("--time-scaling", choices=["s-curve", "linear"], default="s-curve")
@@ -233,6 +238,8 @@ def main():
                 constraint_smooth_max_beta=args.constraint_smooth_max_beta,
                 min_speed=args.min_speed,
                 min_speed_fraction=args.min_speed_fraction,
+                min_lateral_acceleration=args.min_lateral_acceleration,
+                min_lateral_acceleration_fraction=args.min_lateral_acceleration_fraction,
                 verbose=False,
             )
             final_losses = np.asarray(pipeline.batch_final_losses, dtype=float)
