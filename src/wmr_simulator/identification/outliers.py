@@ -57,7 +57,7 @@ def robust_parameter_outliers(
 
     Works in log space: the physical parameters are strictly positive and are
     identified in log-relative coordinates, so a relative deviation is the
-    meaningful one and the five parameters become comparable despite their very
+    meaningful one and the four parameters become comparable despite their very
     different units. The scale is the median absolute deviation rescaled to a
     standard deviation (Iglewicz & Hoaglin's modified z-score, whose usual
     threshold is 3.5); unlike a plain standard deviation it does not grow with
@@ -72,8 +72,8 @@ def robust_parameter_outliers(
     the default floor, a batch that agrees to better than 1% still needs a
     ``z_threshold``-times-1% relative deviation before a log is dropped.
 
-    A zero-spread parameter (e.g. a disabled ``a_slip_max``, identical in every
-    run) carries no information and is skipped rather than producing infinite
+    A zero-spread parameter (identical in every run, e.g. one an experiment
+    holds fixed) carries no information and is skipped rather than producing infinite
     scores. ``z_threshold <= 0`` disables detection, as does a sample count
     below ``min_samples`` -- with two or three samples the median sits on (or
     between) the candidates themselves and every sample scores alike.
@@ -96,8 +96,7 @@ def robust_parameter_outliers(
     median = np.median(log_samples, axis=0)
     deviations = np.abs(log_samples - median)
     mad = np.median(deviations, axis=0)
-    # A parameter that is identical on every log (a disabled a_slip_max) is
-    # skipped. Judging that on the maximum rather than the median deviation
+    # A parameter that is identical on every log (held fixed) is skipped. Judging that on the maximum rather than the median deviation
     # matters: a single log breaking out of an otherwise identical column has a
     # zero MAD, and must still be scored (against the floor) instead of ignored.
     informative = np.max(deviations, axis=0) > 1e-9

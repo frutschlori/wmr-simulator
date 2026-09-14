@@ -92,7 +92,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from wmr_simulator.residual_model.burnout import rate_limited_series
 
 # (state, action) descriptor: the nominal predicted body twist and the commanded
 # twist the motor lag is heading toward (see the module docstring). Doubles as
@@ -357,9 +356,8 @@ def build_residual_dataset(
 
     Nominal twist: encoder wheel speeds interpolated to the interval starts,
     passed through the first-order motor lag (matching DiffDrive.step -- the
-    simulator has no encoder), the identified traction limit
-    (``a_slip_max``, residual_model.burnout) and the ideal differential-drive
-    kinematics.
+    simulator has no encoder) and the ideal differential-drive kinematics.
+    There is no traction model: slip is part of what the residual learns.
 
     Commanded twist: the same kinematics applied to the *target* wheel speeds
     ``max_wheel_speed * duty`` (the action half of the descriptor). The residual
@@ -422,18 +420,14 @@ def build_residual_dataset(
     lag_r = alpha * prev_u_r + (1.0 - alpha) * max_speed * duty[:, 0]
     lag_l = alpha * prev_u_l + (1.0 - alpha) * max_speed * duty[:, 1]
 
-    # Nominal twist from the lag wheel through the traction limit and ideal
-    # kinematics (so the residual does not have to relearn the burnout).
-    max_rate = float(params.a_slip_max) / r if float(params.a_slip_max) > 0.0 else np.inf
-    u_r_nom = rate_limited_series(lag_r, dt, max_rate)
-    u_l_nom = rate_limited_series(lag_l, dt, max_rate)
-    v_nom = 0.5 * r * (u_r_nom + u_l_nom)
-    omega_nom = r * (u_r_nom - u_l_nom) / effective_wheelbase
+    # Nominal twist from the lag wheel through the ideal kinematics.
+    v_nom = 0.5 * r * (lag_r + lag_l)
+    omega_nom = r * (lag_r - lag_l) / effective_wheelbase
     nominal_twist = np.column_stack([v_nom, np.zeros_like(v_nom), omega_nom])
 
     # Action half of the descriptor: the twist of the *target* wheel speeds the
     # lag is heading toward (matching DiffDrive.step, which builds it from its
-    # duty argument). Not traction-limited -- it is a command, not a state.
+    # duty argument).
     target_r = max_speed * duty[:, 0]
     target_l = max_speed * duty[:, 1]
     v_cmd = 0.5 * r * (target_r + target_l)
@@ -748,33 +742,37 @@ def simulate_closed_loop_on_log_reference(
     seed: int = 0,
     clip_after_first_trajectory: bool = True,
 ):
-    """Closed-loop simulation (hidden robot + optional residual) tracking the
+    """Closed-loop simulation (nominal plant + optional residual) tracking the
     reference trajectory recorded in a Pololu log.
 
     Returns ``(sim_log, measured_log)``: the simulated SimulationLog and the
     decoded Pololu log it was driven from, so callers can compare the simulated
     robot against the real one that recorded the same reference.
 
-    Runs the log's *own* recorded controller: the iteration's ``problem.yaml``
-    supplies the tuned base gains, the error-MLP ``theta`` that was exported to
-    ``GAINMLP.JSN`` and the identified robot/estimator parameters. Using the
-    global ``problem`` config instead compares against a controller that never
-    recorded the log (the stock kx is 4.5 where the tuned one is ~0.003), which
-    makes the comparison meaningless -- so ``problem`` is only the fallback for
-    logs outside an iteration folder.
+    Two configs meet here, and they must not be confused. The *plant* is
+    ``problem``'s robot block: the nominal model the residual was trained
+    against, which is the only model it may be added to. The *controller* is
+    the one that recorded the log (``controller_problem_for_log``): the
+    iteration's ``problem.yaml`` supplies the tuned base gains, the error-MLP
+    ``theta`` exported to ``GAINMLP.JSN`` and the robot/estimator parameters the
+    firmware was flashed with. Driving the global gains instead compares against
+    a controller that never recorded the log (the stock kx is 4.5 where the
+    tuned one is ~0.003).
     """
     import yaml
 
     from wmr_simulator.gain_parametrization import params_from_cfg
     from wmr_simulator.pololu.log_loader import load_pololu_traj_control_log
+    from wmr_simulator.robot import DiffDrive
     from wmr_simulator.simulation import SimulationPipeline
 
     log = load_pololu_traj_control_log(
         log_path,
         clip_after_first_trajectory=clip_after_first_trajectory,
     )
-    problem_path = problem_path_for_log(log_path, problem)
+    problem_path = controller_problem_for_log(log_path, problem)
     config = yaml.safe_load(open(problem_path, "r", encoding="utf-8"))
+    plant_robot_cfg = yaml.safe_load(open(problem, "r", encoding="utf-8"))["robot"]
     controller_cfg = config["controller"]
     parametrization_cfg = controller_cfg.get(
         "gain_parametrization", controller_cfg.get("gain_schedule")
@@ -786,6 +784,9 @@ def simulate_closed_loop_on_log_reference(
     )
 
     pipeline = SimulationPipeline(problem_path=problem_path, seed=seed, residual_model=model)
+    # The hidden robot is the plant: swap the recorded controller's belief for
+    # the residual's own nominal model.
+    pipeline.robot = DiffDrive(robot_cfg=plant_robot_cfg, dt=pipeline.wheel_dt)
     reference_states = jnp.asarray(
         pipeline._fit_reference_states(np.asarray(log.reference.states, dtype=float)),
         dtype=jnp.float32,
@@ -817,31 +818,24 @@ def robot_params_from_problem(problem_path: str):
         base_diameter=jnp.asarray(robot_cfg["base_diameter"], dtype=jnp.float32),
         max_wheel_speed=jnp.asarray(robot_cfg["max_wheel_speed"], dtype=jnp.float32),
         time_constant=jnp.asarray(robot_cfg["time_constant"], dtype=jnp.float32),
-        a_slip_max=jnp.asarray(robot_cfg.get("a_slip_max", 0.0), dtype=jnp.float32),
     )
 
 
-def problem_path_for_log(log_path: str, default_problem_path: str) -> str:
-    """Problem config the robot was actually running when this log was recorded.
+def controller_problem_for_log(log_path: str, default_problem_path: str) -> str:
+    """Problem config the robot's *controller* was running when this log was recorded.
 
     Active-learning logs live in ``<experiment>/<iteration_XX>/data/TRxx.csv``
     and each iteration folder carries the ``problem.yaml`` that produced its
-    ``ROBOTCFG.CFG`` / ``GAINMLP.JSN`` export -- the identified robot parameters
-    and tuned controller gains that were running for those runs. They differ per
-    iteration (the motor time constant alone moves by ~50% between the stock
-    config and the identified ones), so a single global config misstates the
-    nominal model for every log but its own. Falls back to
+    ``ROBOTCFG.CFG`` / ``GAINMLP.JSN`` export -- the gains and the parameters the
+    firmware was flashed with. That is a statement about the controller, never
+    about the robot's physics: the nominal model a log is compared against is
+    whichever one the caller is fitting or rolling out. Falls back to
     ``default_problem_path`` for logs outside such a folder.
     """
     from pathlib import Path
 
     iteration_problem = Path(log_path).parent.parent / "problem.yaml"
     return str(iteration_problem) if iteration_problem.is_file() else default_problem_path
-
-
-def robot_params_for_log(log_path: str, default_problem_path: str):
-    """Physical params the robot was configured with when this log was recorded."""
-    return robot_params_from_problem(problem_path_for_log(log_path, default_problem_path))
 
 
 DATA_DIR_NAME = "data"
@@ -917,8 +911,10 @@ def train_from_logs(
     ``log_dirs`` may span several active-learning iterations: one-step training is
     gain-independent (the descriptor is built from the logged duty, so whatever
     controller produced it is irrelevant), which is what makes pooling iterations
-    with different tuned gains sound. Per-log robot params keep the nominal model
-    correct across the pool (see ``robot_params_for_log``).
+    with different tuned gains sound. Every log's targets are measured minus
+    ``problem``'s nominal model -- the model the residual is later added to --
+    whichever parameters the robot was flashed with when it was recorded, and the
+    checkpoint records those parameters (``io.load_residual_model`` checks them).
     """
     from datetime import datetime
     from pathlib import Path
@@ -932,15 +928,15 @@ def train_from_logs(
     )
 
     log_paths = gather_log_paths(log_dirs, recursive=recursive)
+    # One nominal model for every log: the one the residual will be added to.
+    params = robot_params_from_problem(problem)
+    print(f"Residual targets against the nominal model of {problem}")
     datasets = []
     for path in log_paths:
-        # Per-log params: the nominal model each log is a residual *of* is the one
-        # its own iteration was running (see problem_path_for_log).
-        params = robot_params_for_log(str(path), problem)
         log = load_pololu_traj_control_log(path, clip_after_first_trajectory=clip_after_first_trajectory)
         dataset = build_residual_dataset(log, params, resample_uniform=resample_uniform)
         datasets.append(dataset)
-        print(f"{path}: {len(dataset['features'])} samples  (params from {problem_path_for_log(str(path), problem)})")
+        print(f"{path}: {len(dataset['features'])} samples")
 
     train_indices, validation_indices = split_datasets_by_file(datasets, validation_split, seed)
     train_features, train_targets = stack_datasets([datasets[i] for i in train_indices])
@@ -996,7 +992,7 @@ def train_from_logs(
         "final_validation_loss": history["validation_loss"][-1],
         "trained_at": datetime.now().isoformat(timespec="seconds"),
     }
-    save_residual_model(out, model, config, metadata)
+    save_residual_model(out, model, config, params, metadata)
     print(f"Saved residual model to {out}")
 
     plot_training_history(history, out_dir=out_dir)
@@ -1054,14 +1050,14 @@ def evaluate_on_log(
     from wmr_simulator.residual_model.io import load_residual_model
     from wmr_simulator.visualization.residual import plot_rollout_comparison
 
-    model, checkpoint = load_residual_model(model_path)
+    params = robot_params_from_problem(problem)
+    model, checkpoint = load_residual_model(model_path, params)
     print(f"Loaded residual model {model_path}")
     print(f"  config: {checkpoint['config']}")
     if checkpoint.get("metadata"):
         validation_files = checkpoint["metadata"].get("validation_files", [])
         print(f"  trained validation files: {[Path(f).name for f in validation_files]}")
 
-    params = robot_params_for_log(log_path, problem)
     log = load_pololu_traj_control_log(log_path, clip_after_first_trajectory=clip_after_first_trajectory)
     dataset = build_residual_dataset(log, params, resample_uniform=resample_uniform)
 

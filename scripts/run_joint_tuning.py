@@ -93,8 +93,11 @@ def main():
     residual_model = None
     if args.residual_model is not None:
         from wmr_simulator.residual_model import load_residual_model
+        from wmr_simulator.residual_model.residual import robot_params_from_problem
 
-        residual_model, checkpoint = load_residual_model(args.residual_model)
+        residual_model, checkpoint = load_residual_model(
+            args.residual_model, robot_params_from_problem(args.problem)
+        )
         print(f"Loaded residual dynamics model: {args.residual_model}")
         print(f"  config: {checkpoint['config']}")
 

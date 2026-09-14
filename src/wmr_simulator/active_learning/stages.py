@@ -187,19 +187,22 @@ def _export_gain_mlp_if_configured(problem_path: Path, output_path: Path) -> Pat
 # ---------------------------------------------------------------------------
 
 
-def _load_design_residual_model(path: Path):
+def _load_design_residual_model(path: Path, problem_path: Path):
     """Residual checkpoint a trajectory-design stage rolls out on, or None.
 
     A missing checkpoint designs on the nominal plant instead of raising: an
-    experiment with use_residual_model off never trains one at all.
+    experiment with use_residual_model off never trains one at all. A checkpoint
+    trained against a different nominal model than ``problem_path``'s raises
+    (residual_model.io.load_residual_model).
     """
     if not path.is_file():
         print(f"No residual model at {path}; designing on the nominal plant.")
         return None
 
     from wmr_simulator.residual_model import load_residual_model
+    from wmr_simulator.residual_model.residual import robot_params_from_problem
 
-    residual_model, checkpoint = load_residual_model(path)
+    residual_model, checkpoint = load_residual_model(path, robot_params_from_problem(str(problem_path)))
     print(f"Designing on the residual-augmented plant: {path}")
     print(f"  config: {checkpoint['config']}")
     return residual_model
@@ -255,7 +258,9 @@ def stage_plan_identification_trajectory(experiment: Experiment, iteration: int)
         # exist yet. Iteration 1 has no previous one either and designs nominal.
         residual_model = None
         if config["use_residual_model"] and iteration > 1:
-            residual_model = _load_design_residual_model(experiment.paths(iteration - 1).residual_model)
+            residual_model = _load_design_residual_model(
+                experiment.paths(iteration - 1).residual_model, _identification_problem(paths, config)
+            )
         design_gains = _static_design_gains(paths)
         if design_gains is not None:
             print(f"Designing at the static-tune gains: {design_gains}")
@@ -263,7 +268,6 @@ def stage_plan_identification_trajectory(experiment: Experiment, iteration: int)
             str(_identification_problem(paths, config)),
             time_scaling=config["time_scaling"],
             objective_mode="identification",
-            fim_a_slip_max=bool(config["fim_a_slip_max"]),
             # The design is driven with the parametrization off, so it is
             # scored at the static gains rather than the problem's base gains.
             controller_gains=design_gains,
@@ -354,7 +358,7 @@ def stage_plan_tuning_trajectories(experiment: Experiment, iteration: int) -> li
     # this stage, so the model is fitted to the logs recorded for it.
     residual_model = None
     if config["use_residual_model"]:
-        residual_model = _load_design_residual_model(paths.residual_model)
+        residual_model = _load_design_residual_model(paths.residual_model, problem_path)
     design_gains = _static_design_gains(paths)
     if design_gains is not None:
         print(f"Designing at the static-tune gains: {design_gains}")
@@ -1430,9 +1434,7 @@ def stage_identify(
     baseline comparison runs and stay out of the fit. Identification is cheap, so
     the stage first runs it per log, flags logs whose parameters disagree with the
     median of the batch (identification.outlier_z_threshold, 0 disables), and only
-    then fits one parameter set jointly to the remaining logs. A parameter the
-    recorded motion does not excite is better held fixed than fitted, see
-    identification.identify_a_slip_max.
+    then fits one parameter set jointly to the remaining logs.
 
     Writes results/identification.yaml and problem_identified.yaml (the base
     problem with the updated robot block) used by all downstream stages.
@@ -1457,23 +1459,12 @@ def stage_identify(
     print(f"Identification logs ({len(log_paths)}): {', '.join(path.name for path in log_paths)}")
 
     robot_config = load_yaml(paths.robot_config)["robot"]
-    identify_a_slip_max = bool(config["identify_a_slip_max"])
-    a_slip_max = float(robot_config.get("a_slip_max", 0.0))
-    if identify_a_slip_max and a_slip_max == 0.0:
-        # A zero value keeps the burnout model disabled in the log-space optimizer;
-        # fall back to the experiment config init to (re-)enable identification.
-        # With identification off there is nothing to re-enable: a disabled limit
-        # stays disabled instead of being silently switched on at the init value.
-        a_slip_max = float(config["init_a_slip_max"])
     init_params = PhysicalParams(
         wheel_radius=jnp.asarray(robot_config["wheel_radius"]),
         base_diameter=jnp.asarray(robot_config["base_diameter"]),
         max_wheel_speed=jnp.asarray(robot_config["max_wheel_speed"]),
         time_constant=jnp.asarray(robot_config["time_constant"]),
-        a_slip_max=jnp.asarray(a_slip_max),
     )
-    if not identify_a_slip_max:
-        print(f"Holding a_slip_max at {a_slip_max:.3f} m/s^2 (identification.identify_a_slip_max is off).")
 
     def identify(target_logs):
         return run_multi_log_identification(
@@ -1484,7 +1475,6 @@ def stage_identify(
             learning_rate=float(config["learning_rate"]),
             seed=int(experiment.config["seed"]),
             window_length=config["window_length"],
-            identify_a_slip_max=identify_a_slip_max,
         )
 
     pololu_logs = [
@@ -1529,7 +1519,6 @@ def stage_identify(
         "final_motor_loss": float(joint_result["motor_loss_history"][-1]),
         "outlier_z_threshold": float(config["outlier_z_threshold"]),
         "outlier_detection_evaluated": bool(report.evaluated),
-        "identify_a_slip_max": identify_a_slip_max,
         "per_log": [
             {
                 "log": str(log_paths[index]),
@@ -1618,14 +1607,13 @@ def _estimated_params_dict(params) -> dict:
         "base_diameter": float(params.base_diameter),
         "max_wheel_speed": float(params.max_wheel_speed),
         "time_constant": float(params.time_constant),
-        "a_slip_max": float(params.a_slip_max),
     }
 
 
 def _print_per_log_parameters(log_paths, parameter_samples, per_log_results, report) -> None:
     header = (
         f"{'log':<12}{'r [mm]':>10}{'L [mm]':>10}{'u_max':>10}"
-        f"{'tau [s]':>10}{'a_slip':>10}{'loss':>12}{'max z':>8}"
+        f"{'tau [s]':>10}{'loss':>12}{'max z':>8}"
     )
     print("Per-log identification:")
     print(header)
@@ -1637,7 +1625,7 @@ def _print_per_log_parameters(log_paths, parameter_samples, per_log_results, rep
         marker = "  EXCLUDED" if report.is_outlier[index] else ""
         print(
             f"{log_path.stem:<12}{1000.0 * values[0]:>10.2f}{1000.0 * values[1]:>10.2f}{values[2]:>10.2f}"
-            f"{values[3]:>10.4f}{values[4]:>10.3f}{total_loss:>12.6f}"
+            f"{values[3]:>10.4f}{total_loss:>12.6f}"
             f"{report.max_z_scores[index]:>8.2f}{marker}"
         )
     if not report.evaluated:
@@ -1682,9 +1670,9 @@ def residual_training_iterations(experiment: Experiment, iteration: int) -> list
 
     Pooling is sound because one-step residual training is gain-independent: the
     descriptor is built from each log's own recorded duty, so it does not matter
-    that earlier iterations ran different tuned gains. Each log's *nominal* model
-    still comes from its own iteration's params (residual.robot_params_for_log),
-    which is what keeps the pool consistent.
+    that earlier iterations ran different tuned gains. Every log's targets are
+    computed against this iteration's identified model, the one the residual is
+    added to downstream (residual.train_from_logs).
     """
     if not experiment.config["residual"].get("pool_previous_iterations", True):
         candidates = [iteration]
@@ -1788,6 +1776,8 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
     # when it is not trusted to drive the gains (a residual fitted to logs whose
     # duty saturated carries a large unexplained yaw term, and the tuner would
     # roll that out as if it were the robot).
+    robot_params = resolve_gain_robot_params(str(problem_path), None, None)
+    print_physical_params("Robot parameters for gain tuning:", robot_params)
     residual_model = None
     if experiment.config["use_residual_model"] and not refine["use_residual_model"]:
         print("Gain tuning: residual model trained but disabled for tuning "
@@ -1800,11 +1790,8 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
             )
         from wmr_simulator.residual_model import load_residual_model
 
-        residual_model, checkpoint = load_residual_model(paths.residual_model)
+        residual_model, checkpoint = load_residual_model(paths.residual_model, robot_params)
         print(f"Loaded residual model {paths.residual_model} (config: {checkpoint['config']})")
-
-    robot_params = resolve_gain_robot_params(str(problem_path), None, None)
-    print_physical_params("Robot parameters for gain tuning:", robot_params)
     # The static run is an independent controller option, so it refines the
     # previous iteration's *static* gains (robot_config_static_gains.yaml,
     # written by finalize) rather than the parametrized run's base gains, which

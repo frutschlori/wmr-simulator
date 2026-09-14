@@ -5,15 +5,15 @@ from wmr_simulator.active_learning.stages import _resolve_log_paths
 from wmr_simulator.identification.outliers import robust_parameter_outliers
 from wmr_simulator.pololu.log_loader import POLOLU_TRAJ_CONTROL_COLUMNS
 
-# Nominal identified parameters (r, L, u_max, tau, a_slip) with realistic
+# Nominal identified parameters (r, L, u_max, tau) with realistic
 # log-to-log scatter; index 3 is the broken run that must be caught.
 _GOOD_PARAMS = np.array(
     [
-        [0.0171, 0.0912, 238.0, 0.170, 5.0],
-        [0.0173, 0.0908, 240.0, 0.163, 5.1],
-        [0.0170, 0.0915, 236.0, 0.175, 4.9],
-        [0.0172, 0.0910, 239.0, 0.168, 5.0],
-        [0.0169, 0.0913, 237.0, 0.172, 5.2],
+        [0.0171, 0.0912, 238.0, 0.170],
+        [0.0173, 0.0908, 240.0, 0.163],
+        [0.0170, 0.0915, 236.0, 0.175],
+        [0.0172, 0.0910, 239.0, 0.168],
+        [0.0169, 0.0913, 237.0, 0.172],
     ]
 )
 
@@ -55,16 +55,16 @@ def test_outlier_detection_disabled_by_threshold_or_sample_count():
 
 
 def test_outlier_detection_ignores_a_constant_parameter():
-    """A disabled a_slip_max (identical in every log) has no spread and must not
-    turn every log into an outlier."""
+    """A parameter held fixed (identical in every log) has no spread and must
+    not turn every log into an outlier."""
     samples = _GOOD_PARAMS.copy()
-    samples[:, 4] = 0.0
+    samples[:, 3] = 0.16
 
     report = robust_parameter_outliers(samples, z_threshold=3.5)
 
     assert report.evaluated
     assert not report.is_outlier.any()
-    assert np.all(report.z_scores[:, 4] == 0.0)
+    assert np.all(report.z_scores[:, 3] == 0.0)
 
 
 def test_tight_batch_does_not_manufacture_outliers():

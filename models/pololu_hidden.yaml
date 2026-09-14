@@ -190,7 +190,7 @@ friction:
   # and still stands: mu cannot fix a torque shortfall. It is not evidence that
   # mu does nothing.
   #
-  # a_slip = mu*g = 6.87 m/s^2, still clear of the problem yaml's
+  # Traction limit mu*g = 6.87 m/s^2, still clear of the problem yaml's
   # a_max_lateral 4.0. Both entries are equal because MuJoCo takes the
   # elementwise max and the tire-floor pair is the only place either one acts.
   floor: 0.70

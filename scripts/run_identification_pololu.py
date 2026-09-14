@@ -29,7 +29,6 @@ def print_param_block(label: str, params: PhysicalParams):
     print(f"  base_diameter   = {1000.0 * values[1]:.2f} mm (effective wheelbase)")
     print(f"  max_wheel_speed = {values[2]:.2f} rad/s")
     print(f"  time_constant   = {values[3]:.4f} s")
-    print(f"  a_slip_max (traction limit) = {values[4]:.3f} m/s^2")
 
 
 def main():
@@ -45,11 +44,6 @@ def main():
     parser.add_argument("--init-base-diameter", type=float, default=0.1)
     parser.add_argument("--init-max-wheel-speed", type=float, default=300.0)
     parser.add_argument("--init-time-constant", type=float, default=0.3)
-    # Traction limit init (m/s^2, ~ mu*g; burnout model, residual_model.burnout).
-    # Must be positive to be identified; the default 0 keeps the limit disabled
-    # (0 * exp(theta) = 0 in the log-space optimizer).
-    parser.add_argument("--init-a-slip-max", type=float, default=5.0)
-    parser.add_argument("--identify-a-slip-max", action=argparse.BooleanOptionalAction, default=False)
 
     # Path to real experiment log
     parser.add_argument("--pololu-log", type=str,
@@ -64,7 +58,6 @@ def main():
         base_diameter=jnp.asarray(args.init_base_diameter),
         max_wheel_speed=jnp.asarray(args.init_max_wheel_speed),
         time_constant=jnp.asarray(args.init_time_constant),
-        a_slip_max=jnp.asarray(args.init_a_slip_max),
     )
 
     pololu_log = load_pololu_traj_control_log(
@@ -81,7 +74,6 @@ def main():
         reference_trajectories_dir=None,
         window_length=args.window_length,
         target_log=pololu_log,
-        identify_a_slip_max=args.identify_a_slip_max,
     )
     pipeline = result["pipeline"]
     print_param_block("Initial guess:", init_params)

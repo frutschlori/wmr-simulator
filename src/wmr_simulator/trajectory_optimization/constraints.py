@@ -285,6 +285,7 @@ def derive_motion_limits(
     robot_cfg: dict,
     mass: float,
     stall_torque: float,
+    grip: float = GRAVITY,
     yaw_inertia: float | None = None,
     chassis_radius: float = 0.048,
     speed_headroom: float = 0.6,
@@ -305,35 +306,34 @@ def derive_motion_limits(
     ``a_max``   two ceilings, and they mean different things. Motor torque
                 (``2 * tau(omega) / (r * m)``, ``tau`` falling linearly with
                 wheel speed) is a hard one: the robot cannot exceed it at all.
-                Traction (``a_slip_max``) is not -- past it the tires slip, and
-                the burnout model in ``robot.py`` is there precisely to
-                represent that. On this robot torque is the larger of the two
+                Traction (``grip``, ~ mu*g) is not -- past it the tires slip,
+                which the learned residual has to represent. On this robot torque is the larger of the two
                 everywhere below ~3.3 m/s, so ``grip`` is what a reference meets
                 first.
 
-                **Setting ``a_max`` above ``a_slip_max`` is therefore a
+                **Setting ``a_max`` above ``grip`` is therefore a
                 deliberate choice, not an inconsistency.** The robot does break
                 traction on the real benchmark circles, so a design envelope
                 that stops at the grip limit would never produce a tuning or
                 identification run in the regime the controller actually has to
                 survive -- and the residual model cannot learn drift dynamics
-                from logs that never drift. What ``a_slip_max`` marks is where
+                from logs that never drift. What ``grip`` marks is where
                 the plant stops being kinematic, not where the design has to
                 stop. The value to keep well clear of is the *torque* ceiling.
 
     ``a_max_lateral``  the same argument. Longitudinal and lateral draw on one
-                friction budget (``sqrt(a_long^2 + a_lat^2) <= a_slip_max``), so
+                friction budget (``sqrt(a_long^2 + a_lat^2) <= grip``), so
                 this is where the tires let go laterally; exceeding it buys
                 cornering slip on purpose.
 
     ``omega_max``  the wheel-speed budget again, and it is never the binding
                 constraint in practice: lateral traction caps ``omega`` at
-                ``a_slip_max / v``, which is 1.2-3.0 rad/s over the speeds these
+                ``grip / v``, which is 1.2-3.0 rad/s over the speeds these
                 references run at, against the tens of rad/s the wheels allow.
                 It is reported for completeness.
 
     ``alpha_max``  **not derivable, and this function says so.** The traction
-                bound is ``a_slip_max * m * L / (2 * I_zz)`` -- 80-110 rad/s^2
+                bound is ``grip * m * L / (2 * I_zz)`` -- 80-110 rad/s^2
                 here -- which is 5-7x above any value that has ever worked.
                 What actually limits it is whether the closed loop can *track*
                 the yaw acceleration, measured rather than derived (designs past
@@ -350,7 +350,7 @@ def derive_motion_limits(
     r = float(robot_cfg["wheel_radius"])
     wheelbase = float(robot_cfg["base_diameter"])
     wheel_speed = float(robot_cfg["max_wheel_speed"])
-    a_slip = float(robot_cfg.get("a_slip_max", 0.0)) or GRAVITY
+    grip = float(grip)
     inertia = float(yaw_inertia) if yaw_inertia else 0.5 * mass * chassis_radius**2
 
     wheel_budget = r * wheel_speed
@@ -359,7 +359,7 @@ def derive_motion_limits(
     # cruises rather than at stall.
     cruise = speed_headroom * wheel_budget
     torque_at_cruise = 2.0 * stall_torque * (1.0 - cruise / wheel_budget) / (r * mass)
-    yaw_traction = a_slip * mass * wheelbase / (2.0 * inertia)
+    yaw_traction = grip * mass * wheelbase / (2.0 * inertia)
 
     return {
         "v_max": {
@@ -371,19 +371,19 @@ def derive_motion_limits(
             "value": torque_at_cruise,
             "binds": "motor torque (hard); traction is a choice",
             "detail": f"torque {torque_at_rest:.1f} at rest / {torque_at_cruise:.1f} at "
-                      f"{cruise:.2f} m/s is the hard ceiling; grip ends at {a_slip:.2f} and "
+                      f"{cruise:.2f} m/s is the hard ceiling; grip ends at {grip:.2f} and "
                       f"going past it buys slip on purpose",
         },
         "a_max_lateral": {
             "value": torque_at_cruise,
             "binds": "motor torque (hard); traction is a choice",
-            "detail": f"grip ends at {a_slip:.2f}, shared with a_max via "
-                      f"sqrt(a_long^2 + a_lat^2) <= {a_slip:.2f}",
+            "detail": f"grip ends at {grip:.2f}, shared with a_max via "
+                      f"sqrt(a_long^2 + a_lat^2) <= {grip:.2f}",
         },
         "omega_max": {
             "value": 2.0 * (wheel_budget - speed_headroom * wheel_budget) / wheelbase,
             "binds": "wheel-speed budget, but lateral traction binds first",
-            "detail": f"traction caps omega at a_slip/v = {a_slip / max(speed_headroom * wheel_budget, 1e-9):.2f}"
+            "detail": f"traction caps omega at grip/v = {grip / max(speed_headroom * wheel_budget, 1e-9):.2f}"
                       f" rad/s at v_max",
         },
         "alpha_max": {

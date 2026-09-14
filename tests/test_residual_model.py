@@ -138,8 +138,8 @@ def test_save_load_roundtrip(tmp_path):
         "spectral_norm_cap": 2.0,
     }
     path = tmp_path / "model.pkl"
-    save_residual_model(path, model, config, {"note": "test"})
-    loaded, checkpoint = load_residual_model(path)
+    save_residual_model(path, model, config, ROBOT_CFG, {"note": "test"})
+    loaded, checkpoint = load_residual_model(path, ROBOT_CFG)
     assert checkpoint["metadata"]["note"] == "test"
     features = jax.random.normal(jax.random.PRNGKey(1), (5, RESIDUAL_INPUT_DIM))
     np.testing.assert_allclose(
@@ -159,9 +159,41 @@ def test_load_rejects_mismatched_config(tmp_path):
         "spectral_norm_cap": 2.0,
     }
     path = tmp_path / "model.pkl"
-    save_residual_model(path, model, config)
+    save_residual_model(path, model, config, ROBOT_CFG)
     with pytest.raises(Exception):
-        load_residual_model(path)
+        load_residual_model(path, ROBOT_CFG)
+
+
+def _saved_small_model(tmp_path):
+    config = {
+        "input_dim": RESIDUAL_INPUT_DIM,
+        "output_dim": RESIDUAL_OUTPUT_DIM,
+        "num_experts": 3,
+        "hidden_sizes": [16],
+        "spectral_norm_cap": 2.0,
+    }
+    path = tmp_path / "model.pkl"
+    save_residual_model(path, small_model(num_experts=3, hidden_sizes=(16,)), config, ROBOT_CFG)
+    return path
+
+
+def test_load_accepts_the_training_plant_through_float32(tmp_path):
+    """PhysicalParams carry float32 copies of the yaml values; that round trip
+    is the same plant."""
+    from wmr_simulator.types import PhysicalParams
+
+    path = _saved_small_model(tmp_path)
+    params = PhysicalParams(**{name: jnp.asarray(value, dtype=jnp.float32) for name, value in ROBOT_CFG.items()})
+    load_residual_model(path, params)
+
+
+def test_load_refuses_a_different_nominal_plant(tmp_path):
+    """A residual is measured minus *its* nominal model; added to any other
+    model it corrects errors that plant does not have."""
+    path = _saved_small_model(tmp_path)
+    other = {**ROBOT_CFG, "max_wheel_speed": 230.0}
+    with pytest.raises(ValueError, match="max_wheel_speed"):
+        load_residual_model(path, other)
 
 
 def test_step_without_residual_unchanged():

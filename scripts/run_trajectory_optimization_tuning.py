@@ -47,7 +47,6 @@ def main():
     parser.add_argument("--opt-steps", type=int, default=100)
     parser.add_argument("--objective-mode", choices=["identification", "gain-tuning"],
                         default="gain-tuning")
-    parser.add_argument("--fim-a-slip-max", action=argparse.BooleanOptionalAction, default=False)
     # Settings for multiple trajectory synthesis
     parser.add_argument("--num-trajectories", type=int, default=10)
     parser.add_argument("--constraint-weight-jitter", type=float, default=0.4) # factor for diverse constraints
@@ -123,8 +122,11 @@ def main():
     residual_model = None
     if args.residual_model is not None:
         from wmr_simulator.residual_model import load_residual_model
+        from wmr_simulator.residual_model.residual import robot_params_from_problem
 
-        residual_model, checkpoint = load_residual_model(args.residual_model)
+        residual_model, checkpoint = load_residual_model(
+            args.residual_model, robot_params_from_problem(args.problem)
+        )
         print(f"Loaded residual dynamics model: {args.residual_model}")
         print(f"  config: {checkpoint['config']}")
 
@@ -132,7 +134,6 @@ def main():
         args.problem,
         time_scaling=args.time_scaling,
         objective_mode=args.objective_mode,
-        fim_a_slip_max=args.fim_a_slip_max,
         criterion=args.criterion,
         start_offset_mode=args.start_offset_mode,
         offset_displacement_step_factor=args.offset_displacement_step_factor,

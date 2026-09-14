@@ -23,6 +23,7 @@ BASE_PARAMS = {
     "base_diameter": 0.0843,
     "max_wheel_speed": 228.0,
     "time_constant": 0.17,
+    # Archived results (before the traction limit was removed) still store it.
     "a_slip_max": 3.0,
 }
 
@@ -69,9 +70,8 @@ def test_only_identified_iterations_contribute_a_point(experiment):
 
 
 def test_only_the_four_plotted_parameters_are_carried(experiment):
-    """a_slip_max is stored beside the four but is not plotted -- it is held
-    fixed on most runs (identification.identify_a_slip_max), so a panel for it
-    would be a flat line about a parameter nobody fitted."""
+    """Archived results also store the removed a_slip_max; only the four
+    identified parameters are carried."""
     exp = experiment(1)
     _write_identification(exp.paths(1), params={"wheel_radius": 0.0161})
 
