@@ -173,10 +173,6 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         "num_control_points": 6,
         "time_scaling": "s-curve",
         "window_length": 50,
-        # Include a_slip_max in the FIM design parameters. Disable when its low
-        # sensitivity makes the FIM objective stiff; the burnout model then
-        # stays at its nominal value during trajectory optimization.
-        "fim_a_slip_max": False,
         # Motion limits the constraint term of *this* design is written against,
         # overriding the problem yaml's robot block. The plant is untouched --
         # only the bar the curve is held under moves. Kept separate from the
@@ -214,25 +210,6 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         # out of the joint fit; 0 disables the screening, and it needs at least
         # 4 logs to be meaningful (identification.outliers).
         "outlier_z_threshold": 3.5,
-        # Fit a_slip_max along with the rest. Disable when the recorded
-        # trajectories never approach the traction limit (slow runs).
-        #
-        # On since 2026-09-13. Held at the yaml's 3.0 m/s^2 it made the
-        # *nominal* JAX plant diverge on the MuJoCo identification logs it was
-        # identified from (closed-loop RMSE 0.33-0.70 m, duty pinned at 1)
-        # while 6.87 (mu*g), 0, or the freely fitted value reproduce the logs
-        # (0.051 vs 0.051 m, 0.067 fitted): the per-wheel rate limit invented
-        # slip the plant does not have, and the residual learned to cancel it.
-        # It is weakly observable (4.0 -> 4.1 on MuJoCo, 4.8 -> 7.8 on real July
-        # logs between 600 and 1500 steps, same loss), but every value from ~4
-        # up keeps the nominal loop stable, which is what matters downstream.
-        "identify_a_slip_max": True,
-        # Traction limit init (m/s^2; burnout model, residual_model.burnout).
-        # Used when the current robot config carries a zero value; must be
-        # positive to (re-)enable identification of a_slip_max (log-space
-        # optimizer: 0 * exp(theta) = 0). 0 keeps the model disabled. Ignored
-        # when identify_a_slip_max is off, which leaves a disabled limit disabled.
-        "init_a_slip_max": 3.5,
     },
     "residual": {
         # Expert ensemble geometry (residual_model.residual.ResidualEnsemble).
@@ -253,8 +230,9 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         # Pool the decoded logs of every iteration up to the one being trained
         # (never later ones, so rerunning an old iteration stays reproducible).
         # One-step training is gain-independent, so iterations with different
-        # tuned gains pool soundly; each log's nominal model uses its own
-        # iteration's params (residual.robot_params_for_log).
+        # tuned gains pool soundly. Every log's targets are computed against the
+        # nominal model being trained on (this iteration's identified params),
+        # the one the residual is later added to (residual.train_from_logs).
         "pool_previous_iterations": True,
     },
     "tuning_trajectories": {
@@ -644,7 +622,6 @@ def robot_config_from_problem(problem_cfg: dict) -> dict:
             "gains": [float(gain) for gain in problem_cfg["controller"]["gains"]],
         },
     }
-    payload["robot"]["a_slip_max"] = float(robot_cfg.get("a_slip_max", 0.0))
     gain_parametrization = problem_cfg["controller"].get(
         "gain_parametrization", problem_cfg["controller"].get("gain_schedule")
     )

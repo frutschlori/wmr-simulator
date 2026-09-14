@@ -162,15 +162,15 @@ def main():
     parser.add_argument("--out", type=str, default="models/tuned_gains.yaml")
     args = parser.parse_args()
 
+    robot_params = resolve_gain_robot_params(args.problem, args.fixed_wheel_radius, args.fixed_base_diameter)
     residual_model = None
     if args.residual_model is not None:
         from wmr_simulator.residual_model import load_residual_model
 
-        residual_model, checkpoint = load_residual_model(args.residual_model)
+        residual_model, checkpoint = load_residual_model(args.residual_model, robot_params)
         print(f"Loaded residual dynamics model: {args.residual_model}")
         print(f"  config: {checkpoint['config']}")
 
-    robot_params = resolve_gain_robot_params(args.problem, args.fixed_wheel_radius, args.fixed_base_diameter)
     result = run_gain_tuning_experiment(
         problem_path=args.problem,
         robot_params=robot_params,

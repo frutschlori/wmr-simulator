@@ -304,7 +304,6 @@ class TrajectoryOptimizationPipeline:
         problem_path: str,
         time_scaling: str | None = None,
         objective_mode: str = OBJECTIVE_MODE_IDENTIFICATION,
-        fim_a_slip_max: bool = True,
         num_realizations: int = DEFAULT_NUM_REALIZATIONS,
         realizations: Realizations | None = None,
         criterion: str = DEFAULT_CRITERION,
@@ -418,10 +417,6 @@ class TrajectoryOptimizationPipeline:
         # constant given (num_control_points, time_scaling); cache so repeated
         # eager calls (plotting, tests) don't resample it.
         self._spline_plan_cache: dict[tuple[int, str], BSplinePlan] = {}
-        # a_slip_max sometimes has near-zero sensitivity, which makes the FIM
-        # objective stiff; excluding it keeps the burnout model in the rollout
-        # at its nominal value but drops it from the design parameters.
-        self.fim_a_slip_max = bool(fim_a_slip_max) and self.robot.a_slip_max > 0.0
         # Drawn once and reused at every objective evaluation: the design
         # criterion is an expectation over start poses and rollout noise, and
         # common random numbers keep it a deterministic function of the control
@@ -508,13 +503,8 @@ class TrajectoryOptimizationPipeline:
         if self.objective_mode == OBJECTIVE_MODE_GAIN_TUNING:
             return jnp.asarray(self.controller_gains, dtype=jnp.float32)
         # Identification mode: deterministic replay-identifiable parameters
-        # [r, L_effective] plus a_slip_max when enabled in the problem yaml
-        # and not excluded via fim_a_slip_max (a disabled component has zero
-        # sensitivity and would add a dead FIM column).
-        values = [self.robot.r, self.robot.L]
-        if self.fim_a_slip_max:
-            values.append(self.robot.a_slip_max)
-        return jnp.array(values, dtype=jnp.float32)
+        # [r, L_effective].
+        return jnp.array([self.robot.r, self.robot.L], dtype=jnp.float32)
 
     def fim_parameter_scaling(self, params: jnp.ndarray) -> jnp.ndarray:
         # Relative scaling throughout: the FIM then measures information about a
@@ -552,7 +542,7 @@ class TrajectoryOptimizationPipeline:
                 .set(self.kimotor_fim_scale),
                 dtype=jnp.float32,
             )
-        # Identification params (r, L, a_slip_max) are strictly positive.
+        # Identification params (r, L) are strictly positive.
         return params
 
     def nominal_physical_params(self) -> PhysicalParams:
@@ -561,7 +551,6 @@ class TrajectoryOptimizationPipeline:
             base_diameter=jnp.asarray(self.robot.L, dtype=jnp.float32),
             max_wheel_speed=jnp.asarray(self.robot.max_wheel_speed, dtype=jnp.float32),
             time_constant=jnp.asarray(self.robot.tau, dtype=jnp.float32),
-            a_slip_max=jnp.asarray(self.robot.a_slip_max, dtype=jnp.float32),
         )
 
     def default_measurement_variances(self) -> np.ndarray:
@@ -655,17 +644,12 @@ class TrajectoryOptimizationPipeline:
 
     def physical_params_from_vector(self, params: jnp.ndarray) -> PhysicalParams:
         params = jnp.asarray(params, dtype=jnp.float32)
-        # Layout mirrors nominal_parameters(): [r, L] + optional a_slip_max.
-        # When excluded from the FIM, the burnout model keeps its nominal value.
-        a_slip_max = (
-            params[2] if self.fim_a_slip_max else jnp.asarray(self.robot.a_slip_max, dtype=jnp.float32)
-        )
+        # Layout mirrors nominal_parameters(): [r, L].
         return PhysicalParams(
             wheel_radius=params[0],
             base_diameter=params[1],
             max_wheel_speed=jnp.asarray(1.0, dtype=jnp.float32),
             time_constant=jnp.asarray(0.0, dtype=jnp.float32),
-            a_slip_max=a_slip_max,
         )
 
     def replay_segment_plan(self, target_log: SimulationLog, window_length: int | None = None):
@@ -693,11 +677,6 @@ class TrajectoryOptimizationPipeline:
             target_log=target_log,
             robot_params=self.physical_params_from_vector(params),
             replay_segment_plan=self.replay_segment_plan(target_log, window_length),
-            # Always smooth here, including when fim_a_slip_max is off: the
-            # designer's plant must not depend on which parameters the criterion
-            # happens to score, or two runs of the same problem design against
-            # different robots. This is the consumer the soft clip exists for.
-            smooth_traction_limit=True,
         )
 
     def replay_rollout(

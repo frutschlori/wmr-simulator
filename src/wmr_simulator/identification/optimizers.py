@@ -12,30 +12,22 @@ from wmr_simulator.types import (
 )
 
 
-# Optimizer vector layout: 5 log-relative dims for the positive physical parameters
-# (r, L_effective, u_max, tau_motor, a_slip_max).
-# Notes:
-#   - base_diameter is the *effective* wheelbase; tire-scrub in turns is absorbed
-#     into it because a separate correction would be structurally non-identifiable
-#     (Borenstein & Feng 1996, E_b).
-#   - a_slip_max = init * exp(theta): a zero init keeps the burnout model disabled
-#     (0 * exp(theta) = 0 with zero gradient) -- pass a positive init to identify it.
-_NUM_POSITIVE_DIMS = 5
-_NUM_OPTIMIZER_DIMS = 5
-_A_SLIP_MAX_DIM = 4
+# Optimizer vector layout: 4 log-relative dims for the positive physical parameters
+# (r, L_effective, u_max, tau_motor).
+# base_diameter is the *effective* wheelbase; tire-scrub in turns is absorbed into
+# it because a separate correction would be structurally non-identifiable
+# (Borenstein & Feng 1996, E_b).
+_NUM_OPTIMIZER_DIMS = 4
 
 
 def _params_from_optimizer_values(values: jax.Array, init_params: PhysicalParams) -> PhysicalParams:
     # Log-relative for positive params: value = init * exp(theta) stays positive without clipping.
-    scale_values = physical_params_to_array(init_params)[..., :_NUM_POSITIVE_DIMS]
-    log_relative = values[..., :_NUM_POSITIVE_DIMS]
-    positive = scale_values * jnp.exp(log_relative)
+    positive = physical_params_to_array(init_params) * jnp.exp(values)
     return PhysicalParams(
         wheel_radius=positive[..., 0],
         base_diameter=positive[..., 1],
         max_wheel_speed=positive[..., 2],
         time_constant=positive[..., 3],
-        a_slip_max=positive[..., 4],
     )
 
 
@@ -48,7 +40,6 @@ def optimize_physical_params_adam(
     init_params: PhysicalParams,
     num_steps: int,
     learning_rate: float,
-    identify_a_slip_max: bool = True,
 ):
     """Identify one parameter set from one or more target logs.
 
@@ -57,12 +48,6 @@ def optimize_physical_params_adam(
     pipelines. The normalization is what makes a joint run meaningful: logs
     differ in length, speed and excitation, so raw losses would let the longest
     or fastest log dominate the fit.
-
-    ``identify_a_slip_max=False`` holds the traction limit at its initial value
-    (its optimizer dimension is masked out, so it neither moves nor receives a
-    gradient) while the burnout model stays active in the rollout. Logs that
-    never approach the traction limit carry no information about it, and fitting
-    it anyway just reads noise into a parameter every downstream stage then uses.
     """
     pipelines = list(pipelines)
     if not pipelines:
@@ -74,12 +59,8 @@ def optimize_physical_params_adam(
     if num_steps <= 0:
         return init_params, [], [], []
 
-    optimizer_mask = jnp.ones(_NUM_OPTIMIZER_DIMS, dtype=jnp.float32)
-    if not identify_a_slip_max:
-        optimizer_mask = optimizer_mask.at[_A_SLIP_MAX_DIM].set(0.0)
-
     def params_from_optimizer_values(values):
-        return _params_from_optimizer_values(optimizer_mask * values, init_params)
+        return _params_from_optimizer_values(values, init_params)
 
     def pose_loss_for_params(pipeline, params):
         return pose_window_replay_mse(

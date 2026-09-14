@@ -955,7 +955,6 @@ PARAMETER_PLOT_SPECS: tuple[tuple[str, str, float], ...] = (
     ("L", "effective wheelbase [mm]", 1000.0),
     ("u_max", "max wheel speed [rad/s]", 1.0),
     ("tau", "motor time constant [s]", 1.0),
-    ("a_slip", "traction limit [m/s^2]", 1.0),
 )
 
 

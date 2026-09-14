@@ -3,7 +3,6 @@ from typing import NamedTuple
 import jax
 import jax.numpy as np
 
-from wmr_simulator.residual_model.burnout import traction_limited_ground_speeds
 from wmr_simulator.residual_model.residual import apply_residual_model, residual_features
 
 
@@ -12,7 +11,6 @@ class DiffDriveState(NamedTuple):
     pose: jax.Array           # [x, y, theta]
     wheel_speeds: jax.Array   # motor-side wheel speeds (what the encoders measure)
     key: jax.Array
-    ground_wheel_speeds: jax.Array  # traction-limited ground-contact wheel speeds
 
     # States for logs
     vel_omega: jax.Array      #  [v, w]
@@ -70,9 +68,6 @@ class DiffDrive:
             self.alpha = np.exp(-self.dt / self.tau)
         else:
             self.alpha = 0.0
-        # Traction limit ~ mu*g (m/s^2); 0 disables (burnout model, see
-        # residual_model.burnout).
-        self.a_slip_max = float(robot_cfg.get('a_slip_max', 0.0))
 
     def _resolve_params(
         self,
@@ -80,15 +75,13 @@ class DiffDrive:
         base_diameter=None,
         max_wheel_speed=None,
         time_constant=None,
-        a_slip_max=None,
     ):
         # optionally accept explicit physical parameters s.t. SI-loop can differentiate through module
         r = self.r if wheel_radius is None else wheel_radius
         L = self.L if base_diameter is None else base_diameter
         max_speed = self.max_wheel_speed if max_wheel_speed is None else max_wheel_speed
         tau = self.tau if time_constant is None else time_constant
-        a_slip_max = self.a_slip_max if a_slip_max is None else a_slip_max
-        return r, L, max_speed, tau, a_slip_max
+        return r, L, max_speed, tau
 
     def step(
         self,
@@ -98,14 +91,13 @@ class DiffDrive:
         base_diameter=None,
         max_wheel_speed=None,
         time_constant=None,
-        a_slip_max=None,
         dt=None,
         residual_model=None,
         wheel_speed_cmd=None,
     ):
         duty_cycle = np.array(duty_cycle, dtype=np.float32)
-        r, L, max_speed, tau, a_slip_max = self._resolve_params(
-            wheel_radius, base_diameter, max_wheel_speed, time_constant, a_slip_max
+        r, L, max_speed, tau = self._resolve_params(
+            wheel_radius, base_diameter, max_wheel_speed, time_constant
         )
         dt = self.dt if dt is None else dt
         safe_tau = np.maximum(tau, 1e-3)
@@ -121,15 +113,12 @@ class DiffDrive:
 
         logged_wheel_speed_cmd = target_wheel_speeds if wheel_speed_cmd is None else wheel_speed_cmd
         next_wheel_speeds = nominal_lag_wheel_speeds
-        # 3) Traction limit ("burnout"): ground speeds follow the motor side rate-limited
-        next_ground_speeds = traction_limited_ground_speeds(
-            state.ground_wheel_speeds, next_wheel_speeds, a_slip_max, r, dt
-        )
-        # 4) Body velocities (effective wheelbase, ideal differential-drive kinematics)
-        v_nom, w_nom = body_velocities(next_ground_speeds, r, L)
+        # 3) Body velocities (effective wheelbase, ideal differential-drive
+        #    kinematics). There is no traction model: slip is left to the residual.
+        v_nom, w_nom = body_velocities(next_wheel_speeds, r, L)
 
         if residual_model is not None:
-            # 5) Learned additive residual (see residual_model.residual):
+            # 4) Learned additive residual (see residual_model.residual):
             #    conditioned on the (state, action) pair -- the nominal predicted
             #    twist and the commanded twist the lag is heading toward -- it
             #    corrects the forward speed and yaw rate the ideal kinematics get
@@ -147,7 +136,7 @@ class DiffDrive:
         else:
             v = v_nom
             w = w_nom
-        # 6) Pose integration (ideal differential-drive kinematics, v_y = 0).
+        # 5) Pose integration (ideal differential-drive kinematics, v_y = 0).
         next_pose = integrate_planar_pose(state.pose, v, w, dt)
 
         # Logged vel_omega stays [v_x_body, omega].
@@ -157,7 +146,6 @@ class DiffDrive:
             next_pose,
             next_wheel_speeds,
             state.key,
-            next_ground_speeds,
             next_vel_omega,
             duty_cycle,
             logged_wheel_speed_cmd,
@@ -171,33 +159,18 @@ class DiffDrive:
         duty_cycle,
         wheel_radius=None,
         base_diameter=None,
-        a_slip_max=None,
         dt=None,
         wheel_speed_cmd=None,
-        smooth_traction_limit: bool = True,
     ):
         """Propagates the robot state from measured (motor-side) wheel speeds
-        without motor dynamics (used by replay-based identification).
-
-        The traction limit (a_slip_max) is applied so that replay-based
-        identification and FIM computations are sensitive to it.
-
-        ``smooth_traction_limit=False`` drops the smooth saturation for a plain
-        clip. Only pass it when a_slip_max is held fixed -- the smooth version
-        is what makes it differentiable at all (burnout.traction_limited_ground_speeds).
-        """
+        without motor dynamics (used by replay-based identification)."""
         wheel_speeds = np.array(wheel_speeds, dtype=np.float32)
         if wheel_speed_cmd is None:
             wheel_speed_cmd = np.zeros_like(wheel_speeds)
-        r, L, _, _, a_slip_max = self._resolve_params(
-            wheel_radius, base_diameter, a_slip_max=a_slip_max
-        )
+        r, L, _, _ = self._resolve_params(wheel_radius, base_diameter)
         dt = self.dt if dt is None else dt
 
-        ground_speeds = traction_limited_ground_speeds(
-            state.ground_wheel_speeds, wheel_speeds, a_slip_max, r, dt, smooth=smooth_traction_limit
-        )
-        v, w = body_velocities(ground_speeds, r, L)
+        v, w = body_velocities(wheel_speeds, r, L)
         next_pose = integrate_planar_pose(state.pose, v, w, dt)
         next_vel_omega = np.array([v, w])
 
@@ -205,7 +178,6 @@ class DiffDrive:
             next_pose,
             wheel_speeds,
             state.key,
-            ground_speeds,
             next_vel_omega,
             duty_cycle,
             wheel_speed_cmd,
@@ -219,7 +191,6 @@ class DiffDrive:
             pose=np.array(init_pose, dtype=np.float32),
             wheel_speeds=np.array((0.0, 0.0), dtype=np.float32),
             key=key,
-            ground_wheel_speeds=np.array((0.0, 0.0), dtype=np.float32),
             vel_omega=np.array((0.0, 0.0), dtype=np.float32),
             duty_cycle=np.array((0.0, 0.0), dtype=np.float32),
             wheel_speed_cmd=np.array((0.0, 0.0), dtype=np.float32),
