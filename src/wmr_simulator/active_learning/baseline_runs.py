@@ -38,6 +38,7 @@ import io
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 
@@ -62,6 +63,13 @@ BENCHMARK_SHAPE = "benchmark"
 # on the card. Anything else directly under data/ is a static-gain recording.
 GAIN_MLP_DIRECTORY_NAMES = ("with gain MLP", "with_gain_MLP")
 
+# Yaw ringing: the IMU yaw rate minus its own centered moving average over this
+# window. 0.3 s passes the 3-4 Hz yaw oscillation that precedes duty saturation
+# on the fast circle and removes the commanded yaw-rate profile, which changes
+# over seconds. Measured on the July exp01 circle runs: static controllers that
+# rang (and one that diverged) 1.7-3.4 rad/s, the gain MLP 0.15-0.63 rad/s.
+YAW_RINGING_WINDOW_S = 0.3
+
 
 @dataclass(frozen=True)
 class BaselineRun:
@@ -71,6 +79,7 @@ class BaselineRun:
     poses: np.ndarray  # (N, 3) smoothed mocap pose track
     time_s: np.ndarray  # (N,) pose timestamps
     tracking_rmse: float | None
+    yaw_ringing: float | None
 
 
 @dataclass(frozen=True)
@@ -102,9 +111,9 @@ def collect_baseline_runs(
                 logs = load_run_logs(directory, max_runs=max_runs, clip_after_first_trajectory=clip)
                 if not logs:
                     continue
-                runs[variant] = [_baseline_run(name, log) for name, log in logs]
+                runs[variant] = [_baseline_run(run) for run in logs]
                 if reference is None:
-                    reference = np.asarray(logs[0][1].reference.states, dtype=float)[:, :3]
+                    reference = np.asarray(logs[0].log.reference.states, dtype=float)[:, :3]
             if runs:
                 collected.setdefault(shape, []).append(
                     BaselineIterationRuns(index=index, runs=runs, reference=reference)
@@ -155,19 +164,29 @@ def _holds_runs(directory: Path) -> bool:
     return directory.is_dir() and any(path.is_file() for path in directory.glob("TR*"))
 
 
+class RunLog(NamedTuple):
+    """One recording: its name, the loaded log and the IMU yaw-rate stream
+    (``pololu.log_loader.load_imu_gyro_z``; empty arrays when not logged)."""
+
+    name: str
+    log: object
+    imu_time_s: np.ndarray
+    imu_gyro_z: np.ndarray
+
+
 def load_run_logs(
     directory: Path,
     max_runs: int | None = None,
     clip_after_first_trajectory: bool = True,
-) -> list[tuple[str, object]]:
-    """``(name, log)`` for the ``TR*`` recordings directly in ``directory``.
+) -> list[RunLog]:
+    """A ``RunLog`` for each ``TR*`` recording directly in ``directory``.
 
     Benchmark recordings are normally kept in the firmware's binary SD-card
     format, so anything that is not already a csv is decoded into a temporary
     directory -- reading an experiment for a plot must not write into it.
     """
     from wmr_simulator.pololu.decode_binary import decode_file
-    from wmr_simulator.pololu.log_loader import load_pololu_traj_control_log
+    from wmr_simulator.pololu.log_loader import load_imu_gyro_z, load_pololu_traj_control_log
 
     directory = Path(directory)
     if not directory.is_dir():
@@ -180,7 +199,7 @@ def load_run_logs(
     if max_runs is not None:
         log_paths = log_paths[:max_runs]
 
-    logs: list[tuple[str, object]] = []
+    logs: list[RunLog] = []
     with tempfile.TemporaryDirectory(prefix="baseline_runs_") as temp_name:
         temporary_dir = Path(temp_name)
         for log_path in log_paths:
@@ -191,25 +210,25 @@ def load_run_logs(
                         print(f"Baseline run skipped, unreadable log: {log_path}")
                         continue
             try:
-                logs.append(
-                    (
-                        log_path.stem,
-                        load_pololu_traj_control_log(
-                            csv_path, clip_after_first_trajectory=clip_after_first_trajectory
-                        ),
-                    )
+                log = load_pololu_traj_control_log(
+                    csv_path, clip_after_first_trajectory=clip_after_first_trajectory
                 )
+                imu_time, imu_gyro_z = load_imu_gyro_z(
+                    csv_path, clip_after_first_trajectory=clip_after_first_trajectory
+                )
+                logs.append(RunLog(log_path.stem, log, imu_time, imu_gyro_z))
             except ValueError as error:
                 print(f"Baseline run skipped {log_path}: {error}")
     return logs
 
 
-def _baseline_run(name: str, log) -> BaselineRun:
+def _baseline_run(run: RunLog) -> BaselineRun:
     return BaselineRun(
-        name=name,
-        poses=np.asarray(log.pose.states, dtype=float),
-        time_s=np.asarray(log.pose.time_s, dtype=float),
-        tracking_rmse=run_tracking_rmse(log),
+        name=run.name,
+        poses=np.asarray(run.log.pose.states, dtype=float),
+        time_s=np.asarray(run.log.pose.time_s, dtype=float),
+        tracking_rmse=run_tracking_rmse(run.log),
+        yaw_ringing=run_yaw_ringing(run),
     )
 
 
@@ -232,6 +251,41 @@ def run_tracking_rmse(log) -> float | None:
     error_x = np.interp(target_time, pose_time, pose_states[:, 0]) - reference_states[1:, 0]
     error_y = np.interp(target_time, pose_time, pose_states[:, 1]) - reference_states[1:, 1]
     return float(np.sqrt(np.mean(error_x**2 + error_y**2)))
+
+
+def run_yaw_ringing(run: RunLog, window_s: float = YAW_RINGING_WINDOW_S) -> float | None:
+    """RMS of the high-passed IMU yaw rate over the reference's time span [rad/s].
+
+    The smoothness counterpart to ``run_tracking_rmse``: position RMSE cannot
+    tell a controller that tracks through a 3-4 Hz yaw oscillation from one that
+    does not, and that oscillation is what drives the wheels into duty
+    saturation and the robot off the fast circle. Read off the gyro rather than
+    the mocap twist, which the Savitzky-Golay smoothing attenuates, or the
+    encoders, which stop measuring the body once the wheels slip. The stream is
+    resampled onto its median sample period so the moving average is a plain
+    uniform filter. None when the log carries no IMU samples in that span.
+    """
+    reference_time = np.asarray(run.log.reference.time_s, dtype=float)
+    imu_time = np.asarray(run.imu_time_s, dtype=float)
+    gyro = np.asarray(run.imu_gyro_z, dtype=float)
+    if len(reference_time) < 2 or len(imu_time) < 3:
+        return None
+    inside = (imu_time >= reference_time[0]) & (imu_time <= reference_time[-1])
+    if int(inside.sum()) < 3:
+        return None
+    imu_time, gyro = imu_time[inside], gyro[inside]
+    period = float(np.median(np.diff(imu_time)))
+    if period <= 0.0:
+        return None
+    grid = np.arange(imu_time[0], imu_time[-1], period)
+    samples = int(round(window_s / period)) | 1  # odd, so the average is centered
+    if len(grid) <= samples:
+        return None
+    rate = np.interp(grid, imu_time, gyro)
+    trend = np.convolve(rate, np.ones(samples) / samples, mode="valid")
+    half = samples // 2
+    residual = rate[half : len(rate) - half] - trend
+    return float(np.sqrt(np.mean(residual**2)))
 
 
 def variant_panels(records: list[BaselineIterationRuns]) -> tuple[tuple[str, str], ...]:

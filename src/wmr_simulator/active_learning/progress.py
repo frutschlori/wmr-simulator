@@ -37,6 +37,11 @@ the identified sim predicts reality; the individual runs come back alongside it
 chained, so a diverging one is a real outcome rather than noise to be averaged
 away silently.
 
+Besides the loss terms, every recorded run is scored for yaw ringing
+(``baseline_runs.run_yaw_ringing``, the high-passed IMU yaw rate): the
+smoothness metric beside the tracking ones. It has no sim counterpart -- the
+JAX plant's yaw rate comes off a PT1 and is smooth by construction.
+
 The heavy lifting (building the pipeline, the closed-loop rollout) lives here;
 ``visualization.pipeline_progress`` only renders the returned records.
 """
@@ -250,7 +255,7 @@ def _load_benchmark_logs(paths, benchmark_dir=None) -> list:
     directory = _benchmark_directory(paths, benchmark_dir)
     if directory is None:
         return []
-    logs = [log for _, log in load_run_logs(directory)]
+    logs = load_run_logs(directory)
     if logs:
         return logs
     # A benchmark *set* keeps one subdirectory per reference, so the runs are one
@@ -258,22 +263,25 @@ def _load_benchmark_logs(paths, benchmark_dir=None) -> list:
     # what makes it a transfer score rather than a score on one shape -- the
     # per-shape breakdown is what the baseline-runs figures are for.
     return [
-        log
+        run
         for shape_dir in sorted(path for path in directory.glob("*") if path.is_dir())
-        for _, log in load_run_logs(shape_dir)
+        for run in load_run_logs(shape_dir)
     ]
 
 
 def _evaluate_iteration(
     experiment, index, weights, num_realizations, seed, benchmark_dir=None, static_controller=False
 ):
-    """Benchmark sim/real terms of one iteration: the two run means, plus the
-    per-run real terms behind the second of them."""
+    """Benchmark sim/real terms of one iteration: the two run means, the
+    per-run real terms behind the second of them, and each run's yaw ringing
+    (None where the log carries no IMU stream)."""
     import jax
 
     from wmr_simulator.active_learning.stages import _log_gain_parametrization
     from wmr_simulator.gain_tuning.pipeline import ControllerTuningPipeline, resolve_gain_robot_params
     import jax.numpy as jnp
+
+    from wmr_simulator.active_learning.baseline_runs import run_yaw_ringing
 
     paths = experiment.paths(index)
     logs = _load_benchmark_logs(paths, benchmark_dir)
@@ -306,10 +314,13 @@ def _evaluate_iteration(
 
     sim_terms = []
     real_terms = []
-    for log in logs:
+    ringing = []
+    for run in logs:
+        log = run.log
         real = _real_run_terms(pipeline, log, weights)
         if real is None:
             continue
+        ringing.append(run_yaw_ringing(run))
         sim = _sim_run_terms(
             pipeline, base_gains, schedule_params, log.reference.states, robot_keys, estimator_keys, weights
         )
@@ -322,6 +333,7 @@ def _evaluate_iteration(
         np.mean(np.stack(sim_terms), axis=0),
         np.mean(np.stack(real_terms), axis=0),
         np.stack(real_terms),
+        ringing,
     )
 
 
@@ -366,7 +378,9 @@ def evaluate_pipeline_progress(experiment, benchmark_dir=None, static_controller
     ``gains`` (the *static* controller gains available to the iteration, see
     ``_static_gains``), ``sim`` / ``real`` (loss-term dicts, None when the
     iteration has no benchmark runs) and ``real_runs`` (one loss-term dict per
-    benchmark run, the spread behind ``real``). The gains deployed to *record*
+    benchmark run, the spread behind ``real``) and ``yaw_ringing_runs`` (one
+    ``baseline_runs.run_yaw_ringing`` value per benchmark run, None entries for
+    logs without IMU samples). The gains deployed to *record*
     the iteration are used (rather than the iteration's own tuned
     ``results/gains.yaml``) so every iteration is represented.
     """
@@ -399,13 +413,21 @@ def evaluate_pipeline_progress(experiment, benchmark_dir=None, static_controller
         )
         sim = real = None
         real_runs = []
+        yaw_ringing_runs = []
         if evaluated is not None:
-            sim_terms, real_terms, per_run_real_terms = evaluated
+            sim_terms, real_terms, per_run_real_terms, yaw_ringing_runs = evaluated
             sim = _terms_to_dict(sim_terms)
             real = _terms_to_dict(real_terms)
             real_runs = [_terms_to_dict(terms) for terms in per_run_real_terms]
 
         records.append(
-            {"index": index, "gains": gains, "sim": sim, "real": real, "real_runs": real_runs}
+            {
+                "index": index,
+                "gains": gains,
+                "sim": sim,
+                "real": real,
+                "real_runs": real_runs,
+                "yaw_ringing_runs": yaw_ringing_runs,
+            }
         )
     return records

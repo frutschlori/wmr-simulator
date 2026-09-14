@@ -1,6 +1,7 @@
 """Cross-iteration summary of a full active-learning pipeline run.
 
-One figure, a full-width gain panel over a 2x3 grid of loss panels:
+One figure, a gain panel and a yaw-ringing panel over a 2x3 grid of loss
+panels:
 
 - the gain history (one line per gain: kx, ky, kth, kpmotor, kimotor),
   x = iteration, styled like the joint-tuning gain-history plot
@@ -16,7 +17,10 @@ One figure, a full-width gain panel over a 2x3 grid of loss panels:
   the smaller unreadable. Solid = closed-loop sim of the recording controller,
   dashed = the actual recorded run, one point per iteration, with a shaded band
   over the individual runs behind the recorded mean -- the runs are chained, so one of them diverging is a result rather
-  than scatter an average may quietly absorb.
+  than scatter an average may quietly absorb;
+- the yaw ringing of the recorded runs (``baseline_runs.run_yaw_ringing``), the
+  smoothness metric beside the tracking terms, as the run mean with the same
+  band over the individual runs. Recorded runs only: the JAX plant cannot ring.
 
 The per-iteration records (gains + sim/real loss terms) are computed by
 ``active_learning.progress.evaluate_pipeline_progress`` and only rendered here.
@@ -97,7 +101,8 @@ def plot_pipeline_progress(records, experiment_root, out_path=None, out_prefix="
     # orders of magnitude, so one axis each is what makes them readable at all.
     fig = plt.figure(figsize=(16, 11))
     fig.suptitle(f"Pipeline Progress: {experiment_root.name} (baseline benchmark)", fontsize=16)
-    ax_gains = plt.subplot2grid((3, 3), (0, 0), colspan=3, fig=fig)
+    ax_gains = plt.subplot2grid((3, 3), (0, 0), colspan=2, fig=fig)
+    ax_ringing = plt.subplot2grid((3, 3), (0, 2), fig=fig)
     loss_axes = [
         plt.subplot2grid((3, 3), (1 + index // 3, index % 3), fig=fig)
         for index in range(len(PLOTTED_TERMS))
@@ -136,6 +141,31 @@ def plot_pipeline_progress(records, experiment_root, out_path=None, out_prefix="
     else:
         for ax in loss_axes:
             ax.text(0.5, 0.5, "no benchmark runs", ha="center", va="center", transform=ax.transAxes)
+
+    # --- yaw ringing of the recorded runs ------------------------------------
+    ringing_records = [
+        (rec["index"], [value for value in rec.get("yaw_ringing_runs") or [] if value is not None])
+        for rec in records
+    ]
+    ringing_records = [(index, values) for index, values in ringing_records if values]
+    if ringing_records:
+        xs = [index for index, _ in ringing_records]
+        ax_ringing.plot(
+            xs, [np.mean(values) for _, values in ringing_records],
+            color="black", linestyle="--", marker="o", markersize=3.5, linewidth=1.7, label="Real yaw ringing",
+        )
+        ax_ringing.fill_between(
+            xs, [min(values) for _, values in ringing_records], [max(values) for _, values in ringing_records],
+            color="black", alpha=0.15, linewidth=0,
+        )
+        ax_ringing.set_xticks(xs)
+        ax_ringing.legend(loc="best", fontsize="x-small")
+    else:
+        ax_ringing.text(0.5, 0.5, "no IMU yaw rate in the runs", ha="center", va="center", transform=ax_ringing.transAxes)
+    ax_ringing.set_xlabel("iteration", fontsize="small")
+    ax_ringing.set_ylabel("yaw ringing [rad/s]", fontsize="small")
+    ax_ringing.tick_params(labelsize="small")
+    ax_ringing.set_title("Yaw ringing (high-passed IMU yaw rate RMS)", fontsize="medium")
 
     fig.tight_layout(rect=[0, 0, 1, 0.96])
     fig.savefig(out_path, bbox_inches="tight", transparent=False, facecolor="white")

@@ -21,7 +21,7 @@ from wmr_simulator.trajectory_optimization.constraints import (
     constraint_loss_components_from_reference_states,
     constraint_loss_from_reference_states,
     constraint_weights,
-    min_speeds_for_batch,
+    motion_floors_for_batch,
     motion_limits_from_robot_config,
 )
 from wmr_simulator.trajectory_optimization.fim import (
@@ -567,20 +567,22 @@ class TrajectoryOptimizationPipeline:
     def default_measurement_variances(self) -> np.ndarray:
         return default_measurement_variances(self.problem.estimator_cfg)
 
-    def motion_limits(self, min_speed=None) -> dict[str, jnp.ndarray]:
+    def motion_limits(self, motion_floor=None) -> dict[str, jnp.ndarray]:
         """The bar the constraint term holds the curve under.
 
-        ``min_speed`` overrides the ``v_min`` lower bound for one trajectory. It
-        is an argument rather than part of the config because a batch design
-        deliberately spreads it across the batch -- some trajectories fast, some
-        left free -- so it is per *trajectory*, not per pipeline.
+        ``motion_floor`` is ``[v_min, a_lat_min]`` and overrides both lower bounds
+        for one trajectory. It is an argument rather than part of the config
+        because a batch design deliberately spreads it across the batch -- some
+        trajectories fast and turning, some left free -- so it is per
+        *trajectory*, not per pipeline.
         """
         robot_cfg = self.problem.robot_cfg
         if self.motion_limit_overrides:
             robot_cfg = {**robot_cfg, **self.motion_limit_overrides}
         limits = motion_limits_from_robot_config(robot_cfg)
-        if min_speed is not None:
-            limits = {**limits, "v_min": jnp.asarray(min_speed, dtype=jnp.float32)}
+        if motion_floor is not None:
+            floor = jnp.asarray(motion_floor, dtype=jnp.float32)
+            limits = {**limits, "v_min": floor[0], "a_lat_min": floor[1]}
         return limits
 
     def constraint_weights(self, scale: float = 1.0, component_weights: dict | None = None) -> dict[str, jnp.ndarray]:
@@ -1069,7 +1071,7 @@ class TrajectoryOptimizationPipeline:
         criterion: str | None = None,
         gains: jnp.ndarray | None = None,
         realizations: Realizations | None = None,
-        min_speed=0.0,
+        motion_floor=(0.0, 0.0),
     ) -> jnp.ndarray:
         control_points = self.clamp_control_points(control_points)
         reference_states = self.reference_states_from_control_points(control_points)
@@ -1096,7 +1098,7 @@ class TrajectoryOptimizationPipeline:
             fim_factor=fim_factor,
             reference_states=reference_states,
             dt=self.problem.dt,
-            limits=self.motion_limits(min_speed=min_speed),
+            limits=self.motion_limits(motion_floor=motion_floor),
             weights=self.constraint_weights(
                 scale=constraint_weight,
                 component_weights=constraint_component_weights,
@@ -1121,7 +1123,7 @@ class TrajectoryOptimizationPipeline:
         constraint_violation_tolerance: float = DEFAULT_CONSTRAINT_VIOLATION_TOLERANCE,
         criterion: str | None = None,
         gains: jnp.ndarray | None = None,
-        min_speed=0.0,
+        motion_floor=(0.0, 0.0),
     ) -> dict[str, jnp.ndarray]:
         """The objective's two terms, separately, in the same units it sums them.
 
@@ -1144,7 +1146,7 @@ class TrajectoryOptimizationPipeline:
         constraint_term = constraint_loss_from_reference_states(
             reference_states=reference_states,
             dt=self.problem.dt,
-            limits=self.motion_limits(min_speed=min_speed),
+            limits=self.motion_limits(motion_floor=motion_floor),
             weights=self.constraint_weights(
                 scale=constraint_weight,
                 component_weights=constraint_component_weights,
@@ -1175,14 +1177,14 @@ class TrajectoryOptimizationPipeline:
         constraint_weight: float = 1.0,
         constraint_component_weights: dict | None = None,
         constraint_smooth_max_beta: float = 20.0,
-        min_speed=0.0,
+        motion_floor=(0.0, 0.0),
     ) -> dict[str, jnp.ndarray]:
         control_points = self.clamp_control_points(control_points)
         reference_states = self.reference_states_from_control_points(control_points)
         return constraint_loss_components_from_reference_states(
             reference_states=reference_states,
             dt=self.problem.dt,
-            limits=self.motion_limits(min_speed=min_speed),
+            limits=self.motion_limits(motion_floor=motion_floor),
             weights=self.constraint_weights(
                 scale=constraint_weight,
                 component_weights=constraint_component_weights,
@@ -1352,15 +1354,19 @@ class TrajectoryOptimizationPipeline:
         constraint_smooth_max_beta: float = 20.0,
         min_speed: float = 0.0,
         min_speed_fraction: float = 0.5,
+        min_lateral_acceleration: float = 0.0,
+        min_lateral_acceleration_fraction: float = 0.25,
         verbose: bool = True,
     ):
         # Build the basis before anything is traced; see _spline_plan.
         self._spline_plan(num_control_points, self.time_scaling)
         # Before the candidates: a trajectory's minimum mean speed decides how
         # long its initial curve is laid out (initial_control_point_candidates).
-        min_speeds_per_trajectory = min_speeds_for_batch(
-            num_trajectories, min_speed, min_speed_fraction
+        motion_floors_per_trajectory = motion_floors_for_batch(
+            num_trajectories, min_speed, min_speed_fraction,
+            min_lateral_acceleration, min_lateral_acceleration_fraction,
         )
+        min_speeds_per_trajectory = motion_floors_per_trajectory[:, 0]
         initial_control_point_candidates = self.initial_control_point_candidates(
             num_control_points=num_control_points,
             num_trajectories=num_trajectories,
@@ -1380,6 +1386,12 @@ class TrajectoryOptimizationPipeline:
                 f"Minimum mean speed on {constrained}/{num_trajectories} trajectories: "
                 f"{np.round(min_speeds_per_trajectory[min_speeds_per_trajectory > 0.0], 2).tolist()} m/s "
                 f"(the rest are left unconstrained, so the set still covers the slow regime)"
+            )
+        if verbose and float(min_lateral_acceleration) > 0.0:
+            lateral_floors = motion_floors_per_trajectory[:, 1]
+            print(
+                f"Minimum mean lateral acceleration on {int(np.count_nonzero(lateral_floors))}/{num_trajectories} "
+                f"trajectories: {np.round(lateral_floors[lateral_floors > 0.0], 2).tolist()} m/s^2"
             )
         batch_frozen_start_offsets = self.batch_frozen_start_offsets(num_trajectories, seed)
 
@@ -1424,7 +1436,7 @@ class TrajectoryOptimizationPipeline:
                 constraint_weight=group_constraint_weights,
                 constraint_component_weights=constraint_component_weights,
                 constraint_smooth_max_beta=constraint_smooth_max_beta,
-                min_speed=jnp.asarray(min_speeds_per_trajectory, dtype=jnp.float32),
+                motion_floor=jnp.asarray(motion_floors_per_trajectory, dtype=jnp.float32),
                 realizations_batch=batch_realizations,
                 verbose=verbose,
             )
@@ -1440,7 +1452,7 @@ class TrajectoryOptimizationPipeline:
             for trajectory_index in range(num_trajectories):
                 optimized_control_points_one = optimized_control_points[trajectory_index]
                 candidate_constraint_weight = float(constraint_weights_per_trajectory[trajectory_index])
-                candidate_min_speed = float(min_speeds_per_trajectory[trajectory_index])
+                candidate_motion_floor = tuple(float(value) for value in motion_floors_per_trajectory[trajectory_index])
                 # Scored under this trajectory's own offsets, which is what it
                 # was optimized against.
                 candidate_realizations = self.realizations._replace(
@@ -1454,7 +1466,7 @@ class TrajectoryOptimizationPipeline:
                     constraint_component_weights=constraint_component_weights,
                     constraint_smooth_max_beta=constraint_smooth_max_beta,
                     realizations=candidate_realizations,
-                    min_speed=candidate_min_speed,
+                    motion_floor=candidate_motion_floor,
                 )
                 if not np.isfinite(float(final_loss)):
                     # The trajectory diverged and never recorded a finite point.
@@ -1474,7 +1486,7 @@ class TrajectoryOptimizationPipeline:
                         constraint_component_weights=constraint_component_weights,
                         constraint_smooth_max_beta=constraint_smooth_max_beta,
                         realizations=candidate_realizations,
-                        min_speed=candidate_min_speed,
+                        motion_floor=candidate_motion_floor,
                         )
                 # Final objective value, comparable across trajectories for
                 # best-candidate selection (they differ only in their constraint
@@ -1486,10 +1498,10 @@ class TrajectoryOptimizationPipeline:
             candidate_start_offsets = []
             histories = []
             final_losses = []
-            for control_points, candidate_constraint_weight, candidate_min_speed in zip(
+            for control_points, candidate_constraint_weight, candidate_motion_floor in zip(
                 initial_control_point_candidates,
                 constraint_weights_per_trajectory,
-                min_speeds_per_trajectory,
+                motion_floors_per_trajectory,
             ):
                 trajectory_index = len(optimized)
                 if self.start_offset_mode == START_OFFSET_MODE_RANDOM:
@@ -1506,7 +1518,7 @@ class TrajectoryOptimizationPipeline:
                     constraint_weight=float(candidate_constraint_weight),
                     constraint_component_weights=constraint_component_weights,
                     constraint_smooth_max_beta=constraint_smooth_max_beta,
-                    min_speed=float(candidate_min_speed),
+                    motion_floor=tuple(float(value) for value in candidate_motion_floor),
                     verbose=verbose,
                 )
                 final_loss = self.fim_loss_from_control_points(

@@ -139,9 +139,29 @@ def plot_logged_summary(
     line_meas_left = ax_wheels.plot(wheel_time, wheel_speeds[:, 1], color="tab:orange", linewidth=0.8, label="meas left")[0]
     ax_wheels.set_xlabel("time [s]")
     ax_wheels.set_ylabel("wheel speed [rad/s]")
-    ax_wheels.set_title("Wheel Speeds")
+    ax_wheels.set_title("Wheel Speeds and Duty Cycles")
     ax_wheels.grid(True)
     wheel_legend_handles = [line_cmd_right, line_meas_right, line_cmd_left, line_meas_left]
+
+    # Duty on its own fixed [-1, 1] axis, so a run that reaches the limit reads
+    # as saturated at a glance instead of being rescaled away.
+    duty_cycle = np.asarray(log.wheel.duty_cycle, dtype=float)
+    duty_time = wheel_time[: len(duty_cycle)]
+    ax_duty = ax_wheels.twinx()
+    for column, label, color in ((0, "duty right", "tab:green"), (1, "duty left", "tab:orange")):
+        wheel_legend_handles.append(
+            ax_duty.plot(
+                duty_time,
+                duty_cycle[: len(duty_time), column],
+                color=color,
+                linestyle=":",
+                linewidth=0.7,
+                alpha=0.8,
+                label=label,
+            )[0]
+        )
+    ax_duty.set_ylim(-1.05, 1.05)
+    ax_duty.set_ylabel("duty cycle [-]")
 
     ax_linear_acceleration = axes[0, 3]
     line_ref_linear_acceleration = ax_linear_acceleration.step(
@@ -175,6 +195,8 @@ def plot_logged_summary(
         gains_log = None if (not show_gains or gains_log is None) else np.asarray(gains_log, dtype=float)
     if gains_log is not None:
         ax_wheel_gains = ax_wheels.twinx()
+        # Outside the duty axis, which already occupies the right spine.
+        ax_wheel_gains.spines["right"].set_position(("axes", 1.12))
         for column, label, style in ((3, r"$k_p$ motor", "-"), (4, r"$k_i$ motor", "--")):
             wheel_legend_handles.append(
                 ax_wheel_gains.step(

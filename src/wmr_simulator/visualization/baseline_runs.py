@@ -8,7 +8,9 @@ point of a baseline: it did not move, so a difference between two colours is a
 difference in the controller.
 
 The legend carries each iteration's mean position RMSE against the reference,
-because the eye cannot rank two overlapping bands of runs but that number can.
+because the eye cannot rank two overlapping bands of runs but that number can,
+and its mean yaw ringing (``baseline_runs.run_yaw_ringing``), because a run can
+track well on average while oscillating in yaw on the way to saturating.
 
 The records are collected by ``active_learning.baseline_runs`` and only rendered
 here.
@@ -27,9 +29,14 @@ import numpy as np
 def _iteration_label(record, variant: str) -> str:
     runs = record.runs.get(variant, [])
     errors = [run.tracking_rmse for run in runs if run.tracking_rmse is not None]
+    ringing = [run.yaw_ringing for run in runs if run.yaw_ringing is not None]
     label = f"iteration {record.index}"
     if errors:
-        label += f" (RMSE {np.mean(errors):.3f} m, {len(runs)} run{'s' if len(runs) > 1 else ''})"
+        metrics = [f"RMSE {np.mean(errors):.3f} m"]
+        if ringing:
+            metrics.append(f"yaw ringing {np.mean(ringing):.2f} rad/s")
+        metrics.append(f"{len(runs)} run{'s' if len(runs) > 1 else ''}")
+        label += f" ({', '.join(metrics)})"
     return label
 
 
