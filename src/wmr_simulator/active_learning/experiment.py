@@ -160,34 +160,62 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         # the nominal robot parameters being identified, and the previous
         # residual corrects a plant that has since been re-identified.
         "use_residual_model": False,
-        # Duration of the identification trajectory [s], 0 = the problem yaml's
-        # own sim_time. Its own knob for the same reason the tuning design has
-        # one, and set explicitly here because the *tuning* number (4.0) was
-        # measured and this one was not: this trajectory is placed by hand and
-        # driven open loop on the robot, where a shorter run is simply fewer
-        # samples per log, so it should not inherit a duration chosen to make
-        # closed-loop rollouts informative about gains.
-        "sim_time": 7.0,
         "opt_steps": 750,
         "learning_rate": 5e-3,
-        "num_control_points": 6,
+        # 12, not 6: two phases share the one curve, and at 10 the fast phase
+        # fell short of its floors (mean speed 0.99 against 1.5 in a trial).
+        "num_control_points": 12,
         "time_scaling": "s-curve",
         "window_length": 50,
-        # Motion limits the constraint term of *this* design is written against,
-        # overriding the problem yaml's robot block. The plant is untouched --
-        # only the bar the curve is held under moves. Kept separate from the
-        # tuning design because the two are driven under different conditions:
-        # a tuning trajectory is rolled out in sim from a small start offset,
-        # while this one is placed by hand and driven on the robot, so it is
-        # worth designing it inside a gentler envelope than the hardware's
-        # nominal one. Drop a key to fall back to the problem yaml's value.
-        "motion_limits": {
-            "v_max": 2.5,          # m/s
-            "a_max": 4.0,          # m/s^2
-            "a_max_lateral": 5.0,  # m/s^2
-            "omega_max": 10.0,      # rad/s
-            "alpha_max": 15.0,     # rad/s^2
-        },
+        # The trajectory is a slow phase followed by a fast one, resting in
+        # between (TrajectoryOptimizationPipeline motion_phases). The durations
+        # add up to the design's sim_time. Each phase has its own motion limits
+        # on top of the problem yaml's robot block (only the constraint bar
+        # moves, never the plant) and optional mean floors.
+        #
+        # ``identify`` phases are the ones the identification FIM scores *and*
+        # the ones the identify stage fits, so they must come first (a log is
+        # cut at their end). The fast phase is there for the residual model,
+        # which trains on the whole log: slip and fast turning are what the
+        # nominal model lacks. It is kept out of the fit because slip there
+        # drags the wheelbase wherever the controller's ringing takes it.
+        # Measured 2026-09-14 on MuJoCo (5 chained runs each, identified from
+        # the stock init; plant r 15.96 mm, u 230):
+        #
+        #   fast envelope a / a_lat / alpha    stock gains               test21 it3 static gains
+        #   7.0 / 7.0 / 20 (floors 1.5, 3.0)   spins out, RMSE 0.3-0.5   4/5 diverged
+        #   5.5 / 5.5 / 18 (floors 1.4, 2.5)   RMSE 0.15-0.35, slip 4    4/5 diverged
+        #   4.5 / 5.0 / 15 (floors 1.3, 2.0)   RMSE 0.02, slip p99 0.3   RMSE 0.03, slip p99 0.1
+        #
+        # The last one runs 2 m/s with a total acceleration p99 of 6.5-9 m/s^2
+        # (the traction limit is ~6.4), i.e. at the onset of slip. Fitting
+        # the whole log there gave L 86.6 mm under the tuned gains but 90-107
+        # mm under stock gains depending on the design (r -1%, u -1%). Fitting
+        # the slow phase only gave r 15.97-16.04, u 230.5-230.8, tau 0.197-0.202
+        # in every run, even where the fast phase spun out, and L 76-79 mm
+        # (plant arcs 84; the old 7 s logs 89). The nominal closed loop hardly
+        # tells the wheelbases apart (median path error 0.058 m at L 78 vs
+        # 0.055 at 86.6 on the benchmark logs).
+        #
+        # 7 s in total: the bridged JSN (plus bridge_wait_time and bridge_time)
+        # then stays under the firmware's 48 KiB file limit; 9 s did not.
+        "phases": [
+            {
+                "duration": 3.0,
+                "identify": True,
+                "motion_limits": {"v_max": 1.2, "a_max": 2.0, "a_max_lateral": 2.0, "omega_max": 6.0, "alpha_max": 10.0},
+                # Without a floor the FIM curls the phase into a slow wiggle at the
+                # start (mean 0.18 m/s).
+                "min_speed": 0.6,
+            },
+            {
+                "duration": 4.0,
+                "identify": False,
+                "motion_limits": {"v_max": 2.5, "a_max": 4.5, "a_max_lateral": 5.0, "omega_max": 10.0, "alpha_max": 15.0},
+                "min_speed": 1.3,
+                "min_lateral_acceleration": 2.0,
+            },
+        ],
         # <name>_bridge.JSN is always exported alongside (same directory): the
         # trajectory plus a wait at the goal and a bridge path back to the
         # start, so the experiment can be repeated without repositioning the robot.

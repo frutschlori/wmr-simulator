@@ -146,7 +146,26 @@ def constraint_loss(
     return sum(components.values())
 
 
-def min_speed_loss(v_norm: jnp.ndarray, v_min, smooth_max_beta: float = 20.0) -> jnp.ndarray:
+def _mean_floor_loss(values: jnp.ndarray, floor, phase_masks=None, smooth_max_beta: float = 20.0) -> jnp.ndarray:
+    """Squared fractional shortfall of the mean of ``values`` below ``floor``.
+
+    ``phase_masks`` (P, N) splits the samples into motion phases, and ``floor``
+    is then one value per phase, each judged on its own phase's mean; without
+    masks it is one floor on the whole trajectory. A floor ``<= 0`` is off and
+    contributes exactly 0.
+    """
+    floors = jnp.atleast_1d(jnp.asarray(floor, dtype=values.dtype))
+    if phase_masks is None:
+        means = jnp.mean(values)[None]
+    else:
+        masks = jnp.asarray(phase_masks, dtype=values.dtype)
+        means = (masks @ values) / jnp.maximum(jnp.sum(masks, axis=1), 1.0)
+    shortfall = 1.0 - means / jnp.maximum(floors, 1e-6)
+    losses = jax.vmap(lambda value: smooth_positive_max(value[None], beta=smooth_max_beta))(shortfall) ** 2
+    return jnp.sum(jnp.where(floors > 0.0, losses, jnp.zeros_like(losses)))
+
+
+def min_speed_loss(v_norm: jnp.ndarray, v_min, smooth_max_beta: float = 20.0, phase_masks=None) -> jnp.ndarray:
     """Squared fractional shortfall of the *mean* speed below ``v_min``.
 
     Every other limit here is an upper bound read off the worst sample, but a
@@ -166,14 +185,14 @@ def min_speed_loss(v_norm: jnp.ndarray, v_min, smooth_max_beta: float = 20.0) ->
 
     ``v_min <= 0`` disables it and returns exactly 0, so a design that does not
     ask for a minimum speed is bit-identical to one from before this existed.
+    With ``phase_masks`` each motion phase has its own ``v_min`` on its own mean.
     """
-    v_min = jnp.asarray(v_min, dtype=v_norm.dtype)
-    shortfall = 1.0 - jnp.mean(v_norm) / jnp.maximum(v_min, 1e-6)
-    loss = smooth_positive_max(jnp.reshape(shortfall, (1,)), beta=smooth_max_beta) ** 2
-    return jnp.where(v_min > 0.0, loss, jnp.zeros_like(loss))
+    return _mean_floor_loss(v_norm, v_min, phase_masks, smooth_max_beta)
 
 
-def min_lateral_acceleration_loss(a_lat: jnp.ndarray, a_lat_min, smooth_max_beta: float = 20.0) -> jnp.ndarray:
+def min_lateral_acceleration_loss(
+    a_lat: jnp.ndarray, a_lat_min, smooth_max_beta: float = 20.0, phase_masks=None
+) -> jnp.ndarray:
     """Squared fractional shortfall of the *mean* |v * omega| below ``a_lat_min``.
 
     The turning counterpart of :func:`min_speed_loss`, and a mean for the same
@@ -186,12 +205,10 @@ def min_lateral_acceleration_loss(a_lat: jnp.ndarray, a_lat_min, smooth_max_beta
     against the FIM and the upper limits (a_lat_max, omega_max, alpha_max)
     rather than overriding them.
 
-    ``a_lat_min <= 0`` disables it and returns exactly 0.
+    ``a_lat_min <= 0`` disables it and returns exactly 0. With ``phase_masks``
+    each motion phase has its own floor on its own mean.
     """
-    a_lat_min = jnp.asarray(a_lat_min, dtype=a_lat.dtype)
-    shortfall = 1.0 - jnp.mean(a_lat) / jnp.maximum(a_lat_min, 1e-6)
-    loss = smooth_positive_max(jnp.reshape(shortfall, (1,)), beta=smooth_max_beta) ** 2
-    return jnp.where(a_lat_min > 0.0, loss, jnp.zeros_like(loss))
+    return _mean_floor_loss(a_lat, a_lat_min, phase_masks, smooth_max_beta)
 
 
 def constraint_loss_components(
@@ -203,9 +220,12 @@ def constraint_loss_components(
     weights: dict,
     smooth_max_beta: float = 20.0,
 ) -> dict[str, jnp.ndarray]:
+    # Upper limits broadcast against the samples, so a motion-phased design
+    # passes them per sample; the floors are then per phase (``phase_masks``).
     v_norm = smooth_norm(v, axis=-1)
     a_norm = smooth_norm(a, axis=-1)
     a_lat = jnp.abs(v_norm * omega)
+    phase_masks = limits.get("phase_masks")
 
     g_v_samples = v_norm / limits["v_max"] - 1.0
     g_a_samples = a_norm / limits["a_max"] - 1.0
@@ -226,9 +246,11 @@ def constraint_loss_components(
         "omega": weights["omega"] * omega_loss,
         "alpha": weights["alpha"] * alpha_loss,
         "v_min": weights["v_min"]
-        * min_speed_loss(v_norm, limits.get("v_min", 0.0), smooth_max_beta=smooth_max_beta),
+        * min_speed_loss(v_norm, limits.get("v_min", 0.0), smooth_max_beta=smooth_max_beta, phase_masks=phase_masks),
         "a_lat_min": weights["a_lat_min"]
-        * min_lateral_acceleration_loss(a_lat, limits.get("a_lat_min", 0.0), smooth_max_beta=smooth_max_beta),
+        * min_lateral_acceleration_loss(
+            a_lat, limits.get("a_lat_min", 0.0), smooth_max_beta=smooth_max_beta, phase_masks=phase_masks
+        ),
     }
 
 

@@ -97,7 +97,7 @@ from pathlib import Path
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--trajectory", default="Pololu Data/mujcoco tweaked/iteration_01/identification_trajectory/identification_trajectory_20260820_113707_bridge.JSN")
+    parser.add_argument("--trajectory", default="Pololu Data/test21/iteration_05/identification_trajectory/identification_trajectory_20260915_100448_bridge.JSN")
     parser.add_argument(
         "--gains",
         choices=("parametrized", "static", "both"),

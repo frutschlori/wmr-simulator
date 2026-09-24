@@ -11,6 +11,7 @@ from scipy.interpolate import BSpline
 
 from wmr_simulator.trajectory_optimization.constraints import smooth_positive_max
 from wmr_simulator.trajectory_optimization.parametrization import (
+    normalize_phase_breaks,
     normalize_time_scaling,
     time_scaling_derivatives,
 )
@@ -310,14 +311,18 @@ class BSplinePlan:
     """
 
     def __init__(self, problem, num_control_points: int, time_scaling: str,
-                 degree: int = DEFAULT_SPLINE_DEGREE):
+                 degree: int = DEFAULT_SPLINE_DEGREE, phase_breaks=()):
         self.num_control_points = num_control_points
         self.degree = degree
         self.time_scaling = normalize_time_scaling(time_scaling)
+        # Motion phases (parametrization.time_scaling_derivatives); () is one s-curve.
+        self.phase_breaks = normalize_phase_breaks(phase_breaks)
 
         time_grid = jnp.asarray(problem.sim_time_grid(), dtype=jnp.float32)
         total_time = jnp.asarray(problem.sim_time, dtype=jnp.float32)
-        s, _, _ = time_scaling_derivatives(time_grid, total_time, time_scaling=self.time_scaling)
+        s, _, _ = time_scaling_derivatives(
+            time_grid, total_time, time_scaling=self.time_scaling, phase_breaks=self.phase_breaks
+        )
 
         B0, B1, B2 = bspline_basis_matrices(np.asarray(s, dtype=np.float64),
                                             num_control_points, degree)
@@ -398,7 +403,8 @@ def compute_bspline_reference(
     time_grid = jnp.asarray(problem.sim_time_grid(), dtype=jnp.float32)
     total_time = jnp.asarray(problem.sim_time, dtype=jnp.float32)
     _, s_dot, s_ddot = time_scaling_derivatives(
-        time_grid, total_time, time_scaling=normalize_time_scaling(time_scaling)
+        time_grid, total_time, time_scaling=normalize_time_scaling(time_scaling),
+        phase_breaks=plan.phase_breaks,
     )
     return _reference_from_derivatives(position, dpos_ds, d2pos_ds2, s_dot, s_ddot)
 
