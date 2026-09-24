@@ -271,10 +271,9 @@ def stage_plan_identification_trajectory(experiment: Experiment, iteration: int)
             # The design is driven with the parametrization off, so it is
             # scored at the static gains rather than the problem's base gains.
             controller_gains=design_gains,
-            # This design's own motion envelope, gentler than the one the
-            # tuning designer works in: the identification trajectory is placed
-            # by hand and driven on the robot, not rolled out in sim.
-            motion_limits=config["motion_limits"],
+            # A slow identified phase, then a fast one for the residual; see
+            # identification_trajectory.phases.
+            motion_phases=config["phases"],
             residual_model=residual_model,
         )
         num_control_points = int(config["num_control_points"])
@@ -582,6 +581,31 @@ def _identification_trajectory_jsn(paths: IterationPaths) -> Path:
             "leave exactly one so the deployment is unambiguous."
         )
     return candidates[0]
+
+
+def _identified_duration(paths: IterationPaths) -> float | None:
+    """Seconds of each identification log the fit uses, or None for all of it.
+
+    Read off the trajectory the logs were driven on rather than the experiment
+    config, which may have changed since: a motion-phased design records how
+    long its identified phases run (``identified_duration`` in the pickle), and
+    a trajectory without that record (a copied baseline, a design from before
+    phases) is fitted whole.
+    """
+    import pickle
+
+    pickles = sorted(paths.identification_trajectory_dir.glob("*.pkl"))
+    if not pickles:
+        return None
+    if len(pickles) > 1:
+        raise ValueError(
+            f"Expected one identification trajectory pickle in {paths.identification_trajectory_dir}, "
+            f"found {len(pickles)}."
+        )
+    with pickles[0].open("rb") as file:
+        payload = pickle.load(file)
+    duration = payload.get("identified_duration") if isinstance(payload, dict) else None
+    return None if duration is None else float(duration)
 
 
 def _deployment_seed(experiment: Experiment, iteration: int, index: int) -> int:
@@ -1444,7 +1468,7 @@ def stage_identify(
 
     from wmr_simulator.identification.outliers import robust_parameter_outliers
     from wmr_simulator.identification.pipeline import run_multi_log_identification
-    from wmr_simulator.pololu.log_loader import load_pololu_traj_control_log
+    from wmr_simulator.pololu.log_loader import clip_log_to_duration, load_pololu_traj_control_log
     from wmr_simulator.types import PhysicalParams, physical_params_to_array, print_physical_params
     from wmr_simulator.visualization.identification import (
         plot_identification_log_parameters,
@@ -1484,6 +1508,10 @@ def stage_identify(
         )
         for log_path in log_paths
     ]
+    identified_duration = _identified_duration(paths)
+    if identified_duration is not None:
+        print(f"Fitting the first {identified_duration:.2f} s of each log (the trajectory's identified phases).")
+        pololu_logs = [clip_log_to_duration(pololu_log, identified_duration) for pololu_log in pololu_logs]
 
     per_log_results = []
     for log_path, pololu_log in zip(log_paths, pololu_logs):
@@ -2291,18 +2319,14 @@ def _problem_at_sim_time(source: Path, sim_time: float, name: str, label: str) -
 def _identification_problem(paths: IterationPaths, config: dict) -> Path:
     """The problem the identification design runs against.
 
-    ``identification_trajectory.sim_time`` is its own knob because the two
-    designs are driven under conditions that have nothing in common: a tuning
-    trajectory is rolled out in sim from a small start offset and wants the
-    shortest clock whose designs stay inside ``alpha_max`` (see
-    ``_tuning_problem``), while this one is placed by hand and driven open loop
-    on the robot, where a shorter run is simply less data per log. Nothing has
-    measured what it costs identification to shorten it, which is exactly why
-    it must not ride along on the tuning number.
+    Its clock is the sum of ``identification_trajectory.phases`` durations, its
+    own for the same reason the tuning design has one: a tuning trajectory is
+    rolled out in sim from a small start offset, while this one is placed by
+    hand and driven on the robot.
     """
+    sim_time = sum(float(phase["duration"]) for phase in config["phases"])
     return _problem_at_sim_time(
-        paths.problem, config.get("sim_time"), "problem_identification.yaml",
-        "Identification design",
+        paths.problem, sim_time, "problem_identification.yaml", "Identification design",
     )
 
 

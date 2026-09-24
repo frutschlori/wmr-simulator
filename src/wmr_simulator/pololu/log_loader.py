@@ -150,6 +150,48 @@ def load_pololu_traj_control_log(
     )
 
 
+def clip_log_to_duration(log: SimulationLog, duration: float) -> SimulationLog:
+    """The first ``duration`` seconds of a loaded log, every stream cut on its own time base.
+
+    For a trajectory whose leading part is what an identification fits (a
+    motion-phased identification trajectory, whose later phases are driven for
+    the residual model's sake); the Savitzky-Golay pose smoothing ran on the
+    whole log, so the cut edge carries no filter transient.
+    """
+
+    def keep(time_s):
+        return np.asarray(time_s) <= float(duration)
+
+    def cut(values, mask):
+        return None if values is None else jnp.asarray(np.asarray(values)[mask])
+
+    reference = keep(log.reference.time_s)
+    wheel = keep(log.wheel.time_s)
+    pose = keep(log.pose.time_s)
+    command = keep(log.pose.command_time_s)
+    clean = None if log.pose.clean_time_s is None else keep(log.pose.clean_time_s)
+    return SimulationLog(
+        reference=ReferenceLog(time_s=cut(log.reference.time_s, reference), states=cut(log.reference.states, reference)),
+        wheel=WheelLog(
+            time_s=cut(log.wheel.time_s, wheel),
+            speeds=cut(log.wheel.speeds, wheel),
+            vel_omega=cut(log.wheel.vel_omega, wheel),
+            duty_cycle=cut(log.wheel.duty_cycle, wheel),
+        ),
+        pose=PoseLog(
+            time_s=cut(log.pose.time_s, pose),
+            states=cut(log.pose.states, pose),
+            true_states=cut(log.pose.true_states, pose),
+            command_time_s=cut(log.pose.command_time_s, command),
+            wheel_cmd=cut(log.pose.wheel_cmd, command),
+            twists=cut(log.pose.twists, pose),
+            clean_time_s=None if clean is None else cut(log.pose.clean_time_s, clean),
+            clean_states=None if clean is None else cut(log.pose.clean_states, clean),
+            gains=cut(log.pose.gains, command),
+        ),
+    )
+
+
 def load_imu_gyro_z(
     path: str | Path,
     *,

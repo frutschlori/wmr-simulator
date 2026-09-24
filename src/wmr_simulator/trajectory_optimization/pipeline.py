@@ -57,7 +57,7 @@ from wmr_simulator.trajectory_optimization.bspline import (
     initial_line_control_points,
     stretch_control_points_to_arc,
 )
-from wmr_simulator.trajectory_optimization.parametrization import normalize_time_scaling
+from wmr_simulator.trajectory_optimization.parametrization import normalize_time_scaling, phase_indices
 from wmr_simulator.gain_tuning.defaults import GAIN_TUNING_DEFAULTS
 from wmr_simulator.gain_tuning.objectives import Realizations, make_realizations
 from wmr_simulator.types import PhysicalParams, SimulationLog
@@ -313,6 +313,7 @@ class TrajectoryOptimizationPipeline:
         min_tangent_fraction: float = DEFAULT_MIN_TANGENT_FRACTION,
         kimotor_fim_scale: float | None = None,
         motion_limits: dict | None = None,
+        motion_phases: list[dict] | None = None,
         controller_gains=None,
         residual_model=None,
     ):
@@ -327,6 +328,15 @@ class TrajectoryOptimizationPipeline:
         self.motion_limit_overrides = (
             {} if motion_limits is None else {key: float(value) for key, value in motion_limits.items()}
         )
+        # Consecutive motion phases of one trajectory, each a dict with its
+        # ``duration`` [s], its own ``motion_limits`` (on top of the overrides
+        # above), optional ``min_speed`` / ``min_lateral_acceleration`` floors
+        # on that phase's means, and ``identify`` (default true): whether the
+        # identification FIM scores the phase. The s-curve time scaling
+        # restarts at every boundary, so the reference rests between phases
+        # and each phase can have a character of its own (see
+        # _set_motion_phases). None is one phase under the pipeline-wide limits.
+        self._set_motion_phases(motion_phases)
         # See stabilization_loss_from_control_points: the floor |dpos/ds| is
         # held above, as a fraction of the curve's own rms tangent, so the
         # optimizer cannot buy information by stalling the curve into a cusp and
@@ -416,7 +426,7 @@ class TrajectoryOptimizationPipeline:
         # A BSplinePlan is just the basis sampled on this pipeline's time grid,
         # constant given (num_control_points, time_scaling); cache so repeated
         # eager calls (plotting, tests) don't resample it.
-        self._spline_plan_cache: dict[tuple[int, str], BSplinePlan] = {}
+        self._spline_plan_cache: dict[tuple[int, str, tuple[float, ...]], BSplinePlan] = {}
         # Drawn once and reused at every objective evaluation: the design
         # criterion is an expectation over start poses and rollout noise, and
         # common random numbers keep it a deterministic function of the control
@@ -556,6 +566,52 @@ class TrajectoryOptimizationPipeline:
     def default_measurement_variances(self) -> np.ndarray:
         return default_measurement_variances(self.problem.estimator_cfg)
 
+    def _set_motion_phases(self, motion_phases: list[dict] | None) -> None:
+        """Validate the phases against the problem clock and derive their boundaries.
+
+        The durations have to add up to the problem's ``sim_time`` (to within
+        half a sample): the time grid is the problem's, and a phase list that
+        disagrees with it would silently stretch every phase.
+        """
+        self.motion_phases = [] if motion_phases is None else [dict(phase) for phase in motion_phases]
+        if not self.motion_phases:
+            self.phase_breaks = ()
+            self.identified_phases = ()
+            self.identified_duration = None
+            return
+        durations = np.asarray([float(phase["duration"]) for phase in self.motion_phases], dtype=float)
+        if np.any(durations <= 0.0):
+            raise ValueError(f"Motion phase durations must be positive, got {durations.tolist()}.")
+        if not np.isclose(durations.sum(), self.problem.sim_time, atol=0.5 * self.problem.dt):
+            raise ValueError(
+                f"Motion phase durations add up to {durations.sum():.3f} s but the problem's "
+                f"sim_time is {self.problem.sim_time:.3f} s."
+            )
+        self.phase_breaks = tuple(float(value) for value in np.cumsum(durations)[:-1] / durations.sum())
+        self.identified_phases = tuple(bool(phase.get("identify", True)) for phase in self.motion_phases)
+        num_identified = sum(self.identified_phases)
+        if num_identified == 0 or not all(self.identified_phases[:num_identified]):
+            # The identification fits a log cut at the end of its identified
+            # phases, which only works when they are the leading ones.
+            raise ValueError(
+                f"Identified motion phases must be the leading ones, got identify flags {self.identified_phases}."
+            )
+        self.identified_duration = float(durations[:num_identified].sum())
+
+    def identification_measurement_mask(self, time_s) -> jnp.ndarray:
+        """1 for measurement times inside a phase the identification FIM scores, else 0.
+
+        The phases marked ``identify: false`` are there for what they excite
+        (a fast phase for the residual model's data, say) rather than for the
+        parameters the FIM is about, and the identification fits only the
+        others; scoring them would design for information nobody reads.
+        """
+        time_s = jnp.asarray(time_s, dtype=jnp.float32)
+        if not self.motion_phases:
+            return jnp.ones_like(time_s)
+        index = jnp.clip(phase_indices(time_s / self.problem.sim_time, self.phase_breaks), 0, len(self.motion_phases) - 1)
+        return jnp.asarray(self.identified_phases, dtype=jnp.float32)[index]
+
     def motion_limits(self, motion_floor=None) -> dict[str, jnp.ndarray]:
         """The bar the constraint term holds the curve under.
 
@@ -564,14 +620,48 @@ class TrajectoryOptimizationPipeline:
         because a batch design deliberately spreads it across the batch -- some
         trajectories fast and turning, some left free -- so it is per
         *trajectory*, not per pipeline.
+
+        A motion-phased pipeline returns every upper limit per time sample and
+        the floors per phase, with ``phase_masks`` (P, N) saying which samples
+        each phase owns; there the floors are the phases' own, and a nonzero
+        ``motion_floor`` is an error.
         """
         robot_cfg = self.problem.robot_cfg
         if self.motion_limit_overrides:
             robot_cfg = {**robot_cfg, **self.motion_limit_overrides}
+        if self.motion_phases:
+            if motion_floor is not None and np.any(np.asarray(motion_floor, dtype=float) != 0.0):
+                raise ValueError("A motion-phased design takes its floors from the phases, not motion_floor.")
+            return self._phased_motion_limits(robot_cfg)
         limits = motion_limits_from_robot_config(robot_cfg)
         if motion_floor is not None:
             floor = jnp.asarray(motion_floor, dtype=jnp.float32)
             limits = {**limits, "v_min": floor[0], "a_lat_min": floor[1]}
+        return limits
+
+    def _phased_motion_limits(self, robot_cfg: dict) -> dict[str, jnp.ndarray]:
+        phase_limits = [
+            motion_limits_from_robot_config(
+                {
+                    **robot_cfg,
+                    **{key: float(value) for key, value in phase.get("motion_limits", {}).items()},
+                    "v_min": float(phase.get("min_speed", 0.0)),
+                    "a_lat_min": float(phase.get("min_lateral_acceleration", 0.0)),
+                }
+            )
+            for phase in self.motion_phases
+        ]
+        fraction = self.problem.sim_time_grid() / self.problem.sim_time
+        index = phase_indices(fraction, self.phase_breaks)
+        limits = {
+            key: jnp.stack([phase[key] for phase in phase_limits])[index]
+            for key in ("v_max", "a_max", "a_lat_max", "omega_max", "alpha_max")
+        }
+        for key in ("v_min", "a_lat_min"):
+            limits[key] = jnp.stack([phase[key] for phase in phase_limits])
+        limits["phase_masks"] = jnp.stack(
+            [(index == phase).astype(jnp.float32) for phase in range(len(phase_limits))]
+        )
         return limits
 
     def constraint_weights(self, scale: float = 1.0, component_weights: dict | None = None) -> dict[str, jnp.ndarray]:
@@ -612,10 +702,10 @@ class TrajectoryOptimizationPipeline:
         that hand a fresh control-point count to a jitted optimizer warm it
         first (see ``optimize_trajectories``).
         """
-        key = (num_control_points, time_scaling)
+        key = (num_control_points, time_scaling, self.phase_breaks)
         plan = self._spline_plan_cache.get(key)
         if plan is None:
-            plan = BSplinePlan(self.problem, num_control_points, time_scaling)
+            plan = BSplinePlan(self.problem, num_control_points, time_scaling, phase_breaks=self.phase_breaks)
             self._spline_plan_cache[key] = plan
         return plan
 
@@ -794,11 +884,12 @@ class TrajectoryOptimizationPipeline:
                 realizations=realizations,
             )
         else:
+            target_log = self.closed_loop_log if closed_loop_log is None else closed_loop_log
             measurements = self.replay_measurement_sequence(
                 params,
                 window_length,
                 closed_loop_log=closed_loop_log,
-            )
+            ) * self.identification_measurement_mask(target_log.pose.time_s[1:])[:, None]
         return measurements.reshape(-1)
 
     def compute_fim_factor(self, measurement_variances=None, window_length=None,
@@ -1736,6 +1827,12 @@ class TrajectoryOptimizationPipeline:
                     self.problem.dt,
                     start_offsets=start_offsets,
                     control_points=control_points,
+                    # What a consumer rebuilding the curve from control_points
+                    # needs besides the basis: where the time scaling rests.
+                    phase_breaks=list(self.phase_breaks),
+                    # How much of a log driven on this trajectory the
+                    # identification fits; None = all of it.
+                    identified_duration=self.identified_duration,
                 ),
                 file,
             )
