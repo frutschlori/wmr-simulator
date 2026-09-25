@@ -209,8 +209,7 @@ class SimulationPipeline:
         robot_state = self.robot.get_init_state(key=robot_key, init_pose=pose0)
         estimator_state = self.estimator.get_init_state(key=estimator_key, start_pose=pose0)
         controller_state = jnp.zeros(2, dtype=jnp.float32)
-        delayed_wheel_ref = jnp.zeros(2, dtype=jnp.float32)
-        return robot_state, estimator_state, controller_state, delayed_wheel_ref
+        return robot_state, estimator_state, controller_state
 
     @staticmethod
     def pose_mse(predicted_poses, target_poses):
@@ -257,7 +256,7 @@ class SimulationPipeline:
         nominal_gains = self.gains if controller_gains is None else controller_gains
 
         def geometry_step(carry, ref_state):
-            robot_state, estimator_state, controller_state, delayed_wheel_ref = carry
+            robot_state, estimator_state, controller_state = carry
             pose_est = self.estimator.get_est_pose(estimator_state)
             # Parametrized gains are computed once per geometry step (from the
             # reference and the same estimates the controller sees) and reused
@@ -287,11 +286,12 @@ class SimulationPipeline:
 
             def wheel_step(inner_carry, inner_index):
                 inner_robot_state, inner_estimator_state, inner_controller_state = inner_carry
-                applied_wheel_ref = jnp.where(inner_index == 0, delayed_wheel_ref, wheel_ref)
+                # Firmware shifts the wheel ticker half a period after the outer tick, so the
+                # wheel loop sees the fresh command on its first step.
                 wheel_est = self.estimator.get_est_wheel_speeds(inner_estimator_state)
                 next_controller_state, applied_duty_cycle = self.controller.compute_duty(
                     inner_controller_state,
-                    applied_wheel_ref,
+                    wheel_ref,
                     wheel_est,
                     gains=step_gains,
                     max_wheel_speed=robot_params.max_wheel_speed,
@@ -302,7 +302,7 @@ class SimulationPipeline:
                         applied_duty_cycle,
                         dt=self.wheel_dt,
                         residual_model=residual_model,
-                        wheel_speed_cmd=applied_wheel_ref,
+                        wheel_speed_cmd=wheel_ref,
                     )
                 else:
                     next_robot_state = self.robot.step(
@@ -314,7 +314,7 @@ class SimulationPipeline:
                         time_constant=robot_params.time_constant,
                         dt=self.wheel_dt,
                         residual_model=residual_model,
-                        wheel_speed_cmd=applied_wheel_ref,
+                        wheel_speed_cmd=wheel_ref,
                     )
                 next_estimator_state = self.estimator.update(
                     inner_estimator_state,
@@ -343,7 +343,7 @@ class SimulationPipeline:
                 (robot_state, estimator_state, controller_state),
                 jnp.arange(self.inner_steps_per_geometry_step),
             )
-            next_carry = (next_robot_state, next_estimator_state, next_controller_state, wheel_ref)
+            next_carry = (next_robot_state, next_estimator_state, next_controller_state)
             return next_carry, (
                 wheel_ref,
                 wheel_outputs[0],
