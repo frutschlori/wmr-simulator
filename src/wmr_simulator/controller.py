@@ -1,6 +1,10 @@
 import jax.numpy as np
 
 
+# Firmware `inner_controller.rs` clamps the integrator state, in duty units.
+INTEGRAL_DUTY_LIMIT = 0.8
+
+
 class Controller:
     def __init__(self, robot_param, gains, duty_limits=None, dt=0.1):
         self.gains = gains
@@ -14,7 +18,7 @@ class Controller:
     def compute(self, ctrl_state, ref_state, pose_state, wheel_meas, gains=None,
                 wheel_radius=None, base_diameter=None, max_wheel_speed=None):
         """
-        ctrl_state: (ir, il)
+        ctrl_state: (ir, il), integrator state in duty units
         ref_state: [x, y, theta, vx, vy, omega, a, alpha]
         pose_state: (x, y, theta)
         wheel_meas: (ur_meas, ul_meas) from encoders
@@ -84,16 +88,14 @@ class Controller:
         # Errors
         er = ur_ref - ur_meas
         el = ul_ref - ul_meas
-        # integral errors
+        # Integrator state lives in duty units and is clamped like the firmware's.
         ir, il = ctrl_state
-        ir += er * self.dt
-        il += el * self.dt
-        # control law
-        ur_cmd = ur_ref + kp * er + ki * ir
-        ul_cmd = ul_ref + kp * el + ki * il
+        ki_duty = ki / motor_gain
+        ir = np.clip(ir + ki_duty * self.dt * er, -INTEGRAL_DUTY_LIMIT, INTEGRAL_DUTY_LIMIT)
+        il = np.clip(il + ki_duty * self.dt * el, -INTEGRAL_DUTY_LIMIT, INTEGRAL_DUTY_LIMIT)
         # Map to duty cycles for the motor model.
-        duty_r = ur_cmd / motor_gain
-        duty_l = ul_cmd / motor_gain
+        duty_r = (ur_ref + kp * er) / motor_gain + ir
+        duty_l = (ul_ref + kp * el) / motor_gain + il
         return ir, il, duty_r, duty_l
 
     @staticmethod
