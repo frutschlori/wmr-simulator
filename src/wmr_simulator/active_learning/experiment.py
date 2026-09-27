@@ -285,11 +285,39 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         #   bowed init, 120 steps 1.07 1.00 1.06 0.96 1.12 1.04 0.94 0.73  49 s
         # ~20 s of that is JIT and pipeline construction, so the marginal cost
         # is ~0.23 s/step: below ~75 there is little left to win.
-        "opt_steps": 75,
+        #
+        # 2026-09-27: back to the plain line initialization and 7 control points
+        # (stretch_initialization below), which needs the longer budget.
+        # Measured on iteration 1 (stock static gains, no residual, seed 0,
+        # 15 designs, 4 s), medians over the batch; the design loss is about
+        # the same in every variant, the shapes are not:
+        #                               loss   turning  dir. changes  alpha p90
+        #   stretch init, 5 CP,  75 st  -7.75   2.6 rad      0         -
+        #   stretch init, 5 CP, 250 st  -8.05   2.5 rad      0         -
+        #   line init,    5 CP, 250 st  -8.03   3.3 rad      1       1.01 x max
+        #   line init,    7 CP, 250 st  -8.00   4.5 rad      2       1.06 x max  <- this
+        # More steps or a 3x learning rate hardly move the designs: the control
+        # points travel 0.5-0.7 m and settle near their initialization, so the
+        # initialization decides the shape. The stretched arc gives one big
+        # arc or loop per design. Old EKF noise (noise_pos 0.001, noise_angle
+        # 0.03) lowers the loss (-9.3) but leaves the shapes alone, and removing
+        # the floors makes the designs shorter and straighter. 7 s instead of
+        # 4 s reproduces test19's longer sweeps (turning 4.7 rad). Not yet
+        # benchmarked: 10% of the 7-CP designs exceed alpha_max by up to 6%,
+        # near where designs stopped tracking before (see the min_speed note).
+        # Script: thesis working_notes/figure_scripts/tuning_design_investigation.py.
+        "opt_steps": 250,
         "learning_rate": 1e-2,
-        # 5, not 7: see the min_speed note below -- a stiffer curve is what makes
-        # the faster designs trackable. Also the bspline default (curves.py).
-        "num_control_points": 5,
+        # Was 5 with the stretched initialization (see the min_speed note below:
+        # a stiffer curve kept the faster designs trackable). With the line
+        # initialization, 7 gives the designs room for S-bends and hooks.
+        "num_control_points": 7,
+        # Lay each speed-floored design's initial curve out at the length its
+        # floor asks for (bspline.stretch_control_points_to_arc). It cut the
+        # steps needed to meet the floors, but every design then stays one bowed
+        # arc; False starts all designs on plain random lines, as before
+        # 2026-09-11, and the floors are still met (mean speed 1.08 x floor).
+        "stretch_initialization": False,
         # "s-curve" | "linear". A free (optimized) speed profile was tried
         # 2026-09-12 and deleted: eight unpinned decision variables made the
         # designs seed-unstable (2.2x spread) and never beat the quintic on the
