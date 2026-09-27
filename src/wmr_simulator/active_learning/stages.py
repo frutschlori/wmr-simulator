@@ -412,6 +412,7 @@ def stage_plan_tuning_trajectories(experiment: Experiment, iteration: int) -> li
             min_lateral_acceleration=float(config["min_lateral_acceleration"]),
             min_lateral_acceleration_fraction=float(config["min_lateral_acceleration_fraction"]),
             verbose=False,
+            stretch_initialization=bool(config.get("stretch_initialization", True)),
         )
         final_losses = np.asarray(pipeline.batch_final_losses, dtype=float)
         print(f"Optimized {len(control_point_batch)} tuning trajectories "

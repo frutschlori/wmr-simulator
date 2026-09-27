@@ -64,6 +64,10 @@ def main():
     parser.add_argument("--min-lateral-acceleration", type=float, default=2.0)
     parser.add_argument("--min-lateral-acceleration-fraction", type=float, default=0.25)
     parser.add_argument("--vectorize-trajectories", action="store_true", default=True)
+    # Start speed-floored designs on an arc of the floor's length instead of the
+    # plain random line (see tuning_trajectories.stretch_initialization in
+    # active_learning/experiment.py for why the pipeline now starts on lines).
+    parser.add_argument("--stretch-initialization", action=argparse.BooleanOptionalAction, default=False)
     # Path settings
     parser.add_argument("--time-scaling", choices=["s-curve", "linear"], default="s-curve")
     # B-spline control points. This is the parametrization's stiffness knob:
@@ -242,6 +246,7 @@ def main():
                 min_lateral_acceleration=args.min_lateral_acceleration,
                 min_lateral_acceleration_fraction=args.min_lateral_acceleration_fraction,
                 verbose=False,
+                stretch_initialization=args.stretch_initialization,
             )
             final_losses = np.asarray(pipeline.batch_final_losses, dtype=float)
             best_index = int(np.argmin(np.where(np.isfinite(final_losses), final_losses, np.inf)))

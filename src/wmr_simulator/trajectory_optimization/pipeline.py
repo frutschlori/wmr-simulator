@@ -1427,7 +1427,15 @@ class TrajectoryOptimizationPipeline:
         min_lateral_acceleration: float = 0.0,
         min_lateral_acceleration_fraction: float = 0.25,
         verbose: bool = True,
+        stretch_initialization: bool = True,
     ):
+        """Design ``num_trajectories`` trajectories independently, in parallel.
+
+        ``stretch_initialization`` lays each speed-floored trajectory's initial
+        curve out at the length its floor asks for
+        (bspline.stretch_control_points_to_arc). False keeps the plain random
+        line for every trajectory and lets the optimizer reach the length.
+        """
         # Build the basis before anything is traced; see _spline_plan.
         self._spline_plan(num_control_points, self.time_scaling)
         # Before the candidates: a trajectory's minimum mean speed decides how
@@ -1437,11 +1445,14 @@ class TrajectoryOptimizationPipeline:
             min_lateral_acceleration, min_lateral_acceleration_fraction,
         )
         min_speeds_per_trajectory = motion_floors_per_trajectory[:, 0]
+        # Only the initial curve's shape reads these; the floors themselves are
+        # enforced by the objective either way.
+        initialization_min_speeds = min_speeds_per_trajectory if stretch_initialization else None
         initial_control_point_candidates = self.initial_control_point_candidates(
             num_control_points=num_control_points,
             num_trajectories=num_trajectories,
             seed=seed,
-            min_speeds=min_speeds_per_trajectory,
+            min_speeds=initialization_min_speeds,
         )
         rng = np.random.default_rng(seed + 1)
         if constraint_weight_jitter < 0.0:
@@ -1473,7 +1484,7 @@ class TrajectoryOptimizationPipeline:
                     num_control_points=num_control_points,
                     num_trajectories=num_trajectories,
                     seed=seed,
-                    min_speeds=min_speeds_per_trajectory,
+                    min_speeds=initialization_min_speeds,
                 ),
                 axis=0,
             )
