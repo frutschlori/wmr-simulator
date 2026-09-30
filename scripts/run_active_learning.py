@@ -103,7 +103,9 @@ def build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=None,
         help=(
-            "Enable/disable the residual-model stage (--no-residual-model to disable). "
+            "Enable/disable the residual model (--no-residual-model to disable): off means "
+            "no residual is ever trained, and the trajectory designs and gain tuning all run "
+            "on the nominal plant, whatever their own use_residual_model flags say. "
             "Default: use_residual_model in experiment.yaml, which starts enabled."
         ),
     )

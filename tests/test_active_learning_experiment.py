@@ -173,3 +173,31 @@ def test_finalize_exports_trained_gain_mlp(tmp_path):
         network, ref=[0.3, -0.2, 0.5, 0.4, 1.0], pose=[0.1, 0.0, 0.2], twist=[0.3, 0.8]
     )
     assert np.any(np.abs(factors - 1.0) > 1e-3)
+
+
+def test_residual_flag_off_disables_training_and_every_residual_rollout(tmp_path):
+    import pytest
+
+    from wmr_simulator.active_learning.stages import _residual_in_design, stage_train_residual
+
+    experiment = stage_init(tmp_path / "exp", {"problem": PROBLEM, "use_residual_model": False})
+    assert load_yaml(experiment.config_path)["use_residual_model"] is False
+
+    # The stage flags default on for the tuning design and gain tuning; the
+    # top-level switch overrides them, so a stray checkpoint is never loaded.
+    for stage in ("identification_trajectory", "tuning_trajectories", "gain_tuning"):
+        assert not _residual_in_design(experiment, experiment.config[stage])
+    with pytest.raises(ValueError, match="use_residual_model is disabled"):
+        stage_train_residual(experiment, 1)
+
+
+def test_an_enabled_residual_without_a_checkpoint_refuses_to_design_nominal(tmp_path):
+    import pytest
+
+    from wmr_simulator.active_learning.stages import _load_design_residual_model, _residual_in_design
+
+    experiment = stage_init(tmp_path / "exp", {"problem": PROBLEM})
+    assert _residual_in_design(experiment, experiment.config["tuning_trajectories"])
+    paths = experiment.paths(1)
+    with pytest.raises(FileNotFoundError, match="train-residual"):
+        _load_design_residual_model(paths.residual_model, paths.problem)
