@@ -317,14 +317,16 @@ def launch_run(study_root: Path, spec: dict, spec_path: Path, name: str, seed: i
 def launch_study(spec_path: str | Path, study_root: str | Path, only: list[str] | None = None) -> None:
     """Run every (configuration, seed) of a spec, one after the other."""
     spec_path = Path(spec_path).resolve()
+    # Absolute: every run's commands execute from inside its own directory.
+    study_root = Path(study_root).resolve()
     spec = load_yaml(spec_path)
-    phase_dir = Path(study_root) / spec["phase"]
+    phase_dir = study_root / spec["phase"]
     phase_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(spec_path, phase_dir / "study_spec.yaml")
     for name, seed in study_runs(spec):
         if only and name not in only:
             continue
-        launch_run(Path(study_root), spec, spec_path, name, seed)
+        launch_run(study_root, spec, spec_path, name, seed)
 
 
 def collect_tuning_warnings(experiment: Experiment) -> dict:
