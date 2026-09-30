@@ -1,0 +1,67 @@
+# Phase 1: freeze the tuner. S-A-N with the gain parametrization off, 2 x 2:
+# loss weights (current defaults / unit set) x optimizer (BFGS / July's
+# LHS + Adam). Everything else is the experiment default.
+phase: phase1_tuner
+iterations: 3
+seeds: [0, 1, 2]
+overrides:
+  benchmark: {max_workers: 4}
+configurations:
+  # Cell 1: today's tuner (gain_tuning.defaults as of 2026-09-30).
+  bfgs_current:
+    tag: S-A-N
+    overrides:
+      gain_tuning:
+        position_tracking_weight: 1.0
+        heading_tracking_weight: 0.2
+        linear_velocity_tracking_weight: 1.0
+        angular_velocity_tracking_weight: 1.5
+        input_weight: 0.0
+        input_delta_weight: 1.0
+        omega_delta_weight: 0.0
+        gain_delta_weight: 0.0
+  # Cell 2: July's optimizer block (2026_07_27 exp01/experiment.yaml). The
+  # +/-30% band applies from iteration 2 on; iteration 1 searches the full
+  # box, as the July code did. num_realizations is overridden by the designed
+  # tuning set's own start offsets (4 per trajectory).
+  july_current:
+    tag: S-A-N
+    overrides:
+      gain_tuning: &july_optimizer
+        optimizer: adam
+        steps: 500
+        learning_rate: 1.0e-4
+        num_lhs_points: 500
+        num_adam_optimizations: 3
+        presearch_relative_range: 0.3
+        k_max_stab: 40.0
+        num_realizations: 1
+        gain_delta_weight: 0.0
+        position_tracking_weight: 1.0
+        heading_tracking_weight: 0.2
+        linear_velocity_tracking_weight: 1.0
+        angular_velocity_tracking_weight: 1.5
+        input_weight: 0.0
+        input_delta_weight: 1.0
+        omega_delta_weight: 0.0
+  # Cell 3: unit weights (1 or 0, nothing in between).
+  bfgs_unit:
+    tag: S-A-N
+    overrides:
+      gain_tuning:
+        position_tracking_weight: 1.0
+        heading_tracking_weight: 1.0
+        linear_velocity_tracking_weight: 1.0
+        angular_velocity_tracking_weight: 1.0
+        input_weight: 0.0
+        input_delta_weight: 1.0
+        omega_delta_weight: 0.0
+        gain_delta_weight: 0.0
+  # Cell 4: unit weights + July's optimizer.
+  july_unit:
+    tag: S-A-N
+    overrides:
+      gain_tuning:
+        <<: *july_optimizer
+        heading_tracking_weight: 1.0
+        angular_velocity_tracking_weight: 1.0

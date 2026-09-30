@@ -33,6 +33,7 @@ import shutil
 import statistics
 import sys
 import tempfile
+import time
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
@@ -61,6 +62,10 @@ def stage_init(root: str | Path, overrides: dict | None = None) -> Experiment:
     experiment = Experiment.create(root, overrides)
     problem_cfg = load_yaml(experiment.config["problem"])
     robot_config = robot_config_from_problem(problem_cfg)
+    if not experiment.config["use_gain_parametrization"]:
+        parametrization = robot_config["controller"].get("gain_parametrization")
+        if parametrization is not None:
+            parametrization["enabled"] = False
     _initialize_iteration(experiment, iteration=1, robot_config=robot_config)
     print(f"Initialized experiment at {experiment.root}")
     print(f"  config: {experiment.config_path}")
@@ -1823,6 +1828,7 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
         resolve_gain_robot_params,
         run_gain_tuning_experiment,
     )
+    from wmr_simulator.gain_tuning.checks import warnings_for as check_warnings
     from wmr_simulator.types import print_controller_gains, print_physical_params
     from wmr_simulator.visualization.gain_tuning import (
         TRAINING_KEY_NAMESPACE,
@@ -1910,7 +1916,13 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
         num_adam_optimizations=int(config["num_adam_optimizations"]),
         optimizer=str(config["optimizer"]),
         outlier_loss_factor=float(config["outlier_loss_factor"]),
-        schedule_enabled=config.get("gain_parametrization", config.get("gain_schedule")),
+        # The experiment's master switch wins; on, the stage config (None =
+        # follow the problem yaml) decides.
+        schedule_enabled=(
+            config.get("gain_parametrization", config.get("gain_schedule"))
+            if experiment.config["use_gain_parametrization"]
+            else False
+        ),
         gain_delta_weight=float(config["gain_delta_weight"]),
         static_tune=bool(config["static_tune"]),
         static_tune_steps=int(config["static_tune_steps"]),
@@ -1962,6 +1974,11 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
             if result["static_final_validation_loss"] is None
             else float(result["static_final_validation_loss"])
         ),
+        # Stall / box-bound / divergence checks per run, and the warnings they
+        # raised (gain_tuning.checks). Warnings, not errors: a thesis run must
+        # finish, and a failed check is a result to report.
+        "checks": result["checks"],
+        "warnings": check_warnings(result["checks"]),
     }
     schedule_params = result.get("schedule_params")
     if schedule_params is not None:
@@ -2212,6 +2229,10 @@ def stage_status(experiment: Experiment) -> None:
     deployment = experiment.config["mujoco_deployment"]
     print(f"Experiment: {experiment.root}")
     print(f"  residual model:          {'enabled' if experiment.config['use_residual_model'] else 'disabled'}")
+    print(
+        "  gain parametrization:    "
+        f"{'problem yaml' if experiment.config['use_gain_parametrization'] else 'off (static gains only)'}"
+    )
     for label, flag, baseline in (
         ("identification", "optimize_identification_trajectory", "baseline_identification_trajectory"),
         ("tuning", "optimize_tuning_trajectories", "baseline_tuning_trajectories_dir"),
@@ -2301,6 +2322,31 @@ def stage_run(
         iteration += 1
 
 
+@contextlib.contextmanager
+def logged_stage(paths: IterationPaths, stage: str):
+    """Record the stage's wall-clock start before it runs and its finish after.
+
+    The start is written first, so a stage killed halfway leaves an entry with
+    no ``finished``: its outputs may be partial even where ``iteration_status``
+    already counts them as done (a data/ directory with some of its logs, a
+    tuning set with some of its pickles).
+    """
+    import datetime
+
+    def now() -> str:
+        return datetime.datetime.now().isoformat(timespec="seconds")
+
+    log = load_yaml(paths.stage_log) if paths.stage_log.is_file() else {}
+    log = log or {}
+    log[stage] = {"started": now(), "finished": None, "seconds": None}
+    save_yaml(paths.stage_log, log)
+    start = time.monotonic()
+    yield
+    log = load_yaml(paths.stage_log) or {}
+    log[stage] = {**log.get(stage, {}), "finished": now(), "seconds": round(time.monotonic() - start, 1)}
+    save_yaml(paths.stage_log, log)
+
+
 def _run_iteration(
     experiment: Experiment,
     iteration: int,
@@ -2323,7 +2369,8 @@ def _run_iteration(
     plot_baseline_runs_per_iteration(experiment)
 
     if not status["plan-id-trajectory"]:
-        stage_plan_identification_trajectory(experiment, iteration)
+        with logged_stage(paths, "plan-id-trajectory"):
+            stage_plan_identification_trajectory(experiment, iteration)
         status = iteration_status(experiment, iteration)
 
     # The benchmark scores the controller this iteration deployed, so it is
@@ -2332,12 +2379,15 @@ def _run_iteration(
     # whose data/ is already filled still records the benchmark it is missing.
     deploys_in_simulation = simulate_deployment or experiment.config["mujoco_deployment"]["enabled"]
     if deploys_in_simulation and not status["benchmark"]:
-        stage_run_benchmark(experiment, iteration)
+        with logged_stage(paths, "benchmark"):
+            stage_run_benchmark(experiment, iteration)
 
     if not status["decode-logs"]:
         if deploys_in_simulation:
-            stage_simulate_deployment(experiment, iteration)
-        stage_decode_logs(experiment, iteration)
+            with logged_stage(paths, "simulate-deployment"):
+                stage_simulate_deployment(experiment, iteration)
+        with logged_stage(paths, "decode-logs"):
+            stage_decode_logs(experiment, iteration)
         status = iteration_status(experiment, iteration)
     if not status["decode-logs"]:
         print()
@@ -2351,14 +2401,19 @@ def _run_iteration(
         return False
 
     if not status["identify"]:
-        stage_identify(experiment, iteration, log=log)
+        with logged_stage(paths, "identify"):
+            stage_identify(experiment, iteration, log=log)
     if experiment.config["use_residual_model"] and not paths.residual_model.is_file():
-        stage_train_residual(experiment, iteration)
+        with logged_stage(paths, "train-residual"):
+            stage_train_residual(experiment, iteration)
     if not status["plan-tuning-trajectories"]:
-        stage_plan_tuning_trajectories(experiment, iteration)
+        with logged_stage(paths, "plan-tuning-trajectories"):
+            stage_plan_tuning_trajectories(experiment, iteration)
     if not iteration_status(experiment, iteration)["tune-gains"]:
-        stage_tune_gains(experiment, iteration)
-    stage_finalize(experiment, iteration)
+        with logged_stage(paths, "tune-gains"):
+            stage_tune_gains(experiment, iteration)
+    with logged_stage(paths, "finalize"):
+        stage_finalize(experiment, iteration)
     return True
 
 

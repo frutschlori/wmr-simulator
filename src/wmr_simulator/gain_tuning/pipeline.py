@@ -7,6 +7,13 @@ import numpy as np
 import yaml
 
 from wmr_simulator.controller import controller_gains_array
+from wmr_simulator.gain_tuning.checks import (
+    bound_hits,
+    gains_unchanged,
+    rollout_divergence,
+    stalled,
+)
+from wmr_simulator.gain_tuning.checks import warnings_for as check_warnings
 from wmr_simulator.gain_tuning.objectives import (
     clip_controller_gains,
     closed_loop_objective,
@@ -514,6 +521,23 @@ def run_gain_tuning_experiment(
         if static_final_loss > 0.0:
             improvement = 100.0 * (1.0 - scheduled_final_loss / static_final_loss)
             print(f"Improvement from gain parametrization: {improvement:.2f}%")
+    checks = tuning_checks(
+        pipeline,
+        robot_params,
+        realizations,
+        training_start_offsets,
+        validation_start_offsets,
+        optimization=optimization,
+        init_gains=parametrization_init_gains[0],
+        schedule_enabled=schedule_enabled,
+        static_optimization=static_optimization,
+        static_init_gains=static_init,
+        k_min_stab=k_min_stab,
+        k_max_stab=k_max_stab,
+        k_max_rest=k_max_rest,
+    )
+    for line in check_warnings(checks):
+        print(f"WARNING (tuning check): {line}")
     final_hidden_log = pipeline.run_closed_loop(
         robot_params,
         use_hidden_robot=True,
@@ -581,4 +605,47 @@ def run_gain_tuning_experiment(
         "static_validation_loss_component_history": static_validation_loss_component_history,
         "final_hidden_log": final_hidden_log,
         "final_model_log": final_model_log,
+        # Stall / box-bound / divergence checks per run (gain_tuning.checks).
+        "checks": checks,
     }
+
+
+def tuning_checks(
+    pipeline,
+    robot_params,
+    realizations,
+    training_start_offsets,
+    validation_start_offsets,
+    optimization,
+    init_gains,
+    schedule_enabled,
+    static_optimization,
+    static_init_gains,
+    k_min_stab,
+    k_max_stab,
+    k_max_rest,
+) -> dict:
+    """``gain_tuning.checks`` for each run of one tuning experiment, keyed by
+    the controller variant it produces (``parametrized`` / ``static``)."""
+    def divergence(gains, schedule_params=None):
+        return rollout_divergence(
+            pipeline, robot_params, realizations, training_start_offsets, validation_start_offsets,
+            controller_gains=gains, schedule_params=schedule_params,
+        )
+
+    def run_checks(run_optimization, run_init_gains):
+        gains = run_optimization["gains"]
+        return {
+            "stalled": stalled(run_optimization),
+            "unchanged_from_init": gains_unchanged(gains, run_init_gains, k_min_stab, k_max_stab, k_max_rest),
+            "bound_hits": bound_hits(gains, k_min_stab, k_max_stab, k_max_rest),
+            "divergence": {"tuned": divergence(gains, run_optimization["schedule_params"])},
+        }
+
+    main = run_checks(optimization, init_gains)
+    if schedule_enabled:
+        main["divergence"]["bare_base_gains"] = divergence(optimization["gains"])
+    checks = {"parametrized" if schedule_enabled else "static": main}
+    if static_optimization is not None:
+        checks["static"] = run_checks(static_optimization, static_init_gains)
+    return checks

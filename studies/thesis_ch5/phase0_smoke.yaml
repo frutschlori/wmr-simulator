@@ -1,0 +1,36 @@
+# Phase 0 preflight: every switch combination for one iteration at tiny
+# budgets. Checks that each configuration runs end to end, not what it scores.
+phase: phase0_smoke
+iterations: 1
+seeds: [0]
+overrides:
+  mujoco_deployment: {num_logs: 2}
+  benchmark: {num_runs: 1, max_workers: 4}
+  identification_trajectory: {opt_steps: 30}
+  identification: {steps: 50}
+  residual: {epochs: 30}
+  tuning_trajectories: {num_trajectories: 4, opt_steps: 20}
+  gain_tuning: {steps: 40, static_tune_steps: 40}
+configurations:
+  S-F-N: {tag: S-F-N}
+  S-A-N: {tag: S-A-N}
+  S-F-R: {tag: S-F-R}
+  S-A-R: {tag: S-A-R}
+  S-AF-N: {tag: S-AF-N}
+  D-F-N: {tag: D-F-N}
+  D-A-N: {tag: D-A-N}
+  D-F-R: {tag: D-F-R}
+  D-A-R: {tag: D-A-R}
+  S-A-N_july:
+    tag: S-A-N
+    overrides:
+      gain_tuning:
+        optimizer: adam
+        steps: 20
+        learning_rate: 1.0e-4
+        num_lhs_points: 20
+        num_adam_optimizations: 3
+        presearch_relative_range: 0.3
+        k_max_stab: 40.0
+        num_realizations: 1
+        gain_delta_weight: 0.0
