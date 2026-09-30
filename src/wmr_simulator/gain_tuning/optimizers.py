@@ -5,6 +5,7 @@ import optax
 import optimistix as optx
 from jax_tqdm import scan_tqdm
 
+from wmr_simulator.controller import GAIN_NAMES, NUM_GAINS, controller_gains_array
 from wmr_simulator.gain_parametrization import flat_params as gain_parametrization_flat_params
 from wmr_simulator.gain_parametrization import num_params as gain_parametrization_num_params
 from wmr_simulator.gain_parametrization import with_flat_params, zero_params
@@ -51,9 +52,9 @@ def describe_optimizer(optimizer: str, num_steps: int, learning_rate: float | No
     return f"Adam, {int(num_steps)} steps{rate}"
 
 
-_NUM_GAINS = 5
+_NUM_GAINS = NUM_GAINS
 _NUM_STABLE_GAINS = 4
-_GAIN_NAMES = ("kx", "ky", "kth", "kpmotor", "kimotor")
+_GAIN_NAMES = GAIN_NAMES
 _LOSS_COMPONENT_NAMES = (
     "position_tracking",
     "heading_tracking",
@@ -69,9 +70,11 @@ _LOSS_COMPONENT_NAMES = (
 # ---------------------------------------------------------------------------
 # Optimizer-value <-> controller-gain reparametrization (base gains only)
 #
-# The trainable vector is [gain_values(5), parametrization_flat(num_w)]. The first five entries
-# are the base 5-gain vector in a bounded reparam space (log-space for the four
-# "stable" gains, sqrt-space for the motor I gain); they are clipped to [0, 1].
+# The trainable vector is [gain_values(6), parametrization_flat(num_w)]. The first six entries
+# are the base gain vector in a bounded reparam space (log-space for the four
+# "stable" gains, sqrt-space over [0, k_max_rest] for the motor I and D gains,
+# which may be exactly 0); they are clipped to [0, 1]. A sqrt-space gain that
+# starts at exactly 0 has zero gradient and stays there.
 # The trailing parametrization entries are linear (can be negative) and are not
 # clipped here; each parametrization is responsible for bounding its own effect.
 # ---------------------------------------------------------------------------
@@ -150,7 +153,7 @@ def _candidate_optimizer_values(
     k_max_rest=20.0,
     w_init=None,
 ):
-    """Build candidate vectors of width (5 + num_w). LHS searches the gain part.
+    """Build candidate vectors of width (NUM_GAINS + num_w). LHS searches the gain part.
 
     ``init_gain_values`` may hold several rows; each becomes its own candidate.
     When ``presearch_relative_range`` > 0 the LHS samples a +/- band around the
@@ -735,7 +738,7 @@ def optimize_controller_gains(
 ):
     """Single-stage joint optimization of base gains and the gain schedule.
 
-    The trainable vector is ``[gain_values(5), parametrization_flat(num_w)]``. LHS
+    The trainable vector is ``[gain_values(6), parametrization_flat(num_w)]``. LHS
     presearch and multistart operate on the gain part, with the parametrization
     held at its start value (the warm-started template, else the identity
     mapping) so the candidates are scored under the controller that Adam then
@@ -743,8 +746,9 @@ def optimize_controller_gains(
     When ``schedule_enabled`` is False, ``num_w = 0`` and the parametrization is
     fixed at its identity mapping, reproducing the static controller.
 
-    ``init_gains`` may be a single 5-gain vector or a batch ``(N, 5)`` of them
-    (each becomes its own candidate/start).
+    ``init_gains`` may be a single gain vector or a batch ``(N, 6)`` of them
+    (each becomes its own candidate/start); five-gain vectors from before the
+    D-term are read with kdmotor = 0 (``controller.controller_gains_array``).
 
     Returns a dict with the best start's gains/parametrization plus the raw
     per-start loss histories and selection metadata (``best_start_index``,
@@ -761,6 +765,7 @@ def optimize_controller_gains(
         raise ValueError("num_lhs_points must be non-negative.")
     if num_adam_optimizations <= 0:
         raise ValueError("num_adam_optimizations must be positive.")
+    init_gains = controller_gains_array(init_gains)
     optimizer = optimizer.strip().lower()
     if optimizer not in OPTIMIZERS:
         raise ValueError(f"Unsupported optimizer '{optimizer}'. Expected one of {list(OPTIMIZERS)}.")

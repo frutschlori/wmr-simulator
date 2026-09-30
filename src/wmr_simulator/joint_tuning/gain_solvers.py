@@ -1,10 +1,10 @@
 """The gain block's inner solver: BFGS via optimistix.
 
-The gain block is 5-dimensional, which is the regime where a quasi-Newton method
+The gain block is 6-dimensional, which is the regime where a quasi-Newton method
 is at its best -- a dense Hessian approximation costs nothing to store or
 factor, and Adam's per-coordinate scaling is a poor substitute for real
 curvature when the coordinates are as differently conditioned as
-``[kx, ky, kth, kpmotor, kimotor]`` are.
+``[kx, ky, kth, kpmotor, kimotor, kdmotor]`` are.
 
 **Adam was removed 2026-08-06** and should not come back. Measured on the gain
 block from the stock gains with the trajectories held fixed (initial loss

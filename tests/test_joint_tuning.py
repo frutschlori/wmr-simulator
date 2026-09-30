@@ -595,7 +595,7 @@ def test_best_gains_are_selected_not_the_last_iterate(joint_result):
     # round it is attributed to is one that actually ran.
     assert history["best_gain_score"] == pytest.approx(float(np.min(finite)))
     assert 0 <= history["best_gain_round"] < len(scores)
-    assert joint_result.gains.shape == joint_result.final_gains.shape == (5,)
+    assert joint_result.gains.shape == joint_result.final_gains.shape == (6,)
 
 
 def test_stopping_rule_is_two_sided():

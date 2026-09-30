@@ -6,6 +6,7 @@ import jax.numpy as jnp
 import numpy as np
 import yaml
 
+from wmr_simulator.controller import controller_gains_array
 from wmr_simulator.gain_tuning.objectives import (
     clip_controller_gains,
     closed_loop_objective,
@@ -395,7 +396,7 @@ def run_gain_tuning_experiment(
     # the previous iteration's static gains when the caller hands them over,
     # else the problem's own gains. The "Initial" curves of every summary
     # figure draw this controller.
-    static_init = pipeline.gains if static_init_gains is None else jnp.asarray(static_init_gains, dtype=jnp.float32)
+    static_init = pipeline.gains if static_init_gains is None else controller_gains_array(static_init_gains)
     if schedule_enabled and warm_start_schedule:
         init_gains = pipeline.gains
         init_schedule_params = pipeline.gain_schedule_params

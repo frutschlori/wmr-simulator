@@ -41,9 +41,23 @@ def test_gain_conversion_divides_inner_gains_by_motor_gain():
     assert values["ktheta_traj"] == pytest.approx(6.0)
     assert values["kp_inner"] == pytest.approx(7.15 / 250.0)
     assert values["ki_inner"] == pytest.approx(11.9 / 250.0)
+    # A five-gain vector (from before the D-term) exports kd_inner = 0.
     assert values["kd_inner"] == pytest.approx(0.0)
     # Untouched firmware-only keys come from the template.
     assert values["gear_ratio"] == pytest.approx(DEFAULT_ROBOT_CONFIG["gear_ratio"])
+
+
+def test_kd_inner_is_kdmotor_over_the_motor_gain():
+    values = robot_config_values(physical_params=FakeParams(), controller_gains=[9.5, 7.5, 6.0, 7.15, 11.9, 0.04])
+    assert values["kd_inner"] == pytest.approx(0.04 / 250.0)
+    assert values["kp_inner"] == pytest.approx(7.15 / 250.0)
+
+
+def test_exported_gains_keep_their_precision():
+    # The firmware file is written from Python floats, not the float32 the
+    # simulator computes in: 4.1 must come out as 4.1.
+    values = robot_config_values(physical_params=FakeParams(), controller_gains=[4.1, 7.5, 6.0, 7.15, 11.9, 0.04])
+    assert values["kx_traj"] == 4.1
 
 
 def test_wheel_max_is_the_identified_motor_gain():

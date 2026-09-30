@@ -206,6 +206,14 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
                 "motion_limits": {"v_max": 1.2, "a_max": 2.0, "a_max_lateral": 2.0, "omega_max": 6.0, "alpha_max": 10.0},
                 # Without a floor the FIM curls the phase into a slow wiggle at the
                 # start (mean 0.18 m/s).
+                # TODO (2026-09-27): re-test with this floor disabled (min_speed 0)
+                # on the current code. Later runs suggested the FIM on its own
+                # favours fast designs (pose sensitivity to r_w and L accumulates
+                # with distance per replay window), and the floors were mainly
+                # introduced to excite the residual, which the fast phase below
+                # handles. If the unconstrained design is fast enough, keep the
+                # floors only on the fast phase. Thesis §4.3.3 has a \planned note
+                # waiting on this result.
                 "min_speed": 0.6,
             },
             {
@@ -434,6 +442,9 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         "motion_limits": {},
         "window_length": 50,
         "kimotor_fim_scale": 5.0,
+        # kdmotor's column, pinned for the same reason (the tuner may set the
+        # D-term to exactly 0); the stock kdmotor of problems/pololu_gains.yaml.
+        "kdmotor_fim_scale": 0.01,
         "start_offset_mode": "optimize",
         "constraint_component_weights": {
             "v": 1.0,

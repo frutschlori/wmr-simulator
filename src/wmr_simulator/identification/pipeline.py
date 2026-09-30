@@ -234,6 +234,14 @@ def run_single_experiment_identification(
     init_target_log = pipeline.target_log
     init_replay_log = pipeline.replay_rollout(initial_params, target_log=pipeline.target_log, window_length=window_length)
     bootstrap = None
+    # TODO (2026-09-27): check the spread of max_wheel_speed and time_constant
+    # across bootstrap samples (bootstrap["parameter_samples"] /
+    # ["parameter_covariance"]). Thesis §4.3.4 claims both are identified
+    # reliably from any trajectory, which is why they are left out of the FIM
+    # design criterion; Chapter 5 needs a number for it. Note: this bootstrap
+    # re-simulates the hidden robot with fresh noise keys, so it only works in
+    # sim-to-sim. For hardware logs, use the spread across repeated runs /
+    # iterations of the same experiment instead.
     if bootstrap_samples is not None and bootstrap_samples > 0:
         if pipeline.uses_external_target_log:
             raise ValueError("Bootstrap identification is only supported for simulated target logs.")

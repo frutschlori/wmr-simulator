@@ -2,7 +2,7 @@
 
 A small tanh MLP maps normalized body-frame tracking errors plus the reference
 speed features to one bounded multiplicative factor per *scheduled* controller
-gain (``scheduled_indices``, default all five; gains not listed pass through
+gain (``scheduled_indices``, default the first five; gains not listed pass through
 untouched, e.g. ``[0, 1, 2]`` keeps the motor PI gains static):
 
     gains[i] = base_gains[i] * clip(1 + mlp(z)[i], 0, bound),  bound >= 1
@@ -32,7 +32,11 @@ KIND = "error_mlp"
 # reference speed features of the bounded_reference scheduler.
 FEATURE_NAMES = ("x_e", "y_e", "theta_e", "v_e", "omega_e", "v_d", "abs_omega_d")
 NUM_FEATURES = len(FEATURE_NAMES)
-NUM_GAINS = 5
+# The gains a factor can be scheduled on: the first five of the controller
+# gain vector [kx, ky, kth, kpmotor, kimotor]. The firmware MLP is hard-capped
+# at these five (gain_mlp's NUM_GAINS) and never scales kdmotor, which
+# therefore always passes through as a static gain.
+NUM_SCHEDULABLE_GAINS = 5
 
 _V_D_EPS = 1e-12
 # Default scales for the pose-error features; velocity features are scaled by
@@ -259,14 +263,14 @@ def from_cfg(cfg: dict | None, feature_scale) -> ErrorMlpParams:
     learn_bound = bool(cfg.get("learn_bound", False))
     bound = jnp.asarray(float(cfg.get("bound", 2.0)), dtype=jnp.float32)
     spectral_norm_cap = float(cfg.get("spectral_norm_cap", 1.0))
-    scheduled_indices = tuple(int(index) for index in cfg.get("scheduled_indices", range(NUM_GAINS)))
+    scheduled_indices = tuple(int(index) for index in cfg.get("scheduled_indices", range(NUM_SCHEDULABLE_GAINS)))
     if (
         not scheduled_indices
         or len(set(scheduled_indices)) != len(scheduled_indices)
-        or any(index < 0 or index >= NUM_GAINS for index in scheduled_indices)
+        or any(index < 0 or index >= NUM_SCHEDULABLE_GAINS for index in scheduled_indices)
     ):
         raise ValueError(
-            f"gain parametrization scheduled_indices must be unique indices in [0, {NUM_GAINS - 1}], "
+            f"gain parametrization scheduled_indices must be unique indices in [0, {NUM_SCHEDULABLE_GAINS - 1}], "
             f"got {list(scheduled_indices)}."
         )
 

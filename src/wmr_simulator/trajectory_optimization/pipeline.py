@@ -8,7 +8,7 @@ import jax.numpy as jnp
 import numpy as np
 import yaml
 
-from wmr_simulator.controller import Controller
+from wmr_simulator.controller import KDMOTOR_INDEX, Controller, controller_gains_array
 from wmr_simulator.estimator import DiffDriveEstimator
 from wmr_simulator.robot import DiffDrive
 from wmr_simulator.simulation import (
@@ -149,14 +149,20 @@ DEFAULT_NUM_REALIZATIONS = int(GAIN_TUNING_DEFAULTS["num_realizations"])
 # default k_min_stab of the gain search (gain_tuning.defaults). Only the four
 # gains the tuner searches in log space use it; see fim_parameter_scaling.
 GAIN_FIM_SCALING_FLOOR = float(GAIN_TUNING_DEFAULTS["k_min_stab"])
-# Index of kimotor in the flat 5-gain vector [kx, ky, kth, kpmotor, kimotor].
-# It is the one gain the tuner is allowed to set to exactly 0 (integral action
-# off), which is why it cannot be scaled relative to its own value.
+# Index of kimotor in the flat gain vector [kx, ky, kth, kpmotor, kimotor,
+# kdmotor]. It and kdmotor are the gains the tuner is allowed to set to exactly
+# 0 (integral / derivative action off), which is why neither can be scaled
+# relative to its own value.
 KIMOTOR_INDEX = 4
 # Fallback FIM scale for kimotor, used only when the problem yaml starts it at
 # 0 and there is no nominal value to scale by: the width of the range the tuner
 # searches it over (gain_tuning.optimizers' sqrt space is [0, k_max_rest]).
 KIMOTOR_FIM_SCALE_FALLBACK = float(GAIN_TUNING_DEFAULTS["k_max_rest"])
+# Fallback FIM scale for kdmotor, used only when the design point has kd = 0 and
+# no scale is pinned. Not the search range (k_max_rest = 20 would be a kd that
+# saturates the duty on every reference step), but the stock kdmotor the
+# problem yaml starts from (problems/pololu_gains.yaml).
+KDMOTOR_FIM_SCALE_FALLBACK = 0.01
 OBJECTIVE_MODES = {OBJECTIVE_MODE_IDENTIFICATION, OBJECTIVE_MODE_GAIN_TUNING}
 
 
@@ -312,6 +318,7 @@ class TrajectoryOptimizationPipeline:
         offset_heading_step_factor: float = 1.0,
         min_tangent_fraction: float = DEFAULT_MIN_TANGENT_FRACTION,
         kimotor_fim_scale: float | None = None,
+        kdmotor_fim_scale: float | None = None,
         motion_limits: dict | None = None,
         motion_phases: list[dict] | None = None,
         controller_gains=None,
@@ -373,13 +380,8 @@ class TrajectoryOptimizationPipeline:
         self.controller_gains = (
             self.simulation.gains
             if controller_gains is None
-            else jnp.asarray(controller_gains, dtype=jnp.float32)
+            else controller_gains_array(controller_gains)
         )
-        if self.controller_gains.shape != self.simulation.gains.shape:
-            raise ValueError(
-                f"controller_gains must have shape {self.simulation.gains.shape}, "
-                f"got {self.controller_gains.shape}."
-            )
         if controller_gains is None and self._problem_has_a_trained_parametrization():
             # Not an error -- a bare problem yaml is a legitimate thing to
             # design from -- but designing at a *trained* parametrization's base
@@ -409,6 +411,18 @@ class TrajectoryOptimizationPipeline:
             self.kimotor_fim_scale = float(kimotor_fim_scale)
             if self.kimotor_fim_scale <= 0.0:
                 raise ValueError("kimotor_fim_scale must be positive.")
+        # kdmotor's FIM scale, by the same rule and for the same reason: the
+        # D-term may be tuned to exactly 0, and a relative scale would then
+        # leave its column dead and trace(FIM^-1) unbounded.
+        nominal_kdmotor = float(self.controller_gains[KDMOTOR_INDEX])
+        if kdmotor_fim_scale is None:
+            self.kdmotor_fim_scale = (
+                nominal_kdmotor if nominal_kdmotor > 0.0 else KDMOTOR_FIM_SCALE_FALLBACK
+            )
+        else:
+            self.kdmotor_fim_scale = float(kdmotor_fim_scale)
+            if self.kdmotor_fim_scale <= 0.0:
+                raise ValueError("kdmotor_fim_scale must be positive.")
         self.estimator = self.simulation.estimator
         # The encoder low-pass is part of the plant the designed trajectory will
         # be driven on: the firmware filters the raw wheel speeds with
@@ -546,10 +560,16 @@ class TrajectoryOptimizationPipeline:
             # turns are what excite the motor loop. Scaling by the search range
             # k_max_rest = 20 instead dropped the share to 3-5% and cost 28% of
             # the designed curves' mean |kappa| over 500 steps.
+            #
+            # kdmotor (added 2026-09-30) is pinned the same way. Its constant
+            # likewise sets its share of the criterion; it has not been
+            # measured against design quality the way kimotor's has.
             return jnp.asarray(
                 jnp.maximum(params, GAIN_FIM_SCALING_FLOOR)
                 .at[KIMOTOR_INDEX]
-                .set(self.kimotor_fim_scale),
+                .set(self.kimotor_fim_scale)
+                .at[KDMOTOR_INDEX]
+                .set(self.kdmotor_fim_scale),
                 dtype=jnp.float32,
             )
         # Identification params (r, L) are strictly positive.

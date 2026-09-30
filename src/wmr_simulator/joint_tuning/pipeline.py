@@ -99,6 +99,7 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 
+from wmr_simulator.controller import GAIN_NAMES
 from wmr_simulator.gain_tuning.defaults import GAIN_TUNING_DEFAULTS
 from wmr_simulator.gain_tuning.objectives import (
     Realizations,
@@ -151,7 +152,6 @@ from wmr_simulator.trajectory_optimization.pipeline import (
 )
 
 
-GAIN_NAMES = ("kx", "ky", "kth", "kpmotor", "kimotor")
 # Derived, not spelled out: the standalone designer sums every component
 # constraints.py defines, and a pinning test compares the two objectives. A
 # hand-written tuple here would silently drop any component added there (the
@@ -205,7 +205,7 @@ class JointState(NamedTuple):
     directory, which is what the warm start is.
     """
 
-    gain_values: jax.Array              # (5,)
+    gain_values: jax.Array              # (6,)
     gain_opt_state: optax.OptState
     decision_variables: jax.Array       # (T, 2K)
     free_offsets: jax.Array             # (T, R, 3)
@@ -228,7 +228,7 @@ class JointRoundSnapshot(NamedTuple):
     round_index: int
     control_points: np.ndarray          # (T, K, 2)
     start_offsets: np.ndarray           # (T, R, 3)
-    gains: np.ndarray                   # (5,)
+    gains: np.ndarray                   # (6,)
     validation_loss: float
 
 
@@ -236,8 +236,8 @@ class JointTuningResult(NamedTuple):
     # The best iterate scored on the frozen scoring set, not the last one. On a
     # pair of blocks that keep moving each other's objective, the last iterate
     # is a tail sample; this is the one that ships.
-    gains: jax.Array                    # (5,)
-    final_gains: jax.Array              # (5,) the loop's last iterate
+    gains: jax.Array                    # (6,)
+    final_gains: jax.Array              # (6,) the loop's last iterate
     best_gain_score: float              # validation loss behind `gains`
     control_points: jax.Array           # (T, K, 2)
     reference_states: jax.Array         # (T, N, 8)

@@ -21,7 +21,7 @@ import pytest
 
 from wmr_simulator.gain_parametrization import params_from_cfg
 from wmr_simulator.gain_parametrization.error_mlp import (
-    NUM_GAINS,
+    NUM_SCHEDULABLE_GAINS,
     apply,
     factors as jax_factors,
     with_flat_params,
@@ -62,15 +62,15 @@ def test_reference_forward_matches_jax(scheduled):
         twist = [ref[3] + rng.normal(0, 0.2), ref[4] + rng.normal(0, 0.5)]
 
         factors = reference_forward(payload, ref, pose, twist)
-        assert factors.shape == (NUM_GAINS,)
-        unscheduled = [index for index in range(NUM_GAINS) if index not in scheduled]
+        assert factors.shape == (NUM_SCHEDULABLE_GAINS,)
+        unscheduled = [index for index in range(NUM_SCHEDULABLE_GAINS) if index not in scheduled]
         assert np.all(factors[unscheduled] == 1.0)
 
         ref_state = jnp.asarray([ref[0], ref[1], ref[2], ref[3], 0.0, ref[4], 0.0, 0.0], dtype=jnp.float32)
         pose_j = jnp.asarray(pose, dtype=jnp.float32)
         twist_j = jnp.asarray(twist, dtype=jnp.float32)
 
-        expected_factors = np.ones(NUM_GAINS, dtype=np.float32)
+        expected_factors = np.ones(NUM_SCHEDULABLE_GAINS, dtype=np.float32)
         expected_factors[scheduled] = np.asarray(jax_factors(params, ref_state, pose_j, twist_j))
         np.testing.assert_allclose(factors, expected_factors, rtol=1e-5, atol=1e-6)
 
@@ -103,4 +103,4 @@ def test_identity_parametrization_exports_unit_factors():
     params = params_from_cfg(cfg, FEATURE_SCALE)  # theta = 0 -> identity
     payload = gain_mlp_payload(params)
     factors = reference_forward(payload, [0.3, -0.2, 0.5, 0.4, 1.0], [0.1, 0.0, 0.2], [0.3, 0.8])
-    np.testing.assert_allclose(factors, np.ones(NUM_GAINS), atol=1e-7)
+    np.testing.assert_allclose(factors, np.ones(NUM_SCHEDULABLE_GAINS), atol=1e-7)

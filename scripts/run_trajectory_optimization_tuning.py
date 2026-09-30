@@ -18,6 +18,7 @@ from wmr_simulator.trajectory_optimization.bspline import (
 )
 from wmr_simulator.trajectory_optimization.start_offsets import START_OFFSET_MODE_RANDOM, START_OFFSET_MODES, START_OFFSET_MODE_OPTIMIZE
 from wmr_simulator.trajectory_optimization.objectives import CRITERIA, DEFAULT_CRITERION
+from wmr_simulator.controller import KDMOTOR_INDEX
 from wmr_simulator.trajectory_optimization.pipeline import (
     KIMOTOR_INDEX,
     OBJECTIVE_MODE_GAIN_TUNING,
@@ -89,6 +90,8 @@ def main():
     # tied, the scale falls back to the search range there and the column stops
     # contributing. Changes the design only; nothing exported carries it.
     parser.add_argument("--kimotor-fim-scale", type=float, default=5.0)
+    # The same for kdmotor, which the tuner may also set to exactly 0.
+    parser.add_argument("--kdmotor-fim-scale", type=float, default=0.01)
     # Constraints
     parser.add_argument("--constraint-weight", type=float, default=1.0)
     parser.add_argument("--constraint-v-weight", type=float, default=1.0)
@@ -144,6 +147,7 @@ def main():
         offset_heading_step_factor=args.offset_heading_step_factor,
         min_tangent_fraction=args.min_tangent_fraction,
         kimotor_fim_scale=(args.kimotor_fim_scale if args.kimotor_fim_scale > 0.0 else None),
+        kdmotor_fim_scale=(args.kdmotor_fim_scale if args.kdmotor_fim_scale > 0.0 else None),
         residual_model=residual_model,
     )
 
@@ -178,6 +182,10 @@ def main():
     print(
         f"kimotor: design point {float(pipeline.controller_gains[KIMOTOR_INDEX]):.4g}, "
         f"FIM scale {pipeline.kimotor_fim_scale:.4g}"
+    )
+    print(
+        f"kdmotor: design point {float(pipeline.controller_gains[KDMOTOR_INDEX]):.4g}, "
+        f"FIM scale {pipeline.kdmotor_fim_scale:.4g}"
     )
     print(f"Optimized trajectories: {args.num_trajectories}")
     if args.num_trajectories > 1:
