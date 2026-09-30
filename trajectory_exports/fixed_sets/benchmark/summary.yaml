@@ -1,0 +1,101 @@
+fixed_set: benchmark
+source: trajectory_exports/benchmark_set
+num_references: 6
+ranges:
+  duration:
+  - 5.0
+  - 7.300000000000001
+  num_samples:
+  - 101.0
+  - 147.0
+  v_peak:
+  - 1.8111169483875673
+  - 2.4213019872595636
+  v_mean:
+  - 1.0385607080656358
+  - 1.3351775256520133
+  a_peak:
+  - 2.9296304778438524
+  - 6.11659635066012
+  a_lat_peak:
+  - 2.8906826785378903
+  - 5.7044803083437765
+  a_lat_mean:
+  - 0.7389986732879243
+  - 2.2335738946958767
+  omega_peak:
+  - 1.9634950160980225
+  - 4.6014227867126465
+  alpha_peak:
+  - 1.007080078125
+  - 13.456230163574219
+  worst_limit_ratio:
+  - 0.785398006439251
+  - 1.223319270132024
+references:
+  circle_fast:
+    duration: 5.0
+    num_samples: 101.0
+    v_peak: 2.356194019317753
+    v_mean: 1.2442316482949658
+    a_peak: 5.532929420471275
+    a_lat_peak: 5.551650256668451
+    a_lat_mean: 2.2335738946958767
+    omega_peak: 2.356194019317627
+    alpha_peak: 1.4501196146011353
+    worst_limit_ratio: 1.106585884094255
+  circle_slow:
+    duration: 6.0
+    num_samples: 121.0
+    v_peak: 1.9634950160981273
+    v_mean: 1.0385607080656358
+    a_peak: 3.8462729454041105
+    a_lat_peak: 3.855312678241979
+    a_lat_mean: 1.5536567609193366
+    omega_peak: 1.9634950160980225
+    alpha_peak: 1.007080078125
+    worst_limit_ratio: 0.785398006439251
+  designed_fast:
+    duration: 5.0
+    num_samples: 101.0
+    v_peak: 2.4213019872595636
+    v_mean: 1.1789330593106868
+    a_peak: 2.9296304778438524
+    a_lat_peak: 2.8906826785378903
+    a_lat_mean: 0.7389986732879243
+    omega_peak: 3.133476972579956
+    alpha_peak: 13.456230163574219
+    worst_limit_ratio: 0.9685207949038255
+  lemniscate_big_fast:
+    duration: 6.800000000000001
+    num_samples: 137.0
+    v_peak: 2.305989036242534
+    v_mean: 1.3351775256520133
+    a_peak: 4.050115014967489
+    a_lat_peak: 3.723847151197624
+    a_lat_mean: 1.8353633135260286
+    omega_peak: 3.4375391006469727
+    alpha_peak: 7.84959077835083
+    worst_limit_ratio: 0.9223956144970137
+  lemniscate_big_medium:
+    duration: 7.300000000000001
+    num_samples: 147.0
+    v_peak: 2.1480449858532125
+    v_mean: 1.244344518740468
+    a_peak: 3.5188363344682405
+    a_lat_peak: 3.227958623550755
+    a_lat_mean: 1.5933739618553033
+    omega_peak: 3.203805923461914
+    alpha_peak: 6.827359199523926
+    worst_limit_ratio: 0.859217994341285
+  turbo_drift:
+    duration: 5.0
+    num_samples: 101.0
+    v_peak: 1.8111169483875673
+    v_mean: 1.0686049084329696
+    a_peak: 6.11659635066012
+    a_lat_peak: 5.7044803083437765
+    a_lat_mean: 1.770435405869734
+    omega_peak: 4.6014227867126465
+    alpha_peak: 5.725140571594238
+    worst_limit_ratio: 1.223319270132024

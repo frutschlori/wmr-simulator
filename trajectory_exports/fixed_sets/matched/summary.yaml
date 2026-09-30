@@ -1,0 +1,199 @@
+fixed_set: matched
+num_references: 15
+ranges:
+  duration:
+  - 4.0
+  - 4.0
+  num_samples:
+  - 81.0
+  - 81.0
+  v_peak:
+  - 0.9375
+  - 2.2583940267438227
+  v_mean:
+  - 0.4938271484375
+  - 1.0337087230497142
+  a_peak:
+  - 0.7216699218750025
+  - 4.897767233553928
+  a_lat_peak:
+  - 0.0
+  - 4.879382058643183
+  a_lat_mean:
+  - 0.0
+  - 1.7406709703423673
+  omega_peak:
+  - 0.0
+  - 4.3372284965717185
+  alpha_peak:
+  - 0.0
+  - 15.90003236841544
+  worst_limit_ratio:
+  - 0.375
+  - 0.9795534467107856
+references:
+  circle_r035_ccw:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 1.030835089459151
+    v_mean: 0.5429913095860561
+    a_peak: 3.03605994760073
+    a_lat_peak: 3.0360599476001027
+    a_lat_mean: 1.2184696792395286
+    omega_peak: 2.945243112739822
+    alpha_peak: 2.265076031391462
+    worst_limit_ratio: 0.607211989520146
+  circle_r035_cw:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 1.030835089459151
+    v_mean: 0.542991309586056
+    a_peak: 3.03605994760073
+    a_lat_peak: 3.0360599476001027
+    a_lat_mean: 1.2184696792395286
+    omega_peak: 2.945243112739822
+    alpha_peak: 2.265076031391462
+    worst_limit_ratio: 0.607211989520146
+  circle_r050_ccw:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 1.4726215563702152
+    v_mean: 0.7757018708372231
+    a_peak: 4.337228496572472
+    a_lat_peak: 4.337228496572031
+    a_lat_mean: 1.7406709703423673
+    omega_peak: 2.9452431127401324
+    alpha_peak: 2.2650760313917018
+    worst_limit_ratio: 0.8674456993144943
+  circle_r050_cw:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 1.4726215563702154
+    v_mean: 0.775701870837223
+    a_peak: 4.337228496572472
+    a_lat_peak: 4.337228496572032
+    a_lat_mean: 1.7406709703423673
+    omega_peak: 2.9452431127401324
+    alpha_peak: 2.2650760313917018
+    worst_limit_ratio: 0.8674456993144943
+  arc_r090_ccw:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 1.8562500000000002
+    v_mean: 0.9777777539062499
+    a_peak: 3.828515625
+    a_lat_peak: 3.8285156249997563
+    a_lat_mean: 1.5365079366250456
+    omega_peak: 2.0624999999998685
+    alpha_peak: 1.586191406249896
+    worst_limit_ratio: 0.765703125
+  arc_r090_cw:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 1.8562500000000004
+    v_mean: 0.9777777539062499
+    a_peak: 3.8285156250000005
+    a_lat_peak: 3.8285156249997567
+    a_lat_mean: 1.5365079366250456
+    omega_peak: 2.0624999999998685
+    alpha_peak: 1.586191406249896
+    worst_limit_ratio: 0.7657031250000002
+  arc_r120_ccw:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 1.6875000000000002
+    v_mean: 0.8888888671874997
+    a_peak: 2.373046875
+    a_lat_peak: 2.373046874999817
+    a_lat_mean: 0.9523809524535275
+    omega_peak: 1.4062499999998914
+    alpha_peak: 1.0814941406249134
+    worst_limit_ratio: 0.675
+  s_bend_gentle:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 1.660795048126964
+    v_mean: 0.8091729766651331
+    a_peak: 2.220958964734622
+    a_lat_peak: 1.9942578265126583
+    a_lat_mean: 0.6626144201746624
+    omega_peak: 1.590483379164473
+    alpha_peak: 3.9416102515471194
+    worst_limit_ratio: 0.6643180192507856
+  s_bend_long:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 2.13559469033878
+    v_mean: 1.0337087230497142
+    a_peak: 2.9527321353576053
+    a_lat_peak: 2.654545066404192
+    a_lat_mean: 0.8789015595570426
+    omega_peak: 1.6724358850192305
+    alpha_peak: 4.0760502020022145
+    worst_limit_ratio: 0.854237876135512
+  s_bend_wide:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 2.2583940267438227
+    v_mean: 0.9782653240628825
+    a_peak: 4.3423305830095815
+    a_lat_peak: 3.8944092924567837
+    a_lat_mean: 1.1819135478587992
+    omega_peak: 3.156279239566316
+    alpha_peak: 8.212609324148668
+    worst_limit_ratio: 0.9033576106975291
+  slalom_3:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 1.7270929586058685
+    v_mean: 0.9007047227216542
+    a_peak: 3.903505646915224
+    a_lat_peak: 3.903505646914887
+    a_lat_mean: 0.9815736470079957
+    omega_peak: 2.449258445123067
+    alpha_peak: 8.363006730209174
+    worst_limit_ratio: 0.7807011293830448
+  slalom_tight:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 1.48078206145294
+    v_mean: 0.716494013419962
+    a_peak: 4.879382058644031
+    a_lat_peak: 4.879382058643183
+    a_lat_mean: 1.1389814702410443
+    omega_peak: 4.3372284965717185
+    alpha_peak: 15.90003236841544
+    worst_limit_ratio: 0.9758764117288061
+  slalom_4:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 1.9048247634318085
+    v_mean: 0.9469925387017002
+    a_peak: 4.897767233553928
+    a_lat_peak: 4.847008710100908
+    a_lat_mean: 1.2976576187346744
+    omega_peak: 2.959016261901395
+    alpha_peak: 14.30896596434785
+    worst_limit_ratio: 0.9795534467107856
+  line_long:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 1.875
+    v_mean: 0.987654296875
+    a_peak: 1.4433398437500051
+    a_lat_peak: 0.0
+    a_lat_mean: 0.0
+    omega_peak: 0.0
+    alpha_peak: 0.0
+    worst_limit_ratio: 0.75
+  line_short:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 0.9375
+    v_mean: 0.4938271484375
+    a_peak: 0.7216699218750025
+    a_lat_peak: 0.0
+    a_lat_mean: 0.0
+    omega_peak: 0.0
+    alpha_peak: 0.0
+    worst_limit_ratio: 0.375

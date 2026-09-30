@@ -1,0 +1,530 @@
+fixed_set: random_twist_N45
+seed: 0
+num_references: 45
+ranges:
+  duration:
+  - 4.0
+  - 4.0
+  num_samples:
+  - 81.0
+  - 81.0
+  v_peak:
+  - 0.631872232679993
+  - 2.092734337970463
+  v_mean:
+  - 0.34297799117685657
+  - 1.2286157784523621
+  a_peak:
+  - 1.2803256037919934
+  - 4.996332925288272
+  a_lat_peak:
+  - 0.4981459742523188
+  - 4.984187464805868
+  a_lat_mean:
+  - 0.16376186374754886
+  - 2.028622323523434
+  omega_peak:
+  - 0.6708316027915334
+  - 4.766148725545611
+  alpha_peak:
+  - 1.949824369049991
+  - 15.079754903085327
+  worst_limit_ratio:
+  - 0.3028261070772599
+  - 0.9992665850576545
+references:
+  random_twist_000:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 1.8482624195228565
+    v_mean: 1.0516028286523935
+    a_peak: 4.016685833044005
+    a_lat_peak: 3.040081039342383
+    a_lat_mean: 1.0930100117060813
+    omega_peak: 1.7656425874873114
+    alpha_peak: 4.951893415202574
+    worst_limit_ratio: 0.8033371666088011
+  random_twist_001:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 1.3742660616883509
+    v_mean: 0.9022262678152115
+    a_peak: 4.204705636545784
+    a_lat_peak: 1.3047211828188396
+    a_lat_mean: 0.47024226368231564
+    omega_peak: 1.0891247718715882
+    alpha_peak: 2.3636349581914615
+    worst_limit_ratio: 0.8409411273091567
+  random_twist_002:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 1.2550309034283282
+    v_mean: 0.763524320726454
+    a_peak: 2.8101595376450406
+    a_lat_peak: 1.9102130145263303
+    a_lat_mean: 0.9544280035631207
+    omega_peak: 2.2171589199845805
+    alpha_peak: 7.221136658209639
+    worst_limit_ratio: 0.5620319075290081
+  random_twist_003:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 1.476909573780263
+    v_mean: 0.8152054924051683
+    a_peak: 4.969318206121615
+    a_lat_peak: 4.944659838387064
+    a_lat_mean: 1.8728632629134998
+    omega_peak: 4.766148725545611
+    alpha_peak: 15.079754903085327
+    worst_limit_ratio: 0.993863641224323
+  random_twist_004:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 1.439347761736166
+    v_mean: 0.7409755788655867
+    a_peak: 3.46804636302388
+    a_lat_peak: 2.500110981736155
+    a_lat_mean: 0.9700774344979476
+    omega_peak: 2.895735609533088
+    alpha_peak: 4.719448294086355
+    worst_limit_ratio: 0.693609272604776
+  random_twist_005:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 1.557675320364333
+    v_mean: 0.7868307740216217
+    a_peak: 4.996251803340413
+    a_lat_peak: 3.2741966316868916
+    a_lat_mean: 0.8946244059739689
+    omega_peak: 2.9495429987481123
+    alpha_peak: 5.129040582582645
+    worst_limit_ratio: 0.9992503606680826
+  random_twist_006:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 1.9091044746710515
+    v_mean: 1.0581128055758635
+    a_peak: 4.995707856954774
+    a_lat_peak: 0.7626487462713243
+    a_lat_mean: 0.4223491699991564
+    omega_peak: 0.7140940780604234
+    alpha_peak: 1.949824369049991
+    worst_limit_ratio: 0.9991415713909548
+  random_twist_007:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 1.6143141847824751
+    v_mean: 0.8322376884014757
+    a_peak: 4.831295125949779
+    a_lat_peak: 4.35040420662333
+    a_lat_mean: 1.6025635732771673
+    omega_peak: 4.044615284454113
+    alpha_peak: 9.74834794683488
+    worst_limit_ratio: 0.9662590251899559
+  random_twist_008:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 1.4143236678051205
+    v_mean: 0.8780466589754051
+    a_peak: 3.441652739017609
+    a_lat_peak: 0.6749516408197787
+    a_lat_mean: 0.3088375138242112
+    omega_peak: 0.7920088013252391
+    alpha_peak: 2.400362936868993
+    worst_limit_ratio: 0.6883305478035218
+  random_twist_009:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 1.4624994729613388
+    v_mean: 0.754422867065476
+    a_peak: 4.451194852229897
+    a_lat_peak: 1.5374541387274676
+    a_lat_mean: 0.5052225728848255
+    omega_peak: 1.310833923808816
+    alpha_peak: 4.468555593055029
+    worst_limit_ratio: 0.8902389704459794
+  random_twist_010:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 1.6435612782740252
+    v_mean: 0.7003918667184237
+    a_peak: 4.980297414976079
+    a_lat_peak: 1.8367537117543151
+    a_lat_mean: 0.5981029289334054
+    omega_peak: 1.4875774070982197
+    alpha_peak: 4.371274055212204
+    worst_limit_ratio: 0.9960594829952157
+  random_twist_011:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 1.700415252625359
+    v_mean: 1.0983074293225745
+    a_peak: 4.992427637280257
+    a_lat_peak: 3.5014573138498184
+    a_lat_mean: 1.3247756541461528
+    omega_peak: 2.2629648800191915
+    alpha_peak: 5.222195054345584
+    worst_limit_ratio: 0.9984855274560515
+  random_twist_012:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 1.472125531828225
+    v_mean: 0.9429362859343655
+    a_peak: 4.039633078411398
+    a_lat_peak: 4.028524745932608
+    a_lat_mean: 1.796543039104968
+    omega_peak: 4.179302261464867
+    alpha_peak: 13.150679152905699
+    worst_limit_ratio: 0.8079266156822795
+  random_twist_013:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 1.2024134277616576
+    v_mean: 0.8498947579254036
+    a_peak: 4.051419028128063
+    a_lat_peak: 4.049625867874957
+    a_lat_mean: 1.0624440758711844
+    omega_peak: 3.519632205779438
+    alpha_peak: 10.124063864151688
+    worst_limit_ratio: 0.8102838056256125
+  random_twist_014:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 1.7330587888966587
+    v_mean: 0.9355989841079378
+    a_peak: 4.20656497867989
+    a_lat_peak: 3.692916474404341
+    a_lat_mean: 1.4519677053455222
+    omega_peak: 3.5420550796920764
+    alpha_peak: 11.157354689428827
+    worst_limit_ratio: 0.8413129957359781
+  random_twist_015:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 0.922046737293167
+    v_mean: 0.5284134343544364
+    a_peak: 2.6741838287553046
+    a_lat_peak: 2.6697116644327035
+    a_lat_mean: 0.9396053615298773
+    omega_peak: 3.7300534837811656
+    alpha_peak: 11.759778289926622
+    worst_limit_ratio: 0.5879889144963311
+  random_twist_016:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 1.0347610477490168
+    v_mean: 0.5558805242074202
+    a_peak: 4.006238586558927
+    a_lat_peak: 4.0060253484407085
+    a_lat_mean: 1.0156769337900144
+    omega_peak: 3.871449700542243
+    alpha_peak: 9.270567060872656
+    worst_limit_ratio: 0.8012477173117855
+  random_twist_017:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 0.7446012087086123
+    v_mean: 0.4375033846747937
+    a_peak: 1.9751639460834058
+    a_lat_peak: 0.8491861423060593
+    a_lat_mean: 0.3136471094801997
+    omega_peak: 1.201543681829319
+    alpha_peak: 3.743878827760968
+    worst_limit_ratio: 0.39503278921668117
+  random_twist_018:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 1.470760898697771
+    v_mean: 0.864617313487906
+    a_peak: 3.563701239985003
+    a_lat_peak: 2.3094172435804716
+    a_lat_mean: 1.0606995688980387
+    omega_peak: 2.381925098724985
+    alpha_peak: 6.182667162122915
+    worst_limit_ratio: 0.7127402479970006
+  random_twist_019:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 1.4842800698743204
+    v_mean: 1.0049002757351297
+    a_peak: 4.98422897722947
+    a_lat_peak: 4.984187464805868
+    a_lat_mean: 2.028622323523434
+    omega_peak: 3.724289797615651
+    alpha_peak: 10.506123126073978
+    worst_limit_ratio: 0.9968457954458939
+  random_twist_020:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 1.6672561875141083
+    v_mean: 0.9692858099554077
+    a_peak: 4.40762672846054
+    a_lat_peak: 1.0923836955560096
+    a_lat_mean: 0.36765042745428717
+    omega_peak: 0.7787105242013013
+    alpha_peak: 2.4927259456456827
+    worst_limit_ratio: 0.881525345692108
+  random_twist_021:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 0.9042797317690089
+    v_mean: 0.4686805280128918
+    a_peak: 3.309638864998434
+    a_lat_peak: 3.3052443645675518
+    a_lat_mean: 0.7124073634195557
+    omega_peak: 4.072530564387375
+    alpha_peak: 12.40811259443024
+    worst_limit_ratio: 0.6619277729996867
+  random_twist_022:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 1.5333514961375339
+    v_mean: 0.6326822227235152
+    a_peak: 4.554278000138811
+    a_lat_peak: 2.9383867432215616
+    a_lat_mean: 0.7982841366121828
+    omega_peak: 1.956105506258174
+    alpha_peak: 5.772225913537398
+    worst_limit_ratio: 0.9108556000277621
+  random_twist_023:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 0.7946569024786571
+    v_mean: 0.5515966623753172
+    a_peak: 2.2118260080896155
+    a_lat_peak: 0.4981459742523188
+    a_lat_mean: 0.16376186374754886
+    omega_peak: 0.7277202569681327
+    alpha_peak: 2.5252352594392518
+    worst_limit_ratio: 0.4423652016179231
+  random_twist_024:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 1.4708705526440875
+    v_mean: 0.8027812473249459
+    a_peak: 4.644924808059825
+    a_lat_peak: 0.9671686219364356
+    a_lat_mean: 0.49793429364213776
+    omega_peak: 0.895202398286086
+    alpha_peak: 2.6229982183052605
+    worst_limit_ratio: 0.928984961611965
+  random_twist_025:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 1.6846562403172947
+    v_mean: 1.0214537466351363
+    a_peak: 4.4506084092153175
+    a_lat_peak: 2.484089781111023
+    a_lat_mean: 0.6675743575951968
+    omega_peak: 1.5169546552201325
+    alpha_peak: 3.539074346471072
+    worst_limit_ratio: 0.8901216818430635
+  random_twist_026:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 2.092734337970463
+    v_mean: 1.1262547692403326
+    a_peak: 4.097957446535429
+    a_lat_peak: 2.8298065976319946
+    a_lat_mean: 1.3346594824838913
+    omega_peak: 2.290526049397246
+    alpha_peak: 5.678091592507385
+    worst_limit_ratio: 0.8370937351881851
+  random_twist_027:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 0.631872232679993
+    v_mean: 0.34297799117685657
+    a_peak: 1.2803256037919934
+    a_lat_peak: 1.0134802401195557
+    a_lat_mean: 0.2605201387553097
+    omega_peak: 1.8498359671499027
+    alpha_peak: 6.056522141545198
+    worst_limit_ratio: 0.3028261070772599
+  random_twist_028:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 1.062005894734117
+    v_mean: 0.6278780542865194
+    a_peak: 2.3414224467208142
+    a_lat_peak: 1.144049214871679
+    a_lat_mean: 0.4958678932749238
+    omega_peak: 1.2014502862449057
+    alpha_peak: 3.5428687010979956
+    worst_limit_ratio: 0.46828448934416284
+  random_twist_029:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 1.1058920394635712
+    v_mean: 0.6208995479833483
+    a_peak: 2.6802310378564296
+    a_lat_peak: 1.6648166850138224
+    a_lat_mean: 0.548928226554387
+    omega_peak: 1.5738142819196412
+    alpha_peak: 4.716233599460857
+    worst_limit_ratio: 0.536046207571286
+  random_twist_030:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 1.628445147507851
+    v_mean: 0.8075160567285223
+    a_peak: 4.495607672120888
+    a_lat_peak: 2.7089396124682636
+    a_lat_mean: 0.8209362351099896
+    omega_peak: 1.8884592718215423
+    alpha_peak: 5.220534769291675
+    worst_limit_ratio: 0.8991215344241776
+  random_twist_031:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 1.5364356481041592
+    v_mean: 0.7992223991881818
+    a_peak: 4.4598355458315355
+    a_lat_peak: 1.52571347355185
+    a_lat_mean: 0.5500929396472831
+    omega_peak: 1.1264156764393178
+    alpha_peak: 2.4375540626845393
+    worst_limit_ratio: 0.8919671091663071
+  random_twist_032:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 1.5306852354856424
+    v_mean: 0.8252666601912578
+    a_peak: 4.989498285485678
+    a_lat_peak: 4.898341367687906
+    a_lat_mean: 1.6539694548332795
+    omega_peak: 3.568331521207065
+    alpha_peak: 5.090191449098594
+    worst_limit_ratio: 0.9978996570971356
+  random_twist_033:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 0.778073866330203
+    v_mean: 0.48262374660922686
+    a_peak: 1.3387274807149285
+    a_lat_peak: 0.9350652409281216
+    a_lat_mean: 0.33681355247029776
+    omega_peak: 1.9659270668546278
+    alpha_peak: 6.015375996850343
+    worst_limit_ratio: 0.31122954653208124
+  random_twist_034:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 1.6759170612211989
+    v_mean: 1.011560176959044
+    a_peak: 4.996183336477829
+    a_lat_peak: 1.7210008625572595
+    a_lat_mean: 0.3815626871979371
+    omega_peak: 1.0938808814772387
+    alpha_peak: 3.594352431563993
+    worst_limit_ratio: 0.9992366672955658
+  random_twist_035:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 1.2639010506924793
+    v_mean: 0.7304966700230309
+    a_peak: 4.392669148647774
+    a_lat_peak: 4.345468471878206
+    a_lat_mean: 1.483719210659757
+    omega_peak: 3.9239047750260694
+    alpha_peak: 10.176260676003276
+    worst_limit_ratio: 0.8785338297295547
+  random_twist_036:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 1.7043058426740356
+    v_mean: 1.2286157784523621
+    a_peak: 4.985245595843474
+    a_lat_peak: 4.966997894747003
+    a_lat_mean: 1.681662346399973
+    omega_peak: 3.028681313706255
+    alpha_peak: 6.765330898013785
+    worst_limit_ratio: 0.9970491191686948
+  random_twist_037:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 1.6636380568362066
+    v_mean: 0.91705929415099
+    a_peak: 4.9887026324119494
+    a_lat_peak: 3.6131396471057324
+    a_lat_mean: 1.106464436540975
+    omega_peak: 2.732411541627544
+    alpha_peak: 5.240499890894066
+    worst_limit_ratio: 0.9977405264823899
+  random_twist_038:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 0.9366912823180216
+    v_mean: 0.5835021280816873
+    a_peak: 3.199399475881196
+    a_lat_peak: 0.7248682388110829
+    a_lat_mean: 0.25806762603528316
+    omega_peak: 1.3571554752924073
+    alpha_peak: 2.5917687785445795
+    worst_limit_ratio: 0.6398798951762392
+  random_twist_039:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 1.0022088756198946
+    v_mean: 0.6043667492156131
+    a_peak: 3.672129107733417
+    a_lat_peak: 3.6168440062635154
+    a_lat_mean: 1.4482186055991781
+    omega_peak: 4.563156897446096
+    alpha_peak: 9.517668150980713
+    worst_limit_ratio: 0.7344258215466833
+  random_twist_040:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 0.847979430352281
+    v_mean: 0.4213641570548887
+    a_peak: 2.5717640176724297
+    a_lat_peak: 0.8541484435694661
+    a_lat_mean: 0.35624728885885876
+    omega_peak: 1.573609637207874
+    alpha_peak: 3.1388776443959703
+    worst_limit_ratio: 0.514352803534486
+  random_twist_041:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 1.718304917574278
+    v_mean: 0.9679604219525321
+    a_peak: 4.964337865508077
+    a_lat_peak: 3.1678281240786466
+    a_lat_mean: 1.0897765176540541
+    omega_peak: 2.0446246321836377
+    alpha_peak: 6.584210805861584
+    worst_limit_ratio: 0.9928675731016154
+  random_twist_042:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 0.6354006856656501
+    v_mean: 0.3634277724733949
+    a_peak: 2.154772586767491
+    a_lat_peak: 1.9816580376514226
+    a_lat_mean: 0.4987170184676193
+    omega_peak: 3.118753382482463
+    alpha_peak: 10.12949329068758
+    worst_limit_ratio: 0.5064746645343791
+  random_twist_043:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 1.5577302866339595
+    v_mean: 0.937273716208574
+    a_peak: 4.996332925288272
+    a_lat_peak: 0.8845760800428091
+    a_lat_mean: 0.3296948673130781
+    omega_peak: 0.6708316027915334
+    alpha_peak: 2.1068568382593367
+    worst_limit_ratio: 0.9992665850576545
+  random_twist_044:
+    duration: 4.0
+    num_samples: 81.0
+    v_peak: 0.9202371418784319
+    v_mean: 0.4806229305588906
+    a_peak: 2.605755388410712
+    a_lat_peak: 1.7154419900547828
+    a_lat_mean: 0.5371005147525925
+    omega_peak: 2.1682209082454755
+    alpha_peak: 4.94781797247503
+    worst_limit_ratio: 0.5211510776821424

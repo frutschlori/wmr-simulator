@@ -17,6 +17,12 @@ Baseline types:
   - spin:            rotation on the spot, parametrized by time and peak omega
                      (the total rotation is solved for the peak omega).
 
+Also, for trajectory_optimization.fixed_sets and not exposed on the CLI:
+``circle`` draws partial arcs (``sweep``), ``sine_reference`` a slalom
+``y = A sin(2 pi n u)`` along a straight chord (A = 0 is a line), and
+``place_reference`` / ``chain_references`` move and concatenate finished
+references rigidly.
+
 The CLI wrapper lives in scripts/generate_baseline_reference.py.
 """
 
@@ -109,21 +115,29 @@ def circle_reference(
     center: tuple[float, float] = (0.0, 0.0),
     start_angle: float = 0.0,
     clockwise: bool = False,
+    sweep: float = TWO_PI,
 ) -> np.ndarray:
+    """A circle of ``radius``, or the arc of it that ``sweep`` [rad] covers."""
     if radius <= 0.0:
         raise ValueError("radius must be positive.")
+    if sweep <= 0.0:
+        raise ValueError("sweep must be positive.")
     time_grid = baseline_time_grid(total_time, dt)
     duration = time_grid[-1]
     direction = -1.0 if clockwise else 1.0
-    phi = start_angle + direction * TWO_PI * sigma(time_grid, duration)
-    phi_dot = direction * TWO_PI * sigma_dot(time_grid, duration)
-    phi_ddot = direction * TWO_PI * sigma_ddot(time_grid, duration)
-
+    # Parametrized by the s-curve's own s in [0, 1], which only increases:
+    # _assemble_reference reads the heading off dpos/ds, so a parameter that
+    # runs backwards (the polar angle of a clockwise circle) would turn every
+    # heading by pi and drive the circle in reverse.
+    s = sigma(time_grid, duration)
+    phi = start_angle + direction * sweep * s
     center = np.asarray(center, dtype=float)
     position = center[None, :] + radius * np.column_stack([np.cos(phi), np.sin(phi)])
-    dpos_dphi = radius * np.column_stack([-np.sin(phi), np.cos(phi)])
-    d2pos_dphi2 = radius * np.column_stack([-np.cos(phi), -np.sin(phi)])
-    return _assemble_reference(position, dpos_dphi, d2pos_dphi2, phi_dot, phi_ddot)
+    dpos_ds = direction * sweep * radius * np.column_stack([-np.sin(phi), np.cos(phi)])
+    d2pos_ds2 = sweep**2 * radius * np.column_stack([-np.cos(phi), -np.sin(phi)])
+    return _assemble_reference(
+        position, dpos_ds, d2pos_ds2, sigma_dot(time_grid, duration), sigma_ddot(time_grid, duration)
+    )
 
 
 def lemniscate_reference(
@@ -315,19 +329,93 @@ def spin_reference(
     return states
 
 
+def sine_reference(
+    total_time: float,
+    length: float,
+    amplitude: float,
+    dt: float,
+    periods: float = 1.0,
+    center: tuple[float, float] = (0.0, 0.0),
+    rotation: float = 0.0,
+) -> np.ndarray:
+    """A slalom ``y = amplitude * sin(2 pi periods u)`` along a chord of ``length``.
+
+    The s-curve runs on the chord parameter u, so the path starts and ends at
+    rest; ``amplitude = 0`` is a straight line of ``length``.
+    """
+    if length <= 0.0:
+        raise ValueError("length must be positive.")
+    time_grid = baseline_time_grid(total_time, dt)
+    duration = time_grid[-1]
+    u = sigma(time_grid, duration)
+    u_dot = sigma_dot(time_grid, duration)
+    u_ddot = sigma_ddot(time_grid, duration)
+    wave = TWO_PI * float(periods)
+    position = np.column_stack([length * (u - 0.5), amplitude * np.sin(wave * u)])
+    dpos_du = np.column_stack([np.full_like(u, length), amplitude * wave * np.cos(wave * u)])
+    d2pos_du2 = np.column_stack([np.zeros_like(u), -amplitude * wave**2 * np.sin(wave * u)])
+    position, dpos_du, d2pos_du2 = _place(position, dpos_du, d2pos_du2, center, rotation)
+    return _assemble_reference(position, dpos_du, d2pos_du2, u_dot, u_ddot)
+
+
+def place_reference(
+    reference_states: np.ndarray,
+    rotation: float = 0.0,
+    translation: tuple[float, float] = (0.0, 0.0),
+) -> np.ndarray:
+    """Rotate a finished [T, 8] reference about the origin, then translate it.
+
+    Heading, velocity and acceleration rotate with the path; omega is invariant.
+    """
+    states = np.array(reference_states, dtype=float, copy=True)
+    cos_r, sin_r = np.cos(rotation), np.sin(rotation)
+    rotate = np.array([[cos_r, -sin_r], [sin_r, cos_r]], dtype=float)
+    for columns in ((0, 1), (3, 4), (6, 7)):
+        states[:, columns] = states[:, columns] @ rotate.T
+    states[:, 0:2] += np.asarray(translation, dtype=float)[None, :]
+    states[:, 2] += rotation
+    return states
+
+
+def chain_references(first: np.ndarray, second: np.ndarray) -> np.ndarray:
+    """``second`` moved rigidly to start at ``first``'s end pose, appended to it.
+
+    Both have to end and start at rest (every s-curve reference does), so the
+    seam is a stop: position and heading continue, the velocity is zero on both
+    sides. ``second``'s first sample duplicates ``first``'s last and is dropped.
+    """
+    first = np.asarray(first, dtype=float)
+    second = np.asarray(second, dtype=float)
+    for label, sample in (("first", first[-1]), ("second", second[0])):
+        if np.linalg.norm(sample[3:5]) > 1e-6:
+            raise ValueError(f"The {label} reference is not at rest at the seam.")
+    rotation = float(first[-1, 2] - second[0, 2])
+    moved = place_reference(second, rotation=rotation)
+    moved = place_reference(moved, translation=tuple(first[-1, :2] - moved[0, :2]))
+    return np.vstack([first, moved[1:]])
+
+
 def summarize_motion(reference_states: np.ndarray, dt: float) -> dict[str, float]:
-    """Peak/mean motion quantities for feasibility reporting against robot limits."""
+    """Peak/mean motion quantities for feasibility reporting against robot limits.
+
+    The quantities are the ones trajectory_optimization.constraints bounds:
+    ``a`` is the norm of the full (tangential + centripetal) acceleration and
+    ``a_lat`` is ``|v * omega|``.
+    """
     reference_states = np.asarray(reference_states, dtype=float)
     speed = np.linalg.norm(reference_states[:, 3:5], axis=1)
     acceleration = np.linalg.norm(reference_states[:, 6:8], axis=1)
     omega = reference_states[:, 5]
     alpha = np.gradient(omega, dt)
+    lateral = np.abs(speed * omega)
     return {
         "duration": float((reference_states.shape[0] - 1) * dt),
         "num_samples": float(reference_states.shape[0]),
         "v_peak": float(np.max(speed)),
         "v_mean": float(np.mean(speed)),
         "a_peak": float(np.max(acceleration)),
+        "a_lat_peak": float(np.max(lateral)),
+        "a_lat_mean": float(np.mean(lateral)),
         "omega_peak": float(np.max(np.abs(omega))),
         "alpha_peak": float(np.max(np.abs(alpha))),
     }
