@@ -110,10 +110,22 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     init_parser.add_argument(
-        "--trajectory-optimization",
+        "--optimize-identification",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="Disable to use static baseline trajectories instead of optimizing.",
+        help=(
+            "Design the identification trajectory every iteration (default), or "
+            "--no-optimize-identification to drive the fixed baseline_identification_trajectory."
+        ),
+    )
+    init_parser.add_argument(
+        "--optimize-tuning",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Design the tuning set every iteration (default), or --no-optimize-tuning to tune "
+            "on the fixed set in baseline_tuning_trajectories_dir."
+        ),
     )
     init_parser.add_argument(
         "--standalone-gain-tuning-defaults",
@@ -127,12 +139,18 @@ def build_parser() -> argparse.ArgumentParser:
     init_parser.add_argument(
         "--baseline-id-trajectory",
         default=None,
-        help="Reference pickle used as identification trajectory when optimization is disabled.",
+        help=(
+            "Reference pickle driven as the identification trajectory under "
+            "--no-optimize-identification (default: the generated fixed one)."
+        ),
     )
     init_parser.add_argument(
         "--baseline-tuning-trajectories-dir",
         default=None,
-        help="Directory of reference pickles used for gain tuning when optimization is disabled.",
+        help=(
+            "Directory of reference pickles tuned on under --no-optimize-tuning "
+            "(default: trajectory_exports/fixed_sets/matched)."
+        ),
     )
     init_parser.add_argument("--robotcfg-template", default=None, help="Existing ROBOTCFG.CFG used as template for firmware exports.")
     init_parser.add_argument(
@@ -244,8 +262,10 @@ def main(argv: list[str] | None = None) -> int:
             overrides["seed"] = args.seed
         if args.residual_model is not None:
             overrides["use_residual_model"] = args.residual_model
-        if args.trajectory_optimization is not None:
-            overrides["optimize_trajectories"] = args.trajectory_optimization
+        if args.optimize_identification is not None:
+            overrides["optimize_identification_trajectory"] = args.optimize_identification
+        if args.optimize_tuning is not None:
+            overrides["optimize_tuning_trajectories"] = args.optimize_tuning
         if args.standalone_gain_tuning_defaults is not None:
             overrides["use_standalone_gain_tuning_defaults"] = args.standalone_gain_tuning_defaults
         if args.baseline_id_trajectory is not None:

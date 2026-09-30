@@ -351,6 +351,73 @@ def plot_trajectory_set(
     return output_filename
 
 
+def plot_reference_set_overview(
+    references,
+    dt: float,
+    out_path,
+    title: str,
+    environment=None,
+    limits: dict | None = None,
+):
+    """One reference set at a glance: every path in the environment box, and
+    every sample in the (v, |omega|) plane against the motion limits.
+
+    ``references`` is a ``{name: [N, 8] reference states}`` mapping (differing
+    lengths are fine). ``environment`` is ``(min, max)`` corners of the box,
+    ``limits`` a fixed_sets.motion_limits dict; the lateral limit is the
+    hyperbola ``v * |omega| = a_max_lateral`` and the total acceleration caps
+    the same product at ``a_max`` where the speed peaks.
+    """
+    references = {name: np.asarray(states, dtype=float) for name, states in references.items()}
+    colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+    many = len(references) > 20
+    fig, (path_axis, twist_axis) = plt.subplots(1, 2, figsize=(13, 7), gridspec_kw={"width_ratios": [1, 1.2]})
+
+    all_paths = np.concatenate([states[:, :2] for states in references.values()], axis=0)
+    arrow_length = start_arrow_length(all_paths)
+    for index, states in enumerate(references.values()):
+        color = colors[index % len(colors)]
+        path_axis.plot(states[:, 0], states[:, 1], color=color, linewidth=0.5 if many else 1.0,
+                       alpha=0.5 if many else 1.0)
+        draw_start_pose_arrow(path_axis, states[0, :3], color, arrow_length, alpha=0.5 if many else 0.9)
+        speed = np.hypot(states[:, 3], states[:, 4])
+        twist_axis.plot(speed, np.abs(states[:, 5]), linestyle="none", marker=".", markersize=1.5,
+                        color=color, alpha=0.4 if many else 0.7)
+    if environment is not None:
+        (x_min, y_min), (x_max, y_max) = environment
+        path_axis.plot([x_min, x_max, x_max, x_min, x_min], [y_min, y_min, y_max, y_max, y_min],
+                       color="0.4", linestyle="--", linewidth=1.0)
+    path_axis.set_aspect("equal", adjustable="box")
+    path_axis.set_xlabel("x [m]")
+    path_axis.set_ylabel("y [m]")
+    path_axis.grid(True, alpha=0.3)
+    path_axis.set_title(f"Paths ({len(references)} references, arrows at the start)")
+
+    if limits is not None:
+        v_grid = np.linspace(1e-3, limits["v_max"], 200)
+        twist_axis.axvline(limits["v_max"], color="0.4", linestyle="--", linewidth=1.0)
+        twist_axis.axhline(limits["omega_max"], color="0.4", linestyle="--", linewidth=1.0)
+        twist_axis.plot(v_grid, limits["a_max_lateral"] / v_grid, color="0.4", linestyle=":", linewidth=1.0,
+                        label=f"v|omega| = a_max_lateral {limits['a_max_lateral']:.1f}")
+        twist_axis.plot(v_grid, limits["a_max"] / v_grid, color="0.4", linestyle="-.", linewidth=1.0,
+                        label=f"v|omega| = a_max {limits['a_max']:.1f}")
+        twist_axis.set_xlim(0.0, 1.05 * limits["v_max"])
+        twist_axis.set_ylim(0.0, 1.05 * limits["omega_max"])
+        twist_axis.legend(loc="upper right", fontsize=8)
+    twist_axis.set_xlabel("v [m/s]")
+    twist_axis.set_ylabel("|omega| [rad/s]")
+    twist_axis.grid(True, alpha=0.3)
+    twist_axis.set_title(f"Samples every {dt:g} s")
+
+    fig.suptitle(title)
+    fig.tight_layout()
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+    fig.savefig(out_path, bbox_inches="tight", transparent=False, facecolor="white")
+    plt.close(fig)
+    print(f"Reference set overview saved at: {out_path}")
+    return out_path
+
+
 def plot_loss_history(
     loss_history,
     out_prefix="loss_history",

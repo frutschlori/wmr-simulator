@@ -28,6 +28,7 @@ import io
 import math
 import multiprocessing
 import os
+import pickle
 import shutil
 import statistics
 import sys
@@ -255,12 +256,12 @@ def stage_plan_identification_trajectory(experiment: Experiment, iteration: int)
     identification_plot_dir = paths.visualize_dir / "identification"
     identification_plot_dir.mkdir(parents=True, exist_ok=True)
 
-    if not experiment.config["optimize_trajectories"]:
+    if not experiment.config["optimize_identification_trajectory"]:
         baseline = experiment.config.get("baseline_identification_trajectory")
         if not baseline:
             raise ValueError(
-                "optimize_trajectories is disabled but baseline_identification_trajectory "
-                "is not set in experiment.yaml."
+                "optimize_identification_trajectory is disabled but "
+                "baseline_identification_trajectory is not set in experiment.yaml."
             )
         pickle_path = Path(shutil.copy2(baseline, paths.identification_trajectory_dir))
         print(f"Copied baseline identification trajectory: {pickle_path}")
@@ -335,6 +336,38 @@ def stage_plan_identification_trajectory(experiment: Experiment, iteration: int)
     return jsn_path
 
 
+def _check_fixed_tuning_references(pickles: list[Path], problem_path: Path) -> None:
+    """Refuse fixed tuning references the tuner would not roll out whole.
+
+    The tuner fits every reference onto the tuning problem's time grid
+    (SimulationPipeline._fit_reference_states): a longer one is silently cut
+    off at sim_time, a shorter one held at its last state. The cut is the one
+    to refuse -- training on a truncated benchmark reference, say, is a
+    different experiment from the one named.
+    """
+    problem = load_yaml(problem_path)
+    dt = float(problem["geometry_controller_dt"])
+    sim_time = float(problem["sim_time"])
+    too_long = []
+    for path in pickles:
+        with path.open("rb") as file:
+            payload = pickle.load(file)
+        states = payload["reference_states"] if isinstance(payload, dict) else payload
+        reference_dt = float(payload.get("dt", dt)) if isinstance(payload, dict) else dt
+        if not np.isclose(reference_dt, dt):
+            raise ValueError(f"{path} is sampled at {reference_dt} s, the tuning problem at {dt} s.")
+        duration = (len(states) - 1) * dt
+        if duration > sim_time + 0.5 * dt:
+            too_long.append((path.name, duration))
+    if too_long:
+        longest = max(duration for _, duration in too_long)
+        raise ValueError(
+            f"{len(too_long)} fixed tuning reference(s) run longer than the tuning horizon "
+            f"({sim_time:.2f} s) and would be cut off: {too_long}. Set "
+            f"tuning_trajectories.sim_time to at least {longest:.2f} in experiment.yaml."
+        )
+
+
 def stage_plan_tuning_trajectories(experiment: Experiment, iteration: int) -> list[Path]:
     """Synthesize (or copy) the reference trajectory set used for gain tuning."""
     paths = experiment.paths(iteration)
@@ -342,16 +375,17 @@ def stage_plan_tuning_trajectories(experiment: Experiment, iteration: int) -> li
     config = experiment.config["tuning_trajectories"]
     problem_path = _tuning_problem(paths, config)
 
-    if not experiment.config["optimize_trajectories"]:
+    if not experiment.config["optimize_tuning_trajectories"]:
         baseline_dir = experiment.config.get("baseline_tuning_trajectories_dir")
         if not baseline_dir:
             raise ValueError(
-                "optimize_trajectories is disabled but baseline_tuning_trajectories_dir "
+                "optimize_tuning_trajectories is disabled but baseline_tuning_trajectories_dir "
                 "is not set in experiment.yaml."
             )
         pickles = sorted(Path(baseline_dir).glob("*.pkl"))
         if not pickles:
             raise ValueError(f"No reference pickles found in {baseline_dir}")
+        _check_fixed_tuning_references(pickles, problem_path)
         copied = [Path(shutil.copy2(path, paths.tuning_trajectories_dir)) for path in pickles]
         print(f"Copied {len(copied)} baseline tuning trajectories into {paths.tuning_trajectories_dir}")
         return copied
@@ -2178,7 +2212,12 @@ def stage_status(experiment: Experiment) -> None:
     deployment = experiment.config["mujoco_deployment"]
     print(f"Experiment: {experiment.root}")
     print(f"  residual model:          {'enabled' if experiment.config['use_residual_model'] else 'disabled'}")
-    print(f"  trajectory optimization: {'enabled' if experiment.config['optimize_trajectories'] else 'disabled (baselines)'}")
+    for label, flag, baseline in (
+        ("identification", "optimize_identification_trajectory", "baseline_identification_trajectory"),
+        ("tuning", "optimize_tuning_trajectories", "baseline_tuning_trajectories_dir"),
+    ):
+        source = "designed" if experiment.config[flag] else f"fixed ({experiment.config[baseline]})"
+        print(f"  {label + ' design:':25s}{source}")
     print(
         "  residual in design:      "
         f"identification {'on' if _residual_in_design(experiment, experiment.config['identification_trajectory']) else 'off'}, "

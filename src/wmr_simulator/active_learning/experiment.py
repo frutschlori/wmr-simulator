@@ -76,14 +76,24 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
     "num_iterations": 5,
     # Flags.
     "use_residual_model": True,
-    "optimize_trajectories": True,
+    # Design the identification trajectory / the tuning set every iteration
+    # (FIM), or use the fixed references below instead. Separate so that a
+    # designed identification can be combined with a fixed tuning set.
+    "optimize_identification_trajectory": True,
+    "optimize_tuning_trajectories": True,
     # Tune gains with the standalone run_gain_tuning.py defaults
     # (gain_tuning.defaults.GAIN_TUNING_DEFAULTS) instead of the gain_tuning
     # block below, so the two entry points can share one set of values.
     "use_standalone_gain_tuning_defaults": True,
-    # Static baselines, used when optimize_trajectories is false.
-    "baseline_identification_trajectory": None,  # reference pickle path
-    "baseline_tuning_trajectories_dir": None,    # directory with reference pickles
+    # Fixed references, used when the matching optimize_* flag is off; written
+    # by scripts/generate_fixed_trajectory_sets.py (trajectory_optimization.
+    # fixed_sets documents each set). Paths are relative to the cwd `run` is
+    # started from. The identification pickle carries identified_duration, so
+    # the identify stage cuts its logs as it does a designed trajectory's. The
+    # tuning directory is copied whole; other sets there: benchmark (needs
+    # tuning_trajectories.sim_time 7.3), random_bspline_N<n>, random_twist_N<n>.
+    "baseline_identification_trajectory": "trajectory_exports/fixed_sets/identification/fixed_identification.pkl",
+    "baseline_tuning_trajectories_dir": "trajectory_exports/fixed_sets/matched",
     # Firmware export template (None -> built-in defaults from robot_config.py).
     "robotcfg_template": None,
     "log_loading": {
