@@ -19,7 +19,7 @@ from wmr_simulator.gain_parametrization import num_params, params_from_cfg, to_c
 from wmr_simulator.trajectory_optimization.pipeline import TrajectoryOptimizationPipeline
 
 PROBLEM = "problems/pololu_gains.yaml"
-STATIC_GAINS = [2.4, 5.1, 6.3, 0.9, 0.0]
+STATIC_GAINS = [2.4, 5.1, 6.3, 0.9, 0.0, 0.02]
 
 
 @pytest.fixture(scope="module")
@@ -57,7 +57,7 @@ def test_explicit_gains_are_the_design_point_and_the_driven_gains(
 
 
 def test_a_gain_vector_of_the_wrong_length_is_refused():
-    with pytest.raises(ValueError, match="controller_gains must have shape"):
+    with pytest.raises(ValueError, match="Expected 6 controller gains"):
         TrajectoryOptimizationPipeline(problem_path=PROBLEM, controller_gains=[1.0, 2.0, 3.0])
 
 

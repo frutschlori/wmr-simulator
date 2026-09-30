@@ -5,11 +5,9 @@ import os
 import matplotlib.pyplot as plt
 import numpy as np
 
+from wmr_simulator.controller import GAIN_NAMES
 from wmr_simulator.visualization.animation import create_gif_from_png_frames
 from wmr_simulator.visualization.trajectories import plot_trajectory_set
-
-
-GAIN_NAMES = ("kx", "ky", "kth", "kpmotor", "kimotor")
 
 
 def _plot_gain_lines(ax, xs, gains, gain_names=GAIN_NAMES, marker=None):

@@ -401,9 +401,15 @@ def test_initial_curve_is_the_controller_the_run_started_from():
     assert isinstance(warm["init_schedule_params"], ErrorMlpParams)
     np.testing.assert_allclose(np.asarray(warm["init_gains"]), np.asarray(warm["pipeline"].gains))
 
-    static_init = [1.0, 2.0, 3.0, 0.5, 0.0]
+    static_init = [1.0, 2.0, 3.0, 0.5, 0.0, 0.02]
     cold = run_gain_tuning_experiment(
         warm_start_schedule=False, static_init_gains=static_init, **common
     )
     assert cold["init_schedule_params"] is None
     np.testing.assert_allclose(np.asarray(cold["init_gains"]), static_init)
+
+    # A static-gains file from before the D-term (five gains) starts with kdmotor = 0.
+    legacy = run_gain_tuning_experiment(
+        warm_start_schedule=False, static_init_gains=static_init[:5], **common
+    )
+    np.testing.assert_allclose(np.asarray(legacy["init_gains"]), [*static_init[:5], 0.0])

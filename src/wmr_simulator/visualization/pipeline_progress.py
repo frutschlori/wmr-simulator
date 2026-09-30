@@ -3,7 +3,7 @@
 One figure, a gain panel and a yaw-ringing panel over a 2x3 grid of loss
 panels:
 
-- the gain history (one line per gain: kx, ky, kth, kpmotor, kimotor),
+- the gain history (one line per gain: kx, ky, kth, kpmotor, kimotor, kdmotor),
   x = iteration, styled like the joint-tuning gain-history plot
   (``visualization.joint_tuning.plot_joint_tuning_history``, whose gain panel
   it shares a helper with); gains are the *static* controller gains deployed to

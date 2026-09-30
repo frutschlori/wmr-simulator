@@ -51,6 +51,7 @@ from pathlib import Path
 import numpy as np
 
 from wmr_simulator.active_learning.experiment import load_yaml
+from wmr_simulator.controller import controller_gains_list
 
 TERM_NAMES = (
     "position_tracking",
@@ -362,7 +363,8 @@ def _static_gains(paths):
         config = load_yaml(paths.problem)
     else:
         return None
-    return np.asarray([float(gain) for gain in config["controller"]["gains"]], dtype=float)
+    # Iterations from before the D-term carry five gains (kdmotor = 0).
+    return np.asarray(controller_gains_list(config["controller"]["gains"]), dtype=float)
 
 
 def evaluate_pipeline_progress(experiment, benchmark_dir=None, static_controller=False):

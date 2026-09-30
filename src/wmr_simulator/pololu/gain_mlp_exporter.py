@@ -37,10 +37,11 @@ from pathlib import Path
 
 import numpy as np
 
+from wmr_simulator.controller import controller_gains_list
 from wmr_simulator.gain_parametrization import error_mlp
 from wmr_simulator.gain_parametrization.error_mlp import (
     NUM_FEATURES,
-    NUM_GAINS,
+    NUM_SCHEDULABLE_GAINS,
     ErrorMlpParams,
 )
 
@@ -80,10 +81,12 @@ def gain_mlp_payload(params: ErrorMlpParams) -> dict:
 
 
 def firmware_base_gains(controller_gains, max_wheel_speed: float) -> list:
-    """Simulator gain vector -> firmware units (inner motor gains / motor gain)."""
-    gains = [float(gain) for gain in controller_gains]
-    if len(gains) != NUM_GAINS:
-        raise ValueError(f"Expected {NUM_GAINS} controller gains, got {len(gains)}.")
+    """Simulator gain vector -> the five firmware gains the MLP scales.
+
+    Inner motor gains are divided by the motor gain. kdmotor is not one of
+    them: it goes into ROBOTCFG.CFG as the unscheduled ``kd_inner``.
+    """
+    gains = controller_gains_list(controller_gains)
     motor_gain = float(max_wheel_speed)
     if motor_gain <= 0.0:
         raise ValueError("max_wheel_speed must be positive for the inner-gain conversion.")
@@ -133,7 +136,7 @@ def reference_forward(payload: dict, ref: list, pose: list, twist: list) -> np.n
     if offset != weights.size:
         raise ValueError(f"weights length {weights.size} does not match sizes {sizes}.")
 
-    factors = np.ones(NUM_GAINS, dtype=np.float32)
+    factors = np.ones(NUM_SCHEDULABLE_GAINS, dtype=np.float32)
     factors[payload["scheduled_indices"]] = np.clip(
         np.float32(1.0) + h, np.float32(0.0), np.float32(payload["bound"])
     )
@@ -169,7 +172,7 @@ def golden_payload(
         ref_state = jnp.asarray(
             [ref_xy[0], ref_xy[1], theta_d, v_d, 0.0, omega_d, 0.0, 0.0], dtype=jnp.float32
         )
-        factors = np.ones(NUM_GAINS, dtype=np.float32)
+        factors = np.ones(NUM_SCHEDULABLE_GAINS, dtype=np.float32)
         factors[np.asarray(params.scheduled_indices)] = np.asarray(
             error_mlp.factors(
                 params,

@@ -6,7 +6,7 @@ import jax.numpy as jnp
 import numpy as np
 import yaml
 
-from wmr_simulator.controller import Controller
+from wmr_simulator.controller import Controller, controller_gains_array, initial_controller_state
 from wmr_simulator.estimator import DiffDriveEstimator
 from wmr_simulator.gain_parametrization import apply as apply_gain_parametrization
 from wmr_simulator.gain_parametrization import params_from_cfg as gain_parametrization_params_from_cfg
@@ -147,7 +147,7 @@ class SimulationPipeline:
             max_wheel_speed=jnp.asarray(self.robot_cfg["max_wheel_speed"], dtype=jnp.float32),
             time_constant=jnp.asarray(self.robot_cfg["time_constant"], dtype=jnp.float32),
         )
-        self.gains = jnp.asarray(self.controller_cfg["gains"], dtype=jnp.float32)
+        self.gains = controller_gains_array(self.controller_cfg["gains"])
 
         gain_parametrization_cfg = self.controller_cfg.get(
             "gain_parametrization", self.controller_cfg.get("gain_schedule")
@@ -239,7 +239,7 @@ class SimulationPipeline:
         pose0 = self.initial_reference_pose(reference_states) if start_pose is None else start_pose
         robot_state = self.robot.get_init_state(key=robot_key, init_pose=pose0)
         estimator_state = self.estimator.get_init_state(key=estimator_key, start_pose=pose0)
-        controller_state = jnp.zeros(2, dtype=jnp.float32)
+        controller_state = initial_controller_state()
         return robot_state, estimator_state, controller_state
 
     @staticmethod
@@ -284,6 +284,8 @@ class SimulationPipeline:
         )
         carry0 = self._init_states(robot_key, estimator_key, reference_states, start_pose)
 
+        if controller_gains is not None:
+            controller_gains = controller_gains_array(controller_gains)
         nominal_gains = self.gains if controller_gains is None else controller_gains
 
         def geometry_step(carry, ref_state):

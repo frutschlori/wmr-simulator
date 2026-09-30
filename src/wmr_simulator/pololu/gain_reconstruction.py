@@ -30,6 +30,7 @@ def applied_gains_over_log(log, base_gains, params) -> np.ndarray:
     reference, pose and body-twist streams are interpolated onto the command
     timestamps before the parametrization is replayed.
     """
+    from wmr_simulator.controller import controller_gains_array
     from wmr_simulator.gain_parametrization import gains_over_samples
 
     command_time = np.asarray(log.pose.command_time_s, dtype=float)
@@ -47,5 +48,5 @@ def applied_gains_over_log(log, base_gains, params) -> np.ndarray:
     twists = np.asarray(log.pose.twists, dtype=float)[:, [0, 2]]
     twist_samples = _interp_states(log.pose.time_s, twists, command_time)
 
-    gains = gains_over_samples(base_gains, params, ref_samples, pose_samples, twist_samples)
+    gains = gains_over_samples(controller_gains_array(base_gains), params, ref_samples, pose_samples, twist_samples)
     return np.asarray(gains, dtype=float)

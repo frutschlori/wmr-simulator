@@ -5,6 +5,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from wmr_simulator.controller import initial_controller_state
 from wmr_simulator.gain_tuning.pipeline import ControllerTuningPipeline
 from wmr_simulator.types import PhysicalParams
 from wmr_simulator.visualization.animation import create_gif_from_png_frames
@@ -47,7 +48,7 @@ def apply_reference_window(
     def init_states_for_window(self, robot_key, estimator_key):
         robot_state0 = self.robot.get_init_state(key=robot_key, init_pose=start_pose)
         est_state0 = self.estimator.get_init_state(key=estimator_key, start_pose=start_pose)
-        ctrl_state0 = jnp.zeros(2, dtype=jnp.float32)
+        ctrl_state0 = initial_controller_state()
         return robot_state0, est_state0, ctrl_state0
 
     pipeline.full_reference_states = full_reference_states
