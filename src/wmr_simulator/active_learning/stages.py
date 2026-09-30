@@ -187,17 +187,31 @@ def _export_gain_mlp_if_configured(problem_path: Path, output_path: Path) -> Pat
 # ---------------------------------------------------------------------------
 
 
-def _load_design_residual_model(path: Path, problem_path: Path):
-    """Residual checkpoint a trajectory-design stage rolls out on, or None.
+def _residual_in_design(experiment: Experiment, stage_config: dict) -> bool:
+    """Whether a trajectory-design stage rolls out on the residual plant.
 
-    A missing checkpoint designs on the nominal plant instead of raising: an
-    experiment with use_residual_model off never trains one at all. A checkpoint
-    trained against a different nominal model than ``problem_path``'s raises
+    The top-level use_residual_model is the master switch: with it off the
+    experiment never trains a residual, and no stage may pick up a checkpoint
+    that got into results/ some other way. The stage's own flag can only turn
+    the residual off on top of that.
+    """
+    return bool(experiment.config["use_residual_model"] and stage_config["use_residual_model"])
+
+
+def _load_design_residual_model(path: Path, problem_path: Path):
+    """Residual checkpoint a trajectory-design stage rolls out on.
+
+    Only called when the residual is enabled for the stage
+    (_residual_in_design), so a missing checkpoint raises instead of silently
+    designing on the nominal plant. A checkpoint trained against a different
+    nominal model than ``problem_path``'s raises as well
     (residual_model.io.load_residual_model).
     """
     if not path.is_file():
-        print(f"No residual model at {path}; designing on the nominal plant.")
-        return None
+        raise FileNotFoundError(
+            f"The residual model is enabled for trajectory design but {path} is missing; "
+            "run train-residual first (or disable use_residual_model in experiment.yaml)."
+        )
 
     from wmr_simulator.residual_model import load_residual_model
     from wmr_simulator.residual_model.residual import robot_params_from_problem
@@ -257,7 +271,7 @@ def stage_plan_identification_trajectory(experiment: Experiment, iteration: int)
         # has driven anything for *this* iteration, so its own residual does not
         # exist yet. Iteration 1 has no previous one either and designs nominal.
         residual_model = None
-        if config["use_residual_model"] and iteration > 1:
+        if _residual_in_design(experiment, config) and iteration > 1:
             residual_model = _load_design_residual_model(
                 experiment.paths(iteration - 1).residual_model, _identification_problem(paths, config)
             )
@@ -356,7 +370,7 @@ def stage_plan_tuning_trajectories(experiment: Experiment, iteration: int) -> li
     # This iteration's own residual: train-residual runs between identify and
     # this stage, so the model is fitted to the logs recorded for it.
     residual_model = None
-    if config["use_residual_model"]:
+    if _residual_in_design(experiment, config):
         residual_model = _load_design_residual_model(paths.residual_model, problem_path)
     design_gains = _static_design_gains(paths)
     if design_gains is not None:
@@ -1714,6 +1728,13 @@ def residual_training_iterations(experiment: Experiment, iteration: int) -> list
 def stage_train_residual(experiment: Experiment, iteration: int) -> Path:
     """Train the residual dynamics model on the pooled decoded logs (see
     residual_training_log_dirs)."""
+    if not experiment.config["use_residual_model"]:
+        # A checkpoint in results/ would be all it takes for a later stage run
+        # by hand to disagree with what the experiment claims to be.
+        raise ValueError(
+            f"use_residual_model is disabled for {experiment.root}; this experiment "
+            "never trains a residual (set it in experiment.yaml to change that)."
+        )
     from wmr_simulator.residual_model.residual import train_from_logs
 
     paths = experiment.paths(iteration)
@@ -2160,8 +2181,12 @@ def stage_status(experiment: Experiment) -> None:
     print(f"  trajectory optimization: {'enabled' if experiment.config['optimize_trajectories'] else 'disabled (baselines)'}")
     print(
         "  residual in design:      "
-        f"identification {'on' if experiment.config['identification_trajectory']['use_residual_model'] else 'off'}, "
-        f"tuning {'on' if experiment.config['tuning_trajectories']['use_residual_model'] else 'off'}"
+        f"identification {'on' if _residual_in_design(experiment, experiment.config['identification_trajectory']) else 'off'}, "
+        f"tuning {'on' if _residual_in_design(experiment, experiment.config['tuning_trajectories']) else 'off'}"
+    )
+    print(
+        "  residual in gain tuning: "
+        f"{'on' if _residual_in_design(experiment, experiment.config['gain_tuning']) else 'off'}"
     )
     print(
         "  data collection:         "

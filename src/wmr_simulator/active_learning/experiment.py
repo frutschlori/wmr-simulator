@@ -159,6 +159,7 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         # designs nominal). Off by default: the FIM's design parameters here are
         # the nominal robot parameters being identified, and the previous
         # residual corrects a plant that has since been re-identified.
+        # Also requires the top-level use_residual_model.
         "use_residual_model": False,
         "opt_steps": 750,
         "learning_rate": 5e-3,
@@ -277,8 +278,9 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         # is freshly fitted to the logs this iteration recorded. On by default
         # because tune-gains rolls out that same residual plant, and a
         # trajectory is only informative about the gains under the conditions
-        # the tuner scores them under. Falls back to the nominal plant when no
-        # model was trained (use_residual_model off).
+        # the tuner scores them under. The top-level use_residual_model is the
+        # master switch: with it off this flag is ignored and the design runs
+        # nominal; with both on, a missing checkpoint raises.
         "use_residual_model": True,
         "num_trajectories": 15,
         # The min_speed term is satisfied only by laying out a *longer* path,
