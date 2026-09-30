@@ -1036,6 +1036,11 @@ def optimize_controller_gains(
         "best_training_loss": best_training_loss,
         "best_validation_loss": best_validation_loss,
         "start_candidate_indices": np.asarray(start_candidate_indices, dtype=int),
+        # Optimizer-space vectors (gain part + parametrization tail) each start
+        # began from and returned, so a caller can tell a refinement that never
+        # left its start point (a stalled solve) from one that converged.
+        "initial_values_per_start": np.asarray(initial_values, dtype=float),
+        "final_values_per_start": np.asarray(final_values, dtype=float),
         "loss_history_per_start": loss_history,
         "validation_loss_history_per_start": validation_loss_history,
         "loss_terms_history_per_start": loss_terms_history,

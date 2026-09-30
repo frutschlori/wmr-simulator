@@ -110,6 +110,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     init_parser.add_argument(
+        "--gain-parametrization",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Enable/disable the gain parametrization (--no-gain-parametrization to disable): "
+            "off means the static controller records every log and is the only one tuned. "
+            "Default: use_gain_parametrization in experiment.yaml (on, following the problem yaml)."
+        ),
+    )
+    init_parser.add_argument(
         "--optimize-identification",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -262,6 +272,8 @@ def main(argv: list[str] | None = None) -> int:
             overrides["seed"] = args.seed
         if args.residual_model is not None:
             overrides["use_residual_model"] = args.residual_model
+        if args.gain_parametrization is not None:
+            overrides["use_gain_parametrization"] = args.gain_parametrization
         if args.optimize_identification is not None:
             overrides["optimize_identification_trajectory"] = args.optimize_identification
         if args.optimize_tuning is not None:
@@ -306,6 +318,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     iteration = experiment.resolve_iteration(args.iteration)
+    with stages.logged_stage(experiment.paths(iteration), args.command):
+        run_stage(args, experiment, iteration)
+    return 0
+
+
+def run_stage(args, experiment, iteration: int) -> None:
     if args.command == "plan-id-trajectory":
         stages.stage_plan_identification_trajectory(experiment, iteration)
     elif args.command == "simulate-deployment":
@@ -324,7 +342,6 @@ def main(argv: list[str] | None = None) -> int:
         stages.stage_tune_gains(experiment, iteration)
     elif args.command == "finalize":
         stages.stage_finalize(experiment, iteration)
-    return 0
 
 
 if __name__ == "__main__":

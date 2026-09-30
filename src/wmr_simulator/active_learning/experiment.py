@@ -76,6 +76,13 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
     "num_iterations": 5,
     # Flags.
     "use_residual_model": True,
+    # Master switch for the gain parametrization (state-dependent gains). Off
+    # means the static controller is the only one: init disables the problem's
+    # gain_parametrization, so no GAINMLP.JSN is exported, the static
+    # controller records every identification log and benchmark, and tune-gains
+    # runs one static tune whatever gain_tuning.gain_parametrization says. On
+    # follows the problem yaml.
+    "use_gain_parametrization": True,
     # Design the identification trajectory / the tuning set every iteration
     # (FIM), or use the fixed references below instead. Separate so that a
     # designed identification can be combined with a fixed tuning set.
@@ -587,6 +594,12 @@ class IterationPaths:
     @property
     def visualize_dir(self) -> Path:
         return self.root / "visualize"
+
+    @property
+    def stage_log(self) -> Path:
+        """Start/finish wall-clock times of every stage `run` executed here; a
+        stage with a start and no finish was interrupted mid-write."""
+        return self.root / "stage_log.yaml"
 
     def create_directories(self) -> None:
         for directory in (
