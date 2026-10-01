@@ -54,6 +54,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 CLI_SCRIPT = REPO_ROOT / "scripts" / "run_active_learning.py"
 MANIFEST_NAME = "study_manifest.yaml"
 MAX_PARALLEL_FILE = "max_parallel"
+RUN_SUMMARY_NAME = "run_summary.json"
 
 # Experiment keys holding paths the loop opens relative to its cwd. Runs start
 # from their own directory, so these are made absolute against the repo.
@@ -369,6 +370,22 @@ def launch_run(
     session["wall_clock_s"] = round(time.monotonic() - start, 1)
     session["tuning_warnings"] = collect_tuning_warnings(Experiment.load(run_dir))
     save_yaml(run_dir / MANIFEST_NAME, manifest)
+    if all(code == 0 for code in session["exit_codes"].values()):
+        # Scored in its own process, in this run's slot: the decoding is pure
+        # Python and would serialize on the launcher's interpreter lock.
+        score = [sys.executable, "-c", "import sys; from wmr_simulator.active_learning.study import score_run; score_run(sys.argv[1])", str(run_dir)]
+        with (run_dir / "logs" / f"session{session_index}.log").open("a", encoding="utf-8") as log_file:
+            log_file.write(f"\n$ score_run {run_dir}\n")
+            log_file.flush()
+            process = subprocess.Popen(score, cwd=run_dir, stdout=log_file, stderr=subprocess.STDOUT, start_new_session=True)
+            if processes is not None:
+                processes.append(process)
+            try:
+                session["exit_codes"]["score"] = process.wait()
+            finally:
+                if processes is not None:
+                    processes.remove(process)
+        save_yaml(run_dir / MANIFEST_NAME, manifest)
     status = "ok" if all(code == 0 for code in session["exit_codes"].values()) else "FAILED"
     print(f"{run_dir.name}: {status} after {session['wall_clock_s']:.0f} s, exit codes {session['exit_codes']}", flush=True)
     return session
@@ -651,15 +668,61 @@ def summarize_run(run_dir: Path) -> tuple[list[dict], list[dict]]:
     return rows, run_rows
 
 
-def summarize_study(phase_dir: str | Path) -> tuple[Path, Path, Path]:
+def score_run(run_dir: str | Path) -> Path:
+    """Score one run (``summarize_run``) and cache the result in its directory.
+
+    The launcher calls this in the run's own slot as soon as the run is done,
+    so decoding its benchmark logs (yaw ringing) happens in parallel with the
+    other runs instead of serially at the end of the study.
+    """
+    import json
+
+    run_dir = Path(run_dir)
+    rows, run_rows = summarize_run(run_dir)
+    path = run_dir / RUN_SUMMARY_NAME
+    temporary = path.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps({"rows": rows, "run_rows": run_rows}, default=float))
+    os.replace(temporary, path)
+    return path
+
+
+def _cached_run_summary(run_dir: Path) -> tuple[list[dict], list[dict]] | None:
+    """The cached score of a run, or None when it is missing or older than the
+    run's last session (a resumed run is scored again)."""
+    import json
+
+    path = run_dir / RUN_SUMMARY_NAME
+    if not path.is_file():
+        return None
+    manifest = _load_manifest(run_dir)
+    finished = [session.get("finished") for session in manifest.get("sessions", []) if session.get("finished")]
+    if finished and datetime.datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec="seconds") < max(finished):
+        return None
+    payload = json.loads(path.read_text())
+    return payload["rows"], payload["run_rows"]
+
+
+def summarize_study(phase_dir: str | Path, max_workers: int | None = None) -> tuple[Path, Path, Path]:
     """Write ``summary.csv``, ``benchmark_runs.csv`` and ``summary.md`` for
-    every run under ``phase_dir``."""
+    every run under ``phase_dir``.
+
+    Runs the launcher already scored are read from their cache; the rest are
+    scored here, in parallel processes (``max_workers``, default half the CPUs).
+    """
     import csv
+    from concurrent.futures import ProcessPoolExecutor
 
     phase_dir = Path(phase_dir)
+    run_dirs = sorted(path for path in phase_dir.iterdir() if (path / "experiment.yaml").is_file())
+    missing = [run_dir for run_dir in run_dirs if _cached_run_summary(run_dir) is None]
+    if missing:
+        workers = max(1, min(len(missing), max_workers or max(1, (os.cpu_count() or 2) // 2)))
+        print(f"Scoring {len(missing)} run(s) with {workers} worker(s); {len(run_dirs) - len(missing)} cached.")
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            list(pool.map(score_run, missing))
     rows, run_rows = [], []
-    for run_dir in sorted(path for path in phase_dir.iterdir() if (path / "experiment.yaml").is_file()):
-        run_summary, runs = summarize_run(run_dir)
+    for run_dir in run_dirs:
+        run_summary, runs = _cached_run_summary(run_dir)
         rows.extend(run_summary)
         run_rows.extend(runs)
 
