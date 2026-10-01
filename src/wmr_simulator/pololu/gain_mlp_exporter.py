@@ -234,7 +234,7 @@ def main(argv: list | None = None) -> int:
 
     import yaml
 
-    from wmr_simulator.gain_parametrization import params_from_cfg, parametrization_kind
+    from wmr_simulator.gain_parametrization import params_from_cfg
 
     with open(args.problem, "r", encoding="utf-8") as file:
         problem_cfg = yaml.safe_load(file)
@@ -250,11 +250,8 @@ def main(argv: list | None = None) -> int:
         if tuned.get("schedule") is not None:
             parametrization_cfg = tuned["schedule"]
 
-    if parametrization_kind(parametrization_cfg) != error_mlp.KIND:
-        raise SystemExit(
-            f"Gain parametrization kind {parametrization_kind(parametrization_cfg)!r} is not "
-            f"{error_mlp.KIND!r}; nothing to export."
-        )
+    if parametrization_cfg is None:
+        raise SystemExit("The problem has no gain parametrization; nothing to export.")
     params = params_from_cfg(parametrization_cfg, feature_scale)
 
     output_path = export_gain_mlp(args.output, params)

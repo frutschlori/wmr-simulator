@@ -211,7 +211,7 @@ class ControllerTuningPipeline(SimulationPipeline):
             num_steps=num_steps,
             learning_rate=learning_rate,
             num_realizations=num_realizations,
-            schedule_template=self.gain_schedule_params,
+            schedule_template=self.gain_parametrization_params,
             schedule_enabled=schedule_enabled,
             position_tracking_weight=position_tracking_weight,
             heading_tracking_weight=heading_tracking_weight,
@@ -362,7 +362,7 @@ def run_gain_tuning_experiment(
         validation_split=validation_split,
         residual_model=residual_model,
     )
-    schedule_enabled = pipeline.gain_schedule_enabled if schedule_enabled is None else bool(schedule_enabled)
+    schedule_enabled = pipeline.gain_parametrization_enabled if schedule_enabled is None else bool(schedule_enabled)
     # One realization bundle for the whole experiment: the tuner scores its
     # objective on it and the summary figures roll out on it, so the plots show
     # the conditions the gains were actually chosen under. Designed offsets
@@ -406,7 +406,7 @@ def run_gain_tuning_experiment(
     static_init = pipeline.gains if static_init_gains is None else controller_gains_array(static_init_gains)
     if schedule_enabled and warm_start_schedule:
         init_gains = pipeline.gains
-        init_schedule_params = pipeline.gain_schedule_params
+        init_schedule_params = pipeline.gain_parametrization_params
     else:
         init_gains = static_init
         init_schedule_params = None

@@ -73,7 +73,7 @@ def test_finalize_rolls_results_into_next_iteration(tmp_path):
         "gains": [9.1, 8.2, 6.3, 7.0, 11.0],
         "static_gains": [4.1, 3.2, 2.3, 5.0, 9.0],
         "schedule_enabled": True,
-        "schedule": {"scheduled_indices": [0, 1, 2], "rho": [0.5, 0.5, 0.5], "W": [[0.1, 0.0]] * 3},
+        "schedule": {"kind": "error_mlp", "hidden_sizes": [8], "seed": 3},
     }
     with paths.identification_result.open("w") as file:
         yaml.safe_dump(identification, file)
@@ -86,7 +86,8 @@ def test_finalize_rolls_results_into_next_iteration(tmp_path):
     next_robot_config = load_yaml(next_paths.robot_config)
     assert next_robot_config["robot"]["wheel_radius"] == 0.0171
     assert next_robot_config["controller"]["gains"] == gains["gains"]
-    assert next_robot_config["controller"]["gain_parametrization"]["W"] == [[0.1, 0.0]] * 3
+    assert next_robot_config["controller"]["gain_parametrization"]["hidden_sizes"] == [8]
+    assert next_robot_config["controller"]["gain_parametrization"]["seed"] == 3
 
     next_problem = load_yaml(next_paths.problem)
     assert next_problem["robot"]["base_diameter"] == 0.0912
@@ -110,7 +111,7 @@ def test_finalize_writes_static_gain_baseline(tmp_path):
         "gains": [9.1, 8.2, 6.3, 7.0, 11.0],
         "static_gains": [4.1, 3.2, 2.3, 5.0, 9.0],
         "schedule_enabled": True,
-        "schedule": {"scheduled_indices": [0, 1, 2], "rho": [0.5, 0.5, 0.5], "W": [[0.1, 0.0]] * 3},
+        "schedule": {"kind": "error_mlp", "hidden_sizes": [8], "seed": 3},
     }
     with paths.identification_result.open("w") as file:
         yaml.safe_dump(identification, file)

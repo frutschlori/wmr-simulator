@@ -10,8 +10,8 @@ untouched, e.g. ``[0, 1, 2]`` keeps the motor PI gains static):
 The trainable flat vector is a *delta* on a frozen random init whose final
 layer is zero, so a zero delta is exactly the identity parametrization (static
 controller) while the hidden layers still produce nonzero activations -- the
-LHS presearch over base gains starts from the static controller and Adam sees
-useful gradients from step one (an all-zero MLP would be a dead saddle).
+tuner starts from the static controller and sees useful gradients from step
+one (an all-zero MLP would be a dead saddle).
 
 Regularization: every weight matrix is spectrally normalized at forward time
 to ``spectral_norm_cap`` (Miyato et al. 2018), which caps the Lipschitz
@@ -29,7 +29,7 @@ import jax.numpy as jnp
 KIND = "error_mlp"
 
 # Body-frame tracking errors (as used by the pose controller) plus the
-# reference speed features of the bounded_reference scheduler.
+# reference speed features.
 FEATURE_NAMES = ("x_e", "y_e", "theta_e", "v_e", "omega_e", "v_d", "abs_omega_d")
 NUM_FEATURES = len(FEATURE_NAMES)
 # The gains a factor can be scheduled on: the first five of the controller
@@ -40,7 +40,7 @@ NUM_SCHEDULABLE_GAINS = 5
 
 _V_D_EPS = 1e-12
 # Default scales for the pose-error features; velocity features are scaled by
-# the robot limits (v_max, omega_max) like in the bounded scheduler.
+# the robot limits (v_max, omega_max).
 _POS_ERROR_SCALE = 0.5   # m
 _ANGLE_ERROR_SCALE = 1.0  # rad
 

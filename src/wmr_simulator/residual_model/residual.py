@@ -774,9 +774,7 @@ def simulate_closed_loop_on_log_reference(
     config = yaml.safe_load(open(problem_path, "r", encoding="utf-8"))
     plant_robot_cfg = yaml.safe_load(open(problem, "r", encoding="utf-8"))["robot"]
     controller_cfg = config["controller"]
-    parametrization_cfg = controller_cfg.get(
-        "gain_parametrization", controller_cfg.get("gain_schedule")
-    )
+    parametrization_cfg = controller_cfg.get("gain_parametrization")
     schedule_params = (
         params_from_cfg(parametrization_cfg, [config["robot"]["v_max"], config["robot"]["omega_max"]])
         if parametrization_cfg and parametrization_cfg.get("enabled", False)

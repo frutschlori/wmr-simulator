@@ -6,6 +6,8 @@ venv/
 
 # Test simulation runs
 Pololu Data/test*
+# Thesis evaluation study runs (scripts/run_study.py)
+Pololu Data/thesis_ch5/
 
 # Personal notes
 results/

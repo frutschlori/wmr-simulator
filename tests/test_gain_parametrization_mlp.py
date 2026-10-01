@@ -8,6 +8,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+import yaml
 
 from wmr_simulator.gain_parametrization import (
     ErrorMlpParams,
@@ -60,6 +61,22 @@ def test_cfg_selects_error_mlp_kind():
     params = _params()
     assert isinstance(params, ErrorMlpParams)
     assert params.feature_scale.shape == (NUM_FEATURES,)
+
+
+def test_cfg_rejects_other_kinds():
+    with pytest.raises(ValueError):
+        params_from_cfg(_cfg(kind="bounded_reference"), FEATURE_SCALE)
+
+
+def test_velocity_feature_scale_follows_robot_limits():
+    with open(PROBLEM) as f:
+        robot_cfg = yaml.safe_load(f)["robot"]
+    limits = [robot_cfg["v_max"], robot_cfg["omega_max"]]
+    pipeline = _pipeline()
+    np.testing.assert_allclose(pipeline.gain_parametrization_feature_scale, limits)
+    params = params_from_cfg(_cfg(), pipeline.gain_parametrization_feature_scale)
+    # [v_e, omega_e, v_d, |omega_d|] are normalized by [v_max, omega_max, v_max, omega_max].
+    np.testing.assert_allclose(np.asarray(params.feature_scale)[3:], limits * 2)
 
 
 def test_identity_factors_at_zero_theta():

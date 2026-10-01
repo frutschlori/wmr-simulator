@@ -714,9 +714,7 @@ def robot_config_from_problem(problem_cfg: dict) -> dict:
             "gains": [float(gain) for gain in problem_cfg["controller"]["gains"]],
         },
     }
-    gain_parametrization = problem_cfg["controller"].get(
-        "gain_parametrization", problem_cfg["controller"].get("gain_schedule")
-    )
+    gain_parametrization = problem_cfg["controller"].get("gain_parametrization")
     if gain_parametrization is not None:
         payload["controller"]["gain_parametrization"] = copy.deepcopy(gain_parametrization)
     return payload
@@ -749,11 +747,8 @@ def write_iteration_problem(
     problem_cfg.setdefault("controller", {})["gains"] = [
         float(gain) for gain in robot_config["controller"]["gains"]
     ]
-    gain_parametrization = robot_config["controller"].get(
-        "gain_parametrization", robot_config["controller"].get("gain_schedule")
-    )
+    gain_parametrization = robot_config["controller"].get("gain_parametrization")
     if gain_parametrization is not None:
-        problem_cfg["controller"].pop("gain_schedule", None)
         problem_cfg["controller"]["gain_parametrization"] = copy.deepcopy(gain_parametrization)
     if update_estimator_geometry and "estimator" in problem_cfg:
         problem_cfg["estimator"]["wheel_radius"] = float(robot_config["robot"]["wheel_radius"])

@@ -149,18 +149,13 @@ class SimulationPipeline:
         )
         self.gains = controller_gains_array(self.controller_cfg["gains"])
 
-        gain_parametrization_cfg = self.controller_cfg.get(
-            "gain_parametrization", self.controller_cfg.get("gain_schedule")
-        )
+        gain_parametrization_cfg = self.controller_cfg.get("gain_parametrization")
         self.gain_parametrization_cfg = gain_parametrization_cfg
         self.gain_parametrization_enabled = (
             bool(gain_parametrization_cfg.get("enabled", False)) if gain_parametrization_cfg else False
         )
-        # Backward-compatible names for existing scripts/tests.
-        self.gain_schedule_cfg = gain_parametrization_cfg
-        self.gain_schedule_enabled = self.gain_parametrization_enabled
-        # Feature scales are auto-derived from the robot velocity limits so that the
-        # normalized features z = [v_d/v_max, |omega_d|/omega_max] land in ~[0, 1].
+        # The MLP's velocity features are normalized by the robot velocity limits
+        # so that they land in ~[-1, 1].
         v_max = float(self.robot_cfg.get("v_max", 1.0)) or 1.0
         omega_max = float(self.robot_cfg.get("omega_max", 1.0)) or 1.0
         self.v_max = v_max
@@ -169,8 +164,6 @@ class SimulationPipeline:
         self.gain_parametrization_params = gain_parametrization_params_from_cfg(
             gain_parametrization_cfg, self.gain_parametrization_feature_scale
         )
-        self.gain_schedule_feature_scale = self.gain_parametrization_feature_scale
-        self.gain_schedule_params = self.gain_parametrization_params
 
         # Compiled batch rollouts, keyed by the options that are static to the
         # traced function (see run_closed_loop_batch).
