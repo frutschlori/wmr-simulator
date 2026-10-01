@@ -205,6 +205,7 @@ class ControllerTuningPipeline(SimulationPipeline):
         init_offset_angle: float = 0.0,
         realizations=None,
         outlier_loss_factor: float = 0.0,
+        freeze_gains: bool = False,
     ):
         return optimize_controller_gains(
             pipeline=self,
@@ -234,6 +235,7 @@ class ControllerTuningPipeline(SimulationPipeline):
             init_offset_angle=init_offset_angle,
             realizations=realizations,
             outlier_loss_factor=outlier_loss_factor,
+            freeze_gains=freeze_gains,
             training_reference_trajectories=self.training_reference_trajectories,
             validation_reference_trajectories=self.validation_reference_trajectories,
             training_start_offsets=self.training_start_offsets,
@@ -313,8 +315,12 @@ def run_gain_tuning_experiment(
     init_offset_radius: float = 0.0,
     init_offset_angle: float = 0.0,
     outlier_loss_factor: float = 0.0,
+    freeze_base_gains: bool = False,
 ):
     """Tune controller gains (optionally jointly with a gain parametrization).
+
+    ``freeze_base_gains`` holds the parametrization run's base gains at the
+    problem's gains and trains the parametrization alone.
 
     ``init_offset_radius`` / ``init_offset_angle`` randomize the rollout start
     pose around the reference start, one draw per noise realization, so the
@@ -425,7 +431,7 @@ def run_gain_tuning_experiment(
         initial_pose=summary_initial_pose,
     )
 
-    def optimize(init_gains, run_schedule_enabled, run_num_steps, run_learning_rate, run_num_lhs_points=None):
+    def optimize(init_gains, run_schedule_enabled, run_num_steps, run_learning_rate, run_num_lhs_points=None, freeze=False):
         return pipeline.optimize(
             realizations=realizations,
             init_gains=init_gains,
@@ -452,6 +458,7 @@ def run_gain_tuning_experiment(
             init_offset_radius=init_offset_radius,
             init_offset_angle=init_offset_angle,
             outlier_loss_factor=outlier_loss_factor,
+            freeze_gains=freeze,
         )
 
     static_tune = static_tune and schedule_enabled
@@ -493,7 +500,8 @@ def run_gain_tuning_experiment(
 
     optimization = optimize(parametrization_init_gains, run_schedule_enabled=schedule_enabled,
                             run_num_steps=num_steps, run_learning_rate=learning_rate,
-                            run_num_lhs_points=parametrization_num_lhs_points)
+                            run_num_lhs_points=parametrization_num_lhs_points,
+                            freeze=freeze_base_gains and schedule_enabled)
     optimized_gains = optimization["gains"]
     schedule_params = optimization["schedule_params"]
     (

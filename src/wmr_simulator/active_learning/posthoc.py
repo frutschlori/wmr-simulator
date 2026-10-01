@@ -91,13 +91,21 @@ def stage_tune_parametrized(experiment: Experiment, iteration: int, variant: str
         load_yaml(experiment.config["problem"])["controller"]["gain_parametrization"],
         overrides.get("gain_parametrization") or {},
     )
+    # ``base_from_static`` (H3): the base gains are this iteration's static
+    # result every time and are held there; only the network is trained (and
+    # warm-started), so the controller is the static one times a schedule.
+    base_from_static = bool(overrides.get("base_from_static", False))
     previous = result_path(experiment, iteration - 1, variant) if iteration > 1 else None
     if previous is not None and previous.is_file():
         previous_result = load_yaml(previous)
-        base_gains = previous_result["gains"]
+        base_gains = load_yaml(paths.gains_result)["gains"] if base_from_static else previous_result["gains"]
         parametrization = {**parametrization, **previous_result["schedule"]}
         warm_start = True
-        source = f"variant result of iteration {iteration - 1}"
+        source = (
+            f"static result of iteration {iteration} + variant network of iteration {iteration - 1}"
+            if base_from_static
+            else f"variant result of iteration {iteration - 1}"
+        )
     else:
         base_gains = load_yaml(paths.gains_result)["gains"]
         warm_start = False
@@ -153,6 +161,7 @@ def stage_tune_parametrized(experiment: Experiment, iteration: int, variant: str
         init_offset_radius=float(config["init_offset_radius"]),
         init_offset_angle=float(config["init_offset_angle"]),
         residual_model=residual_model,
+        freeze_base_gains=base_from_static,
     )
     print_controller_gains("Parametrized base gains:", result["optimized_gains"])
     schedule = parametrization_to_cfg(result["schedule_params"])

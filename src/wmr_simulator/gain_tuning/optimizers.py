@@ -735,8 +735,13 @@ def optimize_controller_gains(
     validation_start_offsets: jax.Array | None = None,
     realizations=None,
     outlier_loss_factor: float = 0.0,
+    freeze_gains: bool = False,
 ):
     """Single-stage joint optimization of base gains and the gain schedule.
+
+    ``freeze_gains`` holds the base gains at the (first) init gains and trains
+    the parametrization alone: the controller is then the given static one
+    times a learned schedule.
 
     The trainable vector is ``[gain_values(6), parametrization_flat(num_w)]``. LHS
     presearch and multistart operate on the gain part, with the parametrization
@@ -920,6 +925,24 @@ def optimize_controller_gains(
     init_gain_values = controller_gains_to_optimizer_values(
         init_gains, k_min_stab=k_min_stab, k_max_stab=k_max_stab, k_max_rest=k_max_rest
     )
+    if freeze_gains:
+        frozen_gain_values = jnp.atleast_2d(init_gain_values)[0]
+
+        def with_frozen_gains(function):
+            if function is None:
+                return None
+
+            def wrapped(values):
+                gains = jnp.broadcast_to(frozen_gain_values, values.shape[:-1] + frozen_gain_values.shape)
+                return function(jnp.concatenate([gains, values[..., _NUM_GAINS:]], axis=-1))
+
+            return wrapped
+
+        loss_terms_for_optimizer_values = with_frozen_gains(loss_terms_for_optimizer_values)
+        loss_for_optimizer_values = with_frozen_gains(loss_for_optimizer_values)
+        validation_loss_terms_for_optimizer_values = with_frozen_gains(validation_loss_terms_for_optimizer_values)
+        validation_loss_for_optimizer_values = with_frozen_gains(validation_loss_for_optimizer_values)
+        print("Base gains frozen at the init gains; training the parametrization only.")
     # Warm-start the parametrization from the template (e.g. the previous
     # iteration's trained schedule) instead of the identity mapping.
     w_init = gain_parametrization_flat_params(schedule_template) if (schedule_enabled and warm_start_schedule) else None
@@ -1003,6 +1026,8 @@ def optimize_controller_gains(
     # loss run was also the worst-generalizing one. `selection_scores` already
     # falls back to the training loss when there is no validation set, and it is
     # the score of each start's *best* iterate, not of its last one.
+    if freeze_gains:
+        final_values = jnp.asarray(final_values).at[:, :_NUM_GAINS].set(frozen_gain_values)
     best_index = int(np.argmin(selection_scores))
     best_values = final_values[best_index]
     final_gains_per_start = controller_gains_from_optimizer_values(
