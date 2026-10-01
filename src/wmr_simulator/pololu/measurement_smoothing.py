@@ -94,7 +94,18 @@ DEFAULT_ENCODER_LAG_SEARCH_S = (-0.08, 0.12)
 # lag came out -7.4 ms against +2.5 ms on its slow phase, and L fell back from
 # 82.5 to 81.6 mm. MuJoCo's traction limit is ~6.4 m/s^2.
 DEFAULT_ENCODER_LAG_MAX_LATERAL_ACCELERATION = 3.0
-DEFAULT_ENCODER_SAVGOL_WINDOW = 5
+# Zero-phase smoothing after the inversion. The inverted speeds carry the raw
+# count quantization (one count per 10 ms is 3.4 rad/s in MuJoCo), which the
+# firmware low-pass used to hide; window 5 left 7.3 rad/s of noise in them.
+# Measured 2026-10-01: the residual model, whose nominal twist is built from
+# these speeds, turned that noise into a yaw-damping correction (slope of
+# domega on omega_nom -0.37 against -0.17 for the real plant effect), and the
+# tuner answered with ky 9-18 / kth 10-15 that diverged in MuJoCo (S-F-R:
+# 61-90 of 150 benchmark runs). Window 21 (0.21 s) brings the noise to 1.5
+# rad/s and the slope to -0.18 while identification stays as accurate and
+# gets 2-4x more precise in L (20 seeds: 84.48 +- 0.03 mm designed, 83.93 +-
+# 0.04 fixed, against 84.64 +- 0.07 / 84.18 +- 0.15 at window 5).
+DEFAULT_ENCODER_SAVGOL_WINDOW = 21
 DEFAULT_ENCODER_SAVGOL_POLYORDER = 3
 
 
