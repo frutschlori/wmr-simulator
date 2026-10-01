@@ -12,6 +12,7 @@ from wmr_simulator.gain_tuning.checks import (
     gains_unchanged,
     rollout_divergence,
     stalled,
+    start_and_returned_losses,
 )
 from wmr_simulator.gain_tuning.checks import warnings_for as check_warnings
 from wmr_simulator.gain_tuning.objectives import (
@@ -637,6 +638,7 @@ def tuning_checks(
         gains = run_optimization["gains"]
         return {
             "stalled": stalled(run_optimization),
+            **start_and_returned_losses(run_optimization),
             "unchanged_from_init": gains_unchanged(gains, run_init_gains, k_min_stab, k_max_stab, k_max_rest),
             "bound_hits": bound_hits(gains, k_min_stab, k_max_stab, k_max_rest),
             "divergence": {"tuned": divergence(gains, run_optimization["schedule_params"])},

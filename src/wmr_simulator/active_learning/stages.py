@@ -2334,15 +2334,20 @@ def logged_stage(paths: IterationPaths, stage: str):
     def now() -> str:
         return datetime.datetime.now().isoformat(timespec="seconds")
 
-    log = load_yaml(paths.stage_log) if paths.stage_log.is_file() else {}
-    log = log or {}
+    def save(log: dict) -> None:
+        # Atomic, so a process killed mid-write never leaves a truncated log.
+        temporary = paths.stage_log.with_suffix(".yaml.tmp")
+        save_yaml(temporary, log)
+        os.replace(temporary, paths.stage_log)
+
+    log = (load_yaml(paths.stage_log) if paths.stage_log.is_file() else {}) or {}
     log[stage] = {"started": now(), "finished": None, "seconds": None}
-    save_yaml(paths.stage_log, log)
+    save(log)
     start = time.monotonic()
     yield
     log = load_yaml(paths.stage_log) or {}
     log[stage] = {**log.get(stage, {}), "finished": now(), "seconds": round(time.monotonic() - start, 1)}
-    save_yaml(paths.stage_log, log)
+    save(log)
 
 
 def _run_iteration(
@@ -2381,7 +2386,9 @@ def _run_iteration(
             stage_run_benchmark(experiment, iteration)
 
     if not status["decode-logs"]:
-        if deploys_in_simulation:
+        # Logs already on disk but not decoded (an interrupted run) are decoded,
+        # never topped up: a second deployment would add more logs next to them.
+        if deploys_in_simulation and not _run_log_paths(paths.data_dir):
             with logged_stage(paths, "simulate-deployment"):
                 stage_simulate_deployment(experiment, iteration)
         with logged_stage(paths, "decode-logs"):
