@@ -10,6 +10,9 @@ import jax.numpy as jnp
 import numpy as np
 
 from wmr_simulator.pololu.measurement_smoothing import (
+    EncoderLag,
+    estimate_encoder_lag,
+    shift_series,
     smooth_and_align_encoder_speeds,
     smooth_pose_stream,
 )
@@ -54,6 +57,19 @@ def load_pololu_traj_control_log(
     *,
     clip_after_first_trajectory: bool = False,
 ) -> SimulationLog:
+    """Load one Pololu traj-control csv into a SimulationLog (see
+    ``load_pololu_traj_control_log_and_encoder_lag``, which also returns the
+    encoder lag that was taken out)."""
+    return load_pololu_traj_control_log_and_encoder_lag(
+        path, clip_after_first_trajectory=clip_after_first_trajectory
+    )[0]
+
+
+def load_pololu_traj_control_log_and_encoder_lag(
+    path: str | Path,
+    *,
+    clip_after_first_trajectory: bool = False,
+) -> tuple[SimulationLog, EncoderLag | None]:
     """Load one Pololu traj-control csv into a SimulationLog.
 
     All streams share one time base in seconds, zeroed at the start of the
@@ -68,9 +84,12 @@ def load_pololu_traj_control_log(
     finite-difference raw mocap. The raw poses are kept in ``pose.true_states``
     for diagnostics/plots; the survivors of rejection in ``pose.clean_states``.
 
-    The encoder wheel speeds get a light Savitzky-Golay smoothing and are
-    advanced by the firmware low-pass group delay to realign them with the
-    mocap motion (measurement_smoothing.smooth_and_align_encoder_speeds).
+    The encoder wheel speeds are un-low-passed (the firmware's 3 Hz one-pole is
+    inverted exactly), lightly Savitzky-Golay smoothed, and shifted by the lag
+    this log's encoder twist shows against its mocap twist
+    (measurement_smoothing.smooth_and_align_encoder_speeds /
+    estimate_encoder_lag); that lag is returned next to the log, None when the
+    log is too short or still to measure it (then no shift is applied).
 
     Smoothing and outlier-rejection defaults for both mocap and encoders are
     configured in the measurement_smoothing submodule (DEFAULT_* constants).
@@ -96,10 +115,13 @@ def load_pololu_traj_control_log(
         ("omega_r_meas", "omega_l_meas"),
         trigger_names=("omega_r_meas", "omega_l_meas"),
     )
-    # Light extra smoothing, then advance by the firmware LP group delay so the
-    # encoder speeds line up in time with the mocap-derived motion
-    # (measurement_smoothing.smooth_and_align_encoder_speeds, DEFAULT_ENCODER_* knobs).
+    # Undo the firmware low-pass and smooth lightly, then take out whatever lag
+    # the encoder twist still shows against the mocap twist in this log
+    # (measurement_smoothing, DEFAULT_ENCODER_* knobs).
     wheel_speeds = smooth_and_align_encoder_speeds(wheel_time, wheel_speeds)
+    encoder_lag = estimate_encoder_lag(wheel_time, wheel_speeds, pose_time, pose_twists)
+    if encoder_lag is not None:
+        wheel_speeds = shift_series(wheel_time, wheel_speeds, encoder_lag.lag_s)
     wheel_vel_omega = _latest_values_at_times(columns, data, ("v_actual", "w_actual"), wheel_time)
     duty_cycle = _latest_values_at_times(columns, data, ("duty_r", "duty_l"), wheel_time)
     command_time, wheel_cmd = _sparse_stream(
@@ -126,7 +148,7 @@ def load_pololu_traj_control_log(
         ]
     )
 
-    return SimulationLog(
+    log = SimulationLog(
         reference=ReferenceLog(
             time_s=jnp.asarray(reference_time, dtype=jnp.float32),
             states=jnp.asarray(reference_states, dtype=jnp.float32),
@@ -148,6 +170,7 @@ def load_pololu_traj_control_log(
             clean_states=jnp.asarray(smoothed.clean_pose, dtype=jnp.float32),
         ),
     )
+    return log, encoder_lag
 
 
 def clip_log_to_duration(log: SimulationLog, duration: float) -> SimulationLog:

@@ -24,6 +24,7 @@ group delay to realign them in time with the mocap motion.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import NamedTuple
 
 import numpy as np
 from scipy.signal import savgol_filter
@@ -40,7 +41,13 @@ __all__ = [
     "DEFAULT_SAVGOL_POLYORDER",
     "DEFAULT_MIN_DT",
     "DEFAULT_OUTLIER_SIGMA",
-    "DEFAULT_ENCODER_LP_TAU_S",
+    "DEFAULT_ENCODER_LP_CUTOFF_HZ",
+    "DEFAULT_ENCODER_LAG_SEARCH_S",
+    "DEFAULT_ENCODER_LAG_MAX_LATERAL_ACCELERATION",
+    "EncoderLag",
+    "estimate_encoder_lag",
+    "invert_encoder_lowpass",
+    "shift_series",
     "DEFAULT_ENCODER_SAVGOL_WINDOW",
     "DEFAULT_ENCODER_SAVGOL_POLYORDER",
 ]
@@ -61,16 +68,32 @@ DEFAULT_SAVGOL_POLYORDER = 3
 DEFAULT_MIN_DT = 5e-3
 DEFAULT_OUTLIER_SIGMA = 15.0
 
-# Encoder wheel speeds are firmware low-pass filtered (one-pole IIR, f_c = 3 Hz).
-# The filter's DC group delay equals its time constant tau = 1/(2*pi*f_c) ~ 53 ms,
-# so the logged speed at time t reflects the true speed at t - tau; we advance the
-# series by this constant to realign it with the mocap motion (0 disables). On top
-# we apply a light Savitzky-Golay smoothing (window/order below); the encoders
-# carry no outliers so no rejection is needed. NB the constant-tau shift only
-# exactly compensates low-frequency content (the group delay falls off above f_c),
-# but that is where the wheel-speed signal lives.
-# DEFAULT_ENCODER_LP_TAU_S = 1.0 / (2.0 * np.pi * 3.0)
-DEFAULT_ENCODER_LP_TAU_S = 0.053
+# Encoder wheel speeds are logged after the firmware's low-pass
+# (inner_controller.rs: a one-pole IIR at the 100 Hz inner-loop rate, f_c = 3 Hz,
+# y_k = y_{k-1} + alpha (x_k - y_{k-1}), alpha = dt / (tau + dt)). Every filter
+# sample is logged, so the loader inverts the filter exactly instead of shifting
+# the series by its DC group delay: a constant shift only undoes the delay of the
+# slowest content and leaves the filter's attenuation of faster wheel-speed
+# changes, which the identification then absorbs into the geometry. Measured
+# 2026-10-01 on Phase 2 MuJoCo logs: shifted by tau, r/L/u came out 16.13 mm /
+# 83.9 mm / 227 rad/s (fixed identification trajectory) and 16.03 / 81.5 / 229
+# (designed); inverted, 15.98 / 84.6 / 229.3 and 15.98 / 82.5 / 229.4 against a
+# plant at 16.00 / 84.0-84.7 / 229.9. 0 disables the inversion.
+DEFAULT_ENCODER_LP_CUTOFF_HZ = 3.0
+# Whatever lag remains after the inversion is measured per log, by
+# cross-correlating the encoder twist with the mocap twist (scale-free, so
+# independent of the wheel radius and wheelbase being identified), and taken
+# out. It is not a constant: MuJoCo logs keep +2.5 ms after the inversion, the
+# robot's exp1 logs -0.5 to -11 ms (yaw) -- the encoders *lead* the mocap there,
+# by more than any loader constant could serve for both (raw lag 52-58 ms in
+# MuJoCo against 36-48 ms on the robot).
+DEFAULT_ENCODER_LAG_SEARCH_S = (-0.08, 0.12)
+# The lag is a property of the two clocks, so it is measured only where the
+# wheels grip: samples whose mocap lateral acceleration |v * omega| stays below
+# this. Measured over a whole designed MuJoCo log, whose fast phase slips, the
+# lag came out -7.4 ms against +2.5 ms on its slow phase, and L fell back from
+# 82.5 to 81.6 mm. MuJoCo's traction limit is ~6.4 m/s^2.
+DEFAULT_ENCODER_LAG_MAX_LATERAL_ACCELERATION = 3.0
 DEFAULT_ENCODER_SAVGOL_WINDOW = 5
 DEFAULT_ENCODER_SAVGOL_POLYORDER = 3
 
@@ -352,39 +375,145 @@ def savgol_smooth_series(
     return smoothed[:, 0] if single_column else smoothed
 
 
+def invert_encoder_lowpass(
+    time_s: np.ndarray, speeds: np.ndarray, cutoff_hz: float = DEFAULT_ENCODER_LP_CUTOFF_HZ
+) -> np.ndarray:
+    """Undo the firmware's one-pole wheel-speed low-pass, sample by sample.
+
+    The firmware filters ``y_k = y_{k-1} + alpha_k (x_k - y_{k-1})`` with
+    ``alpha_k = dt_k / (tau + dt_k)``, so ``x_k = y_{k-1} + (y_k - y_{k-1}) /
+    alpha_k`` recovers the unfiltered speed from consecutive logged samples
+    (``dt_k`` from the log's own timestamps). The first sample is kept as is.
+    ``cutoff_hz <= 0`` returns the series unchanged.
+    """
+    time_s = np.asarray(time_s, dtype=float)
+    speeds = np.asarray(speeds, dtype=float)
+    if cutoff_hz <= 0.0 or len(time_s) < 2:
+        return speeds
+    tau = 1.0 / (2.0 * np.pi * cutoff_hz)
+    dt = np.maximum(np.diff(time_s), 1e-6)
+    alpha = dt / (tau + dt)
+    if speeds.ndim > 1:
+        alpha = alpha[:, None]
+    unfiltered = speeds.copy()
+    unfiltered[1:] = speeds[:-1] + (speeds[1:] - speeds[:-1]) / alpha
+    return unfiltered
+
+
+def shift_series(time_s: np.ndarray, values: np.ndarray, lag_s: float) -> np.ndarray:
+    """``values`` read ``lag_s`` later: the result at t is the input at t + lag_s
+    (linear interpolation, ends held). A positive lag advances a delayed series."""
+    time_s = np.asarray(time_s, dtype=float)
+    values = np.asarray(values, dtype=float)
+    if lag_s == 0.0 or len(time_s) <= 1:
+        return values
+    single_column = values.ndim == 1
+    matrix = values[:, None] if single_column else values
+    shifted = np.column_stack([np.interp(time_s + lag_s, time_s, matrix[:, i]) for i in range(matrix.shape[1])])
+    return shifted[:, 0] if single_column else shifted
+
+
+class EncoderLag(NamedTuple):
+    """Lag of the encoder twist behind the mocap twist [s], and the peak
+    correlations of the yaw-rate and forward-speed channels at it."""
+
+    lag_s: float
+    yaw_correlation: float
+    speed_correlation: float
+
+
+def estimate_encoder_lag(
+    wheel_time_s: np.ndarray,
+    wheel_speeds: np.ndarray,
+    pose_time_s: np.ndarray,
+    pose_twists: np.ndarray,
+    search_s: tuple[float, float] = DEFAULT_ENCODER_LAG_SEARCH_S,
+    resolution_s: float = 1e-3,
+    edge_s: float = 0.3,
+    max_lateral_acceleration: float = DEFAULT_ENCODER_LAG_MAX_LATERAL_ACCELERATION,
+) -> EncoderLag | None:
+    """The shift that best aligns the encoder twist with the mocap twist.
+
+    Encoder channels ``omega_r - omega_l`` (yaw) and ``omega_r + omega_l``
+    (speed) against the mocap body twist's yaw rate and forward speed, on a
+    common 5 ms grid; the lag maximizes the sum of the two Pearson correlations,
+    so neither the wheel radius nor the wheelbase enters. Only grid samples
+    whose mocap lateral acceleration is below ``max_lateral_acceleration``
+    count (slipping wheels decouple the two twists). Parabolic refinement
+    below ``resolution_s``. None when too few samples remain or they are flat.
+    """
+    wheel_time_s = np.asarray(wheel_time_s, dtype=float)
+    wheel_speeds = np.asarray(wheel_speeds, dtype=float)
+    pose_time_s = np.asarray(pose_time_s, dtype=float)
+    pose_twists = np.asarray(pose_twists, dtype=float)
+    start = max(wheel_time_s[0], pose_time_s[0]) + edge_s
+    stop = min(wheel_time_s[-1], pose_time_s[-1]) - edge_s
+    grid = np.arange(start, stop, 0.005)
+    if len(grid) < 50:
+        return None
+    lateral = np.abs(np.interp(grid, pose_time_s, pose_twists[:, 0]) * np.interp(grid, pose_time_s, pose_twists[:, -1]))
+    grid = grid[lateral <= max_lateral_acceleration]
+    if len(grid) < 50:
+        return None
+    mocap = (np.interp(grid, pose_time_s, pose_twists[:, -1]), np.interp(grid, pose_time_s, pose_twists[:, 0]))
+    encoder = (wheel_speeds[:, 0] - wheel_speeds[:, 1], wheel_speeds[:, 0] + wheel_speeds[:, 1])
+    # A channel that does not move (a straight run has no yaw rate) says
+    # nothing about the lag; it scores 0 instead of a NaN correlation.
+    usable = [
+        index for index in range(2) if np.std(mocap[index]) > 1e-9 and np.std(encoder[index]) > 1e-9
+    ]
+    if not usable:
+        return None
+    lags = np.arange(search_s[0], search_s[1] + 0.5 * resolution_s, resolution_s)
+
+    def correlations(lag):
+        values = []
+        for index in range(2):
+            if index not in usable:
+                values.append(0.0)
+                continue
+            shifted = np.interp(grid + lag, wheel_time_s, encoder[index])
+            value = np.corrcoef(mocap[index], shifted)[0, 1] if np.std(shifted) > 1e-9 else 0.0
+            values.append(float(np.nan_to_num(value)))
+        return values
+
+    scores = np.asarray([sum(correlations(lag)) for lag in lags])
+    best = int(np.argmax(scores))
+    lag = float(lags[best])
+    if 0 < best < len(lags) - 1:
+        a, b, c = scores[best - 1], scores[best], scores[best + 1]
+        curvature = a - 2.0 * b + c
+        if curvature < 0.0:
+            lag += 0.5 * (a - c) / curvature * resolution_s
+    yaw_correlation, speed_correlation = correlations(lag)
+    return EncoderLag(lag, float(yaw_correlation), float(speed_correlation))
+
+
 def smooth_and_align_encoder_speeds(
     time_s: np.ndarray,
     speeds: np.ndarray,
     *,
-    lp_tau_s: float = DEFAULT_ENCODER_LP_TAU_S,
+    cutoff_hz: float = DEFAULT_ENCODER_LP_CUTOFF_HZ,
+    lag_s: float = 0.0,
     window_length: int = DEFAULT_ENCODER_SAVGOL_WINDOW,
     polyorder: int = DEFAULT_ENCODER_SAVGOL_POLYORDER,
 ) -> np.ndarray:
-    """Light-smooth encoder wheel speeds and advance them by the firmware LP delay.
+    """Recover the unfiltered encoder wheel speeds and align them with the mocap.
 
-    The firmware one-pole low-pass (f_c ~ 3 Hz) delays the logged speeds by its
-    DC group delay ``lp_tau_s``: the value logged at t reflects the true speed at
-    t - lp_tau_s. Applies a centered (zero-phase) Savitzky-Golay smoothing, then
-    advances the series by ``lp_tau_s`` via ``np.interp`` at ``time_s + lp_tau_s``
-    so it lines up in time with the mocap-derived motion. The encoders carry no
-    outliers, so no rejection is done. ``lp_tau_s <= 0`` skips the shift. Returns
-    the same shape as ``speeds`` (``(N,)`` or ``(N, K)``).
+    Inverts the firmware low-pass (``invert_encoder_lowpass``), applies a light
+    centered (zero-phase) Savitzky-Golay smoothing against the noise the
+    inversion amplifies, and reads the result ``lag_s`` later
+    (``shift_series``; the per-log lag comes from ``estimate_encoder_lag``).
+    The encoders carry no outliers, so no rejection is done. Returns the same
+    shape as ``speeds`` (``(N,)`` or ``(N, K)``).
     """
     time_s = np.asarray(time_s, dtype=float)
     speeds = np.asarray(speeds, dtype=float)
     if len(time_s) <= 1:
         return speeds
-
-    smoothed = savgol_smooth_series(time_s, speeds, window_length=window_length, polyorder=polyorder)
-    if lp_tau_s <= 0.0:
-        return smoothed
-
-    single_column = smoothed.ndim == 1
-    matrix = smoothed[:, None] if single_column else smoothed
-    advanced = np.column_stack(
-        [np.interp(time_s + lp_tau_s, time_s, matrix[:, i]) for i in range(matrix.shape[1])]
-    )
-    return advanced[:, 0] if single_column else advanced
+    unfiltered = invert_encoder_lowpass(time_s, speeds, cutoff_hz)
+    smoothed = savgol_smooth_series(time_s, unfiltered, window_length=window_length, polyorder=polyorder)
+    return shift_series(time_s, smoothed, lag_s)
 
 
 def _valid_window(window_length: int, polyorder: int, num_samples: int) -> int:

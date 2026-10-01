@@ -45,13 +45,10 @@ def apply_noise_configuration(problem_cfg: dict) -> dict:
 def advance_logged_series(time_s, values, lead_s: float):
     """Shift a logged (N, K) series earlier in time by ``lead_s``.
 
-    JAX (differentiable) counterpart of the time alignment in
-    ``pololu.measurement_smoothing.smooth_and_align_encoder_speeds``: the value
-    returned at t is the logged value at t + lead_s, linearly interpolated and
-    held at the last sample. Real and MuJoCo logs get this shift when they are
-    loaded, to take out the delay of the firmware wheel-speed low-pass, so
-    simulated logs carry the equivalent shift for the two to be comparable.
-    ``lead_s <= 0`` returns the series unchanged.
+    JAX (differentiable) counterpart of ``pololu.measurement_smoothing.shift_series``:
+    the value returned at t is the logged value at t + lead_s, linearly
+    interpolated and held at the last sample. ``lead_s <= 0`` returns the series
+    unchanged.
     """
     if lead_s <= 0.0:
         return values
@@ -116,17 +113,12 @@ class SimulationPipeline:
         self.robot_cfg = self.problem["robot"]
         self.estimator_cfg = self.problem["estimator"]
         self.controller_cfg = self.problem["controller"]
-        # Logged ("estimated") wheel speeds are the low-pass-filtered encoder
-        # speeds, as the firmware logs them. Hardware and MuJoCo logs are
-        # advanced to undo the filter delay when loaded (pololu.log_loader,
-        # measurement_smoothing.DEFAULT_ENCODER_LP_TAU_S, 25 ms found on the
-        # robot). In simulation the filter is the only delay, so the shift is its
-        # DC group delay, the time constant wheel_lp_tau. Measured 2026-09-27 on
-        # a designed identification trajectory (sim-to-sim, noise on): the loss
-        # minimum in L moved from 77.0 mm unshifted to 80.0 mm at 25 ms and
-        # 83.0 mm at 53 ms (true 84.2 mm), where the loss is also lowest. Set
-        # to 0 to log the unshifted filter output.
-        self.wheel_log_lead_s = float(self.estimator_cfg.get("wheel_lp_tau", 0.0))
+        # Logged ("estimated") wheel speeds are what the log loader makes of a
+        # recorded run (pololu.log_loader): the firmware low-pass inverted and
+        # the remaining lag against the mocap taken out. Here that is the raw
+        # encoder speed u_hat -- the increment over the last wheel step, which
+        # lags the true speed by half a step -- read half a step later.
+        self.wheel_log_lead_s = 0.5 * self.wheel_dt
 
         self.robot = DiffDrive(robot_cfg=self.robot_cfg, dt=self.wheel_dt)
         self.estimator = DiffDriveEstimator(estimator_cfg=self.estimator_cfg, dt=self.wheel_dt)
@@ -359,7 +351,7 @@ class SimulationPipeline:
                     self.robot.get_pose(next_robot_state),
                     self.estimator.get_est_pose(next_estimator_state),
                     next_robot_state.wheel_speeds,
-                    self.estimator.get_est_wheel_speeds(next_estimator_state),
+                    self.estimator.get_measured_wheel_speeds(next_estimator_state),
                     next_robot_state.vel_omega,
                     applied_duty_cycle,
                 )
@@ -397,14 +389,13 @@ class SimulationPipeline:
         true_pose_states = jnp.concatenate([start_pose_row, true_pose_samples.reshape(-1, 3)], axis=0)
         duty_inputs = duty_cycles.reshape(-1, 2)
         selected_wheel_speeds = true_wheel_speeds if wheel_speed_log_source == "true" else estimated_wheel_speeds
-        initial_wheel_speeds = carry0[0].wheel_speeds if wheel_speed_log_source == "true" else carry0[1].u_lp
+        initial_wheel_speeds = carry0[0].wheel_speeds if wheel_speed_log_source == "true" else carry0[1].u_hat
         wheel_speed_log = jnp.vstack([initial_wheel_speeds, selected_wheel_speeds.reshape(-1, 2)])
         num_reference_samples = reference_states.shape[0]
         num_pose_samples = (num_reference_samples - 1) * self.inner_steps_per_geometry_step + 1
         wheel_log_time = jnp.asarray(self.wheel_time_grid[:num_pose_samples], dtype=jnp.float32)
         if wheel_speed_log_source == "estimated":
-            # Low-pass delay compensation, the counterpart of what the log
-            # loader applies to recorded encoder speeds (advance_logged_series).
+            # The loader's lag alignment, for the sim's own encoder model.
             wheel_speed_log = advance_logged_series(wheel_log_time, wheel_speed_log, self.wheel_log_lead_s)
         vel_omega_log = jnp.vstack([carry0[0].vel_omega, wheel_vel_omega.reshape(-1, 2)])
         duty_log = jnp.vstack([duty_inputs, duty_inputs[-1]])

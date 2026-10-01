@@ -262,6 +262,13 @@ class DiffDriveEstimator:
             return est_state.pose_meas
 
     @staticmethod
+    def get_measured_wheel_speeds(est_state):
+        """The raw encoder speeds u_hat (increment over the last step / dt, no
+        low-pass): what a logged run's wheel speeds become once the log loader
+        has inverted the firmware filter."""
+        return est_state.u_hat
+
+    @staticmethod
     def get_est_wheel_speeds(est_state):
         """
         Return the wheel speeds handed to the controller: the low-pass-filtered
