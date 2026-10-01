@@ -55,6 +55,10 @@ CLI_SCRIPT = REPO_ROOT / "scripts" / "run_active_learning.py"
 MANIFEST_NAME = "study_manifest.yaml"
 MAX_PARALLEL_FILE = "max_parallel"
 RUN_SUMMARY_NAME = "run_summary.json"
+# Bumped whenever ``summarize_run`` scores differently, so cached scores of
+# finished runs are recomputed rather than mixed with new ones (2: yaw ringing
+# band-passed, reference-subtracted and cut at departure, worst-shape aggregate).
+RUN_SUMMARY_VERSION = 2
 
 # Experiment keys holding paths the loop opens relative to its cwd. Runs start
 # from their own directory, so these are made absolute against the repo.
@@ -642,7 +646,11 @@ def summarize_run(run_dir: Path) -> tuple[list[dict], list[dict]]:
                     )
             row["rmse_median"] = _median(shape_rmse)
             row["diverged_total"] = diverged_total
-            row["ringing_median"] = _median(shape_ringing)
+            # Worst shape, not the median over shapes: only the fast shapes can
+            # ring, and a median over a set of mostly slow ones hides it (a
+            # controller ringing twice as hard as another on circle_fast and
+            # lemniscate_big_fast ranked beside it on the median).
+            row["ringing_worst_shape"] = max((ring for ring in shape_ringing if ring is not None), default=None)
             row["saturation_median"] = _median(shape_saturation)
             gains = _controller_gains(paths, variant)
             for name, value in zip(GAIN_NAMES, gains or [None] * len(GAIN_NAMES)):
@@ -681,14 +689,15 @@ def score_run(run_dir: str | Path) -> Path:
     rows, run_rows = summarize_run(run_dir)
     path = run_dir / RUN_SUMMARY_NAME
     temporary = path.with_suffix(".json.tmp")
-    temporary.write_text(json.dumps({"rows": rows, "run_rows": run_rows}, default=float))
+    temporary.write_text(json.dumps({"version": RUN_SUMMARY_VERSION, "rows": rows, "run_rows": run_rows}, default=float))
     os.replace(temporary, path)
     return path
 
 
 def _cached_run_summary(run_dir: Path) -> tuple[list[dict], list[dict]] | None:
-    """The cached score of a run, or None when it is missing or older than the
-    run's last session (a resumed run is scored again)."""
+    """The cached score of a run, or None when it is missing, older than the
+    run's last session (a resumed run is scored again) or scored by another
+    ``RUN_SUMMARY_VERSION``."""
     import json
 
     path = run_dir / RUN_SUMMARY_NAME
@@ -699,6 +708,8 @@ def _cached_run_summary(run_dir: Path) -> tuple[list[dict], list[dict]] | None:
     if finished and datetime.datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec="seconds") < max(finished):
         return None
     payload = json.loads(path.read_text())
+    if payload.get("version") != RUN_SUMMARY_VERSION:
+        return None
     return payload["rows"], payload["run_rows"]
 
 
@@ -757,7 +768,7 @@ def summary_markdown(rows: list[dict]) -> str:
         groups.setdefault((row["configuration"], row["iteration"], row["variant"]), []).append(row)
     header = (
         "| configuration | tag | it | variant | seeds | RMSE [m] | div. circle_fast | div. lemniscates | "
-        "div. total | ringing [rad/s] | saturation | box-bound hits | zero hits | stalls | kdmotor | tune [s] |\n"
+        "div. total | ringing, worst shape [rad/s] | saturation | box-bound hits | zero hits | stalls | kdmotor | tune [s] |\n"
         "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n"
     )
     lines = []
@@ -784,7 +795,7 @@ def summary_markdown(rows: list[dict]) -> str:
                     _format(summed("diverged_circle_fast")),
                     str(lemniscates),
                     _format(summed("diverged_total")),
-                    _format(_median(row["ringing_median"] for row in group)),
+                    _format(_median(row["ringing_worst_shape"] for row in group)),
                     _format(_median(row["saturation_median"] for row in group)),
                     _format(summed("box_bound_hits")),
                     str(zero_hits) if iteration > 0 else "-",
@@ -796,7 +807,8 @@ def summary_markdown(rows: list[dict]) -> str:
         )
     note = (
         "\nRMSE: median over seeds of each run's median over shapes of the per-shape median "
-        "position RMSE. Divergence and bound counts are summed over seeds. Iteration g is the "
+        "position RMSE. Ringing: median over seeds of the largest per-shape median yaw ringing "
+        "(``baseline_runs.run_yaw_ringing``). Divergence and bound counts are summed over seeds. Iteration g is the "
         "controller tuned in iteration g (0 = initial), benchmarked in iteration g + 1.\n"
     )
     return header + "\n".join(lines) + "\n" + note
