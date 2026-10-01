@@ -50,3 +50,12 @@ configurations:
       gain_tuning:
         <<: *july
         heading_tracking_weight: 0.2
+  # Added after the first pass: heading 0.2 did not reduce ringing (the tuner
+  # traded kth down for ky up). The other half of the old weight set, which
+  # rang less in the first Phase 1, was angular velocity 1.5.
+  bfgs_angular15:
+    tag: S-A-N
+    overrides:
+      gain_tuning:
+        <<: *unit
+        angular_velocity_tracking_weight: 1.5
