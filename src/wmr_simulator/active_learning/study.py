@@ -53,6 +53,7 @@ from wmr_simulator.active_learning.experiment import (
 REPO_ROOT = Path(__file__).resolve().parents[3]
 CLI_SCRIPT = REPO_ROOT / "scripts" / "run_active_learning.py"
 MANIFEST_NAME = "study_manifest.yaml"
+MAX_PARALLEL_FILE = "max_parallel"
 
 # Experiment keys holding paths the loop opens relative to its cwd. Runs start
 # from their own directory, so these are made absolute against the repo.
@@ -69,9 +70,12 @@ _STAGE_OUTPUTS = {
     "plan-id-trajectory": ("identification_trajectory/*", "problem_identification.yaml"),
     "benchmark": ("data/benchmark", "data/benchmark_static", "benchmark", "results/benchmark.yaml"),
     "simulate-deployment": ("data/TR*",),
-    "decode-logs": ("data/*.csv",),
+    # Not just the csvs: `run` redeploys whenever no decoded log exists, and a
+    # redeployment next to surviving binaries numbers its logs after them, with
+    # other seeds. Removing both makes the rerun reproduce the original logs.
+    "decode-logs": ("data/TR*",),
     "identify": ("results/identification.yaml", "problem_identified.yaml"),
-    "train-residual": ("results/residual_model.pkl",),
+    "train-residual": ("results/residual_model.pkl", "results/residual_diagnostics.yaml"),
     "plan-tuning-trajectories": ("tuning_trajectories/*", "problem_tuning.yaml"),
     "tune-gains": ("results/gains.yaml",),
 }
@@ -112,7 +116,8 @@ def run_overrides(spec: dict, name: str, seed: int) -> dict:
     """The full experiment override set for one (configuration, seed) run."""
     configuration = spec["configurations"][name]
     overrides = merge_config(spec.get("overrides") or {}, configuration.get("overrides") or {})
-    overrides = merge_config(overrides, configuration_overrides(configuration["tag"]))
+    # A baseline run never tunes or designs; it only needs the static controller.
+    overrides = merge_config(overrides, configuration_overrides(configuration.get("tag", "S-F-N")))
     overrides = merge_config(
         overrides,
         {
@@ -216,14 +221,29 @@ def clean_interrupted_stages(experiment: Experiment) -> list[str]:
     return removed
 
 
-def run_finished(experiment: Experiment) -> bool:
-    """The loop reached its target and the last tuned controller is benchmarked."""
+def run_finished(experiment: Experiment, baseline: bool = False) -> bool:
+    """The loop reached its target and the last tuned controller is benchmarked
+    (a baseline run: every iteration is benchmarked)."""
     from wmr_simulator.active_learning.stages import iteration_status
 
     final = int(experiment.config["num_iterations"]) + 1
     if final not in experiment.iteration_indices() or interrupted_stages(experiment):
         return False
-    return iteration_status(experiment, final)["benchmark"]
+    iterations = range(1, final + 1) if baseline else (final,)
+    return all(iteration_status(experiment, iteration)["benchmark"] for iteration in iterations)
+
+
+def _baseline_iterations(experiment: Experiment, gains: list[float]) -> None:
+    """Scaffold iterations 1..N+1 of a baseline run, each carrying the fixed
+    ``gains`` and the problem's nominal robot parameters, so that `benchmark`
+    drives the same controller on every iteration's paired seeds."""
+    from wmr_simulator.active_learning.stages import _initialize_iteration
+
+    robot_config = load_yaml(experiment.paths(1).robot_config)
+    robot_config["controller"]["gains"] = [float(gain) for gain in gains]
+    for iteration in range(1, int(experiment.config["num_iterations"]) + 2):
+        if not experiment.paths(iteration).robot_config.is_file() or iteration == 1:
+            _initialize_iteration(experiment, iteration, robot_config)
 
 
 # ---------------------------------------------------------------------------
@@ -231,25 +251,47 @@ def run_finished(experiment: Experiment) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _cli(run_dir: Path, log_file, *args: str) -> int:
+def _cli(run_dir: Path, log_file, *args: str, processes: list | None = None) -> int:
     """One run_active_learning.py command in its own process, from the run
     directory (plots land in a cwd-relative visualize/), output appended to the
-    session log."""
+    session log.
+
+    The command gets its own process group (it spawns benchmark workers), and
+    is registered in ``processes`` while it runs, so the parallel scheduler can
+    stop the whole tree when memory runs short.
+    """
     command = [sys.executable, str(CLI_SCRIPT), *args, "--experiment", str(run_dir)]
     log_file.write(f"\n$ {' '.join(command)}\n")
     log_file.flush()
-    return subprocess.run(command, cwd=run_dir, stdout=log_file, stderr=subprocess.STDOUT, check=False).returncode
+    process = subprocess.Popen(
+        command, cwd=run_dir, stdout=log_file, stderr=subprocess.STDOUT, start_new_session=True
+    )
+    if processes is not None:
+        processes.append(process)
+    try:
+        return process.wait()
+    finally:
+        if processes is not None:
+            processes.remove(process)
 
 
-def launch_run(study_root: Path, spec: dict, spec_path: Path, name: str, seed: int) -> dict:
+def launch_run(
+    study_root: Path, spec: dict, spec_path: Path, name: str, seed: int, processes: list | None = None
+) -> dict:
     """Create or resume one (configuration, seed) run and drive it to the end.
+
+    A configuration with ``baseline_gains`` instead of a tag is a baseline
+    run: no loop, just those fixed gains benchmarked on every iteration's
+    paired seeds (1..N+1), the same seeds the tuned runs of that seed use.
 
     Returns the session record it appended to the manifest.
     """
     from wmr_simulator.active_learning import stages
 
     run_dir = run_directory(study_root, spec, name, seed)
-    tag = spec["configurations"][name]["tag"]
+    configuration = spec["configurations"][name]
+    baseline_gains = configuration.get("baseline_gains")
+    tag = "baseline" if baseline_gains is not None else configuration["tag"]
     manifest = _load_manifest(run_dir)
     if not (run_dir / "experiment.yaml").is_file():
         if run_dir.exists() and any(run_dir.iterdir()):
@@ -269,7 +311,9 @@ def launch_run(study_root: Path, spec: dict, spec_path: Path, name: str, seed: i
             "sessions": [],
         }
     experiment = Experiment.load(run_dir)
-    if run_finished(experiment):
+    if baseline_gains is not None:
+        _baseline_iterations(experiment, baseline_gains)
+    if run_finished(experiment, baseline=baseline_gains is not None):
         print(f"{run_dir.name}: finished, skipping.", flush=True)
         return {}
 
@@ -297,14 +341,30 @@ def launch_run(study_root: Path, spec: dict, spec_path: Path, name: str, seed: i
     (run_dir / "logs").mkdir(exist_ok=True)
     start = time.monotonic()
     print(f"{run_dir.name}: session {session_index} ({tag}, seed {seed}) -> {run_dir / 'logs'}", flush=True)
+    final = int(experiment.config["num_iterations"]) + 1
     with (run_dir / "logs" / f"session{session_index}.log").open("a", encoding="utf-8") as log_file:
-        code = _cli(run_dir, log_file, "run")
-        session["exit_codes"]["run"] = code
-        final = int(experiment.config["num_iterations"]) + 1
-        if code == 0 and final in Experiment.load(run_dir).iteration_indices():
-            session["exit_codes"]["benchmark"] = _cli(
-                run_dir, log_file, "benchmark", "--iteration", str(final)
-            )
+        if baseline_gains is not None:
+            for iteration in range(1, final + 1):
+                code = _cli(run_dir, log_file, "benchmark", "--iteration", str(iteration), processes=processes)
+                session["exit_codes"][f"benchmark_{iteration}"] = code
+                if code != 0:
+                    break
+        else:
+            # One process per iteration: a process that runs every iteration
+            # keeps each iteration's compiled JAX functions, and grew from
+            # 4.3 GB (iteration 1) to 5-6 GB by iteration 3-5 (2026-10-01,
+            # four runs side by side pushed the machine into swap). `run`
+            # returns at once for an iteration that is already finalized.
+            code = 0
+            for target in range(1, final):
+                code = _cli(run_dir, log_file, "run", "--iterations", str(target), processes=processes)
+                session["exit_codes"][f"run_{target}"] = code
+                if code != 0:
+                    break
+            if code == 0 and final in Experiment.load(run_dir).iteration_indices():
+                session["exit_codes"]["benchmark"] = _cli(
+                    run_dir, log_file, "benchmark", "--iteration", str(final), processes=processes
+                )
     session["finished"] = _now()
     session["wall_clock_s"] = round(time.monotonic() - start, 1)
     session["tuning_warnings"] = collect_tuning_warnings(Experiment.load(run_dir))
@@ -314,8 +374,65 @@ def launch_run(study_root: Path, spec: dict, spec_path: Path, name: str, seed: i
     return session
 
 
-def launch_study(spec_path: str | Path, study_root: str | Path, only: list[str] | None = None) -> None:
-    """Run every (configuration, seed) of a spec, one after the other."""
+def _memory_available_gb() -> float:
+    with open("/proc/meminfo", encoding="utf-8") as file:
+        for line in file:
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) / 1e6
+    raise RuntimeError("MemAvailable missing from /proc/meminfo")
+
+
+def _process_tree_rss_gb(root_pids: list[int]) -> float:
+    """Resident memory of the given processes and all their descendants."""
+    children: dict[int, list[int]] = {}
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/stat", encoding="utf-8") as file:
+                parent = int(file.read().rsplit(")", 1)[1].split()[1])
+        except (OSError, IndexError, ValueError):
+            continue
+        children.setdefault(parent, []).append(int(entry))
+    total_kb, stack = 0, list(root_pids)
+    while stack:
+        pid = stack.pop()
+        stack.extend(children.get(pid, []))
+        try:
+            with open(f"/proc/{pid}/status", encoding="utf-8") as file:
+                for line in file:
+                    if line.startswith("VmRSS:"):
+                        total_kb += int(line.split()[1])
+                        break
+        except OSError:
+            continue
+    return total_kb / 1e6
+
+
+def launch_study(
+    spec_path: str | Path,
+    study_root: str | Path,
+    only: list[str] | None = None,
+    max_parallel: int = 1,
+    memory_per_run_gb: float = 6.0,
+    memory_floor_gb: float = 3.0,
+    poll_seconds: float = 2.0,
+) -> None:
+    """Run every (configuration, seed) of a spec, up to ``max_parallel`` at once.
+
+    Runs share nothing but the machine: each is its own process tree in its own
+    directory, with seeds fixed per run, so the results do not depend on how
+    many run side by side. Memory is the constraint (three unbounded parallel
+    MuJoCo experiments once crashed the 30 GB machine), so a run is only
+    admitted when MemAvailable covers ``memory_per_run_gb`` for it on top of
+    the not-yet-used part of every running run's budget, plus
+    ``memory_floor_gb``. Should MemAvailable still fall below the floor, the
+    youngest run is stopped (its whole process group) and queued again; it
+    resumes from its last finished stage. The oldest run is never stopped.
+    """
+    import signal
+    import threading
+
     spec_path = Path(spec_path).resolve()
     # Absolute: every run's commands execute from inside its own directory.
     study_root = Path(study_root).resolve()
@@ -323,10 +440,70 @@ def launch_study(spec_path: str | Path, study_root: str | Path, only: list[str] 
     phase_dir = study_root / spec["phase"]
     phase_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(spec_path, phase_dir / "study_spec.yaml")
-    for name, seed in study_runs(spec):
-        if only and name not in only:
-            continue
-        launch_run(study_root, spec, spec_path, name, seed)
+    queue = [(name, seed) for name, seed in study_runs(spec) if not only or name in only]
+    running: list[dict] = []
+    stops = 0
+    # Editable while the study runs: write a new number into this file to
+    # widen or narrow the study without restarting it (running runs are never
+    # stopped for a lower number; they just are not replaced).
+    control = phase_dir / MAX_PARALLEL_FILE
+    control.write_text(f"{int(max_parallel)}\n")
+
+    def start(name: str, seed: int) -> dict:
+        slot = {"name": name, "seed": seed, "processes": [], "stopped": False, "started": time.monotonic()}
+
+        def target():
+            try:
+                launch_run(study_root, spec, spec_path, name, seed, processes=slot["processes"])
+            except Exception as error:  # a failed run is reported, never fatal to the study
+                print(f"{name}_seed{seed}: launcher error {error!r}", flush=True)
+
+        slot["thread"] = threading.Thread(target=target, name=f"{name}_seed{seed}", daemon=False)
+        slot["thread"].start()
+        return slot
+
+    while queue or running:
+        try:
+            requested = int(control.read_text().strip())
+        except (OSError, ValueError):
+            requested = max_parallel
+        if requested != max_parallel:
+            print(f"max_parallel {max_parallel} -> {requested} ({control})", flush=True)
+            max_parallel = requested
+        for slot in [slot for slot in running if not slot["thread"].is_alive()]:
+            running.remove(slot)
+            if slot["stopped"]:
+                queue.insert(0, (slot["name"], slot["seed"]))
+        available = _memory_available_gb()
+        if available < memory_floor_gb and len(running) > 1:
+            youngest = max(running, key=lambda slot: slot["started"])
+            if not youngest["stopped"]:
+                youngest["stopped"] = True
+                stops += 1
+                print(
+                    f"{youngest['name']}_seed{youngest['seed']}: MemAvailable {available:.1f} GB below "
+                    f"{memory_floor_gb} GB, stopping it to resume later.",
+                    flush=True,
+                )
+                for process in list(youngest["processes"]):
+                    try:
+                        os.killpg(process.pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
+        committed = sum(
+            max(0.0, memory_per_run_gb - _process_tree_rss_gb([process.pid for process in slot["processes"]]))
+            for slot in running
+        )
+        while (
+            queue
+            and len(running) < max_parallel
+            and available - committed >= memory_per_run_gb + memory_floor_gb
+        ):
+            running.append(start(*queue.pop(0)))
+            committed += memory_per_run_gb
+        time.sleep(poll_seconds)
+    if stops:
+        print(f"Study finished; {stops} run(s) were stopped for memory and resumed.", flush=True)
 
 
 def collect_tuning_warnings(experiment: Experiment) -> dict:

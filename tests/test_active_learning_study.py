@@ -102,3 +102,19 @@ def test_bound_hits_and_stall_checks():
                     "divergence": {"tuned": {"rollouts": 8, "diverged": 2}}}}
     )
     assert len(lines) == 1 + len(hits) + 1
+
+
+def test_interrupted_decode_removes_the_binary_logs_too(tmp_path):
+    # `run` redeploys whenever no decoded log exists; binaries left behind would
+    # make it add more logs next to them instead of reproducing them.
+    experiment = stage_init(tmp_path / "exp", {"problem": PROBLEM, "use_residual_model": False})
+    paths = experiment.paths(1)
+    with logged_stage(paths, "simulate-deployment"):
+        for name in ("TR00", "TR01"):
+            (paths.data_dir / name).write_bytes(b"log")
+    (paths.data_dir / "TR00.csv").write_text("partial")
+    with pytest.raises(RuntimeError):
+        with logged_stage(paths, "decode-logs"):
+            raise RuntimeError("killed")
+    clean_interrupted_stages(Experiment.load(experiment.root))
+    assert not list(paths.data_dir.glob("TR*"))

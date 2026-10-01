@@ -91,6 +91,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+import yaml
 
 
 # (state, action) descriptor: the nominal predicted body twist and the commanded
@@ -730,6 +731,57 @@ def evaluate_predictions(model: ResidualEnsemble, features: np.ndarray, targets:
     }
 
 
+def residual_diagnostics(
+    model: ResidualEnsemble,
+    train_features: np.ndarray,
+    train_targets: np.ndarray,
+    validation_features: np.ndarray,
+    validation_targets: np.ndarray,
+) -> dict:
+    """The numbers to screen a checkpoint by, rather than its validation loss.
+
+    * ``target_rms``: RMS of what the nominal model misses, [dv, domega]. On
+      real logs ~0.3 rad/s in domega; a saturated, slipping data set carried
+      4.24 and produced a residual that destroyed tuning (memory
+      ``al-residual-breaks-gain-tuning``).
+    * ``residual_rmse`` / ``explained_fraction``: how much of it the ensemble
+      fits (1 - rmse^2 / target_rms^2).
+    * ``input_std``: the per-feature normalization. An inflated spread (e.g.
+      +/-75 rad/s commands) puts every query near a center, so the OOD gate
+      never switches the residual off.
+    * ``gate_weight_train``: total expert weight (1 - null weight) on the
+      training features; the in-distribution level the gate is judged against.
+    * ``max_abs_prediction``: the largest correction the model applies on its
+      own training data, [dv, domega].
+    """
+    def split(features, targets):
+        if len(features) == 0:
+            return None
+        evaluation = evaluate_predictions(model, features, targets)
+        explained = 1.0 - (evaluation["rmse"] / np.maximum(evaluation["baseline_rmse"], 1e-12)) ** 2
+        return {
+            "samples": int(len(features)),
+            "target_rms": [round(float(value), 5) for value in evaluation["baseline_rmse"]],
+            "residual_rmse": [round(float(value), 5) for value in evaluation["rmse"]],
+            "explained_fraction": [round(float(value), 4) for value in explained],
+        }
+
+    weights = np.asarray(gate_weights(model, jnp.asarray(train_features))).sum(axis=1)
+    predictions = np.asarray(apply_residual_model(model, jnp.asarray(train_features)))
+    return {
+        "train": split(train_features, train_targets),
+        "validation": split(validation_features, validation_targets),
+        "input_std": {
+            name: round(float(value), 5)
+            for name, value in zip(RESIDUAL_FEATURE_NAMES, np.asarray(model.input_std))
+        },
+        "gate_weight_train": {
+            f"p{q}": round(float(np.percentile(weights, q)), 4) for q in (1, 50, 99)
+        },
+        "max_abs_prediction": [round(float(value), 5) for value in np.abs(predictions).max(axis=0)],
+    }
+
+
 def pose_rmse(poses: np.ndarray, reference: np.ndarray) -> float:
     return float(np.sqrt(np.mean(np.sum((poses[:, :2] - reference[:, :2]) ** 2, axis=1))))
 
@@ -992,6 +1044,20 @@ def train_from_logs(
     }
     save_residual_model(out, model, config, params, metadata)
     print(f"Saved residual model to {out}")
+
+    diagnostics = residual_diagnostics(
+        model, train_features, train_targets, validation_features, validation_targets
+    )
+    diagnostics["num_logs"] = len(log_paths)
+    diagnostics_path = Path(out).with_name("residual_diagnostics.yaml")
+    with diagnostics_path.open("w", encoding="utf-8") as file:
+        yaml.safe_dump(diagnostics, file, sort_keys=False)
+    print(
+        f"Residual diagnostics ({diagnostics_path}): target RMS [dv, domega] "
+        f"{diagnostics['train']['target_rms']}, explained {diagnostics['train']['explained_fraction']}, "
+        f"gate weight p1/p50 {diagnostics['gate_weight_train']['p1']:.3f}/"
+        f"{diagnostics['gate_weight_train']['p50']:.3f}"
+    )
 
     plot_training_history(history, out_dir=out_dir)
     plot_gate_map(model, train_features, out_dir=out_dir)

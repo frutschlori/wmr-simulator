@@ -1,0 +1,19 @@
+# Preflight for parallel studies: the same small spec run serially and in
+# parallel must give bit-identical results. Tiny budgets, 1 iteration.
+phase: phase0_parallel
+iterations: 1
+seeds: [0]
+overrides:
+  mujoco_deployment: {num_logs: 2}
+  benchmark: {num_runs: 1, max_workers: 4}
+  identification_trajectory: {opt_steps: 30}
+  identification: {steps: 50}
+  residual: {epochs: 30}
+  tuning_trajectories: {num_trajectories: 4, opt_steps: 20}
+  gain_tuning: {steps: 40, static_tune_steps: 40}
+configurations:
+  S-F-N: {tag: S-F-N}
+  S-A-N: {tag: S-A-N}
+  S-A-R: {tag: S-A-R}
+  S-AF-N: {tag: S-AF-N}
+  stock: {baseline_gains: [4.5, 6.0, 12.0, 2.5, 5.0, 0.0]}

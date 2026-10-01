@@ -67,6 +67,35 @@ def stalled(optimization: dict) -> bool:
     return bool(np.max(np.abs(final - initial)) <= STALL_TOLERANCE)
 
 
+def start_and_returned_losses(optimization: dict) -> dict:
+    """Training and validation loss of the returned start at its start point
+    and at the returned point.
+
+    Tells the two kinds of stall apart. Measured in Phase 1 of the thesis
+    study (2026-09-30), every stall at iteration >= 2 returned exactly its
+    start's training loss while the solves that moved improved on it by only
+    0.03-2 %: a loop that has converged, not a stuck line search like the one
+    that shipped stock gains on real02.
+    """
+    best = int(optimization["best_start_index"])
+    training = np.asarray(optimization["loss_history_per_start"], dtype=float)[:, best]
+    validation_history = optimization["validation_loss_history_per_start"]
+    returned_validation = optimization["best_validation_loss"]
+    start_training = float(training[0])
+    returned_training = float(optimization["best_training_loss"])
+    return {
+        "start_training_loss": start_training,
+        "returned_training_loss": returned_training,
+        "training_loss_improvement": (
+            float(1.0 - returned_training / start_training) if start_training > 0.0 else None
+        ),
+        "start_validation_loss": (
+            None if validation_history is None else float(np.asarray(validation_history)[0, best])
+        ),
+        "returned_validation_loss": None if returned_validation is None else float(returned_validation),
+    }
+
+
 def gains_unchanged(returned_gains, init_gains, k_min_stab: float, k_max_stab: float, k_max_rest: float) -> bool:
     """Whether the returned gains equal the gains the run was handed."""
     returned = np.asarray(controller_gains_to_optimizer_values(returned_gains, k_min_stab, k_max_stab, k_max_rest))
@@ -131,7 +160,9 @@ def warnings_for(checks: dict) -> list[str]:
     lines = []
     for run, run_checks in checks.items():
         if run_checks.get("stalled"):
-            lines.append(f"{run}: the returned start never left its start point (stalled solve).")
+            improvement = run_checks.get("training_loss_improvement")
+            detail = "" if improvement is None else f", training loss improved {100 * improvement:.2f} %"
+            lines.append(f"{run}: the returned start never left its start point (stalled solve{detail}).")
         if run_checks.get("unchanged_from_init"):
             lines.append(f"{run}: returned gains equal the input gains.")
         for hit in run_checks.get("bound_hits", []):
