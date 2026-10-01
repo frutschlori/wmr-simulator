@@ -30,22 +30,39 @@ CIRCLE_RADIUS = 0.5
 CIRCLE_RATE = 1.0
 
 
-def write_run_csv(path, *, radial_offset=0.0, duration=6.5, dt=0.02, yaw_ringing_amplitude=None):
+def write_run_csv(
+    path,
+    *,
+    radial_offset=0.0,
+    duration=6.5,
+    dt=0.02,
+    yaw_ringing_amplitude=None,
+    ringing_frequency_hz=4.0,
+    reference_rate_wobble=0.0,
+    departure_time=None,
+):
     """A traj-control recording of a circle, tracked with a radial offset.
 
     The reference is the exact circle and the mocap track the same circle at
     ``radius + radial_offset``, so the run's position RMSE against its reference
     is ``|radial_offset|`` by construction. ``yaw_ringing_amplitude`` [rad/s]
-    adds an IMU stream: the constant circle yaw rate plus a 4 Hz oscillation of
-    that amplitude (0 for a clean turn, None for no IMU samples at all).
+    adds an IMU stream: the constant circle yaw rate plus an oscillation of that
+    amplitude at ``ringing_frequency_hz`` (0 for a clean turn, None for no IMU
+    samples at all). ``reference_rate_wobble`` [rad/s] adds a 1.5 Hz swing to
+    the reference yaw rate that the gyro follows exactly (a perfectly tracked
+    reference that is not constant). From ``departure_time`` on the robot is a
+    metre off the track and spinning: the gyro reads a broadband 15 rad/s.
     """
+    spin = np.random.default_rng(0)
     path.parent.mkdir(parents=True, exist_ok=True)
     rows = []
     for t in np.arange(0.0, duration, dt):
         yaw = CIRCLE_RATE * t
+        reference_rate = CIRCLE_RATE + reference_rate_wobble * np.sin(2.0 * np.pi * 1.5 * t)
         row = {name: "" for name in POLOLU_TRAJ_CONTROL_COLUMNS}
         row["ts"] = f"{1000.0 * t:.0f}"
-        measured = CIRCLE_RADIUS + radial_offset
+        departed = departure_time is not None and t >= departure_time
+        measured = CIRCLE_RADIUS + radial_offset + (1.0 if departed else 0.0)
         row.update(
             x_raw=f"{measured * np.cos(yaw):.6f}",
             y_raw=f"{measured * np.sin(yaw):.6f}",
@@ -56,12 +73,14 @@ def write_run_csv(path, *, radial_offset=0.0, duration=6.5, dt=0.02, yaw_ringing
             y_des=f"{CIRCLE_RADIUS * np.sin(yaw):.6f}",
             yaw_des=f"{np.arctan2(np.sin(yaw + 0.5 * np.pi), np.cos(yaw + 0.5 * np.pi)):.6f}",
             v_ff=f"{CIRCLE_RADIUS * CIRCLE_RATE:.6f}",
-            w_ff=f"{CIRCLE_RATE:.6f}",
+            w_ff=f"{reference_rate:.6f}",
         )
         row.update(omega_l_meas="10.0", omega_r_meas="12.0", omega_l_cmd="10.0", omega_r_cmd="12.0")
         row.update(v_actual="0.5", w_actual="1.0", duty_l="0.3", duty_r="0.35")
         if yaw_ringing_amplitude is not None:
-            yaw_rate = CIRCLE_RATE + yaw_ringing_amplitude * np.sin(2.0 * np.pi * 4.0 * t)
+            yaw_rate = reference_rate + yaw_ringing_amplitude * np.sin(2.0 * np.pi * ringing_frequency_hz * t)
+            if departed:
+                yaw_rate = spin.normal(0.0, 15.0)
             row["gyro_z"] = f"{np.rad2deg(yaw_rate):.6f}"
         rows.append(row)
 
@@ -203,6 +222,48 @@ def test_yaw_ringing_sees_the_oscillation_and_not_the_turn(experiment):
     assert run_yaw_ringing(clean) == pytest.approx(0.0, abs=1e-3)
     assert run_yaw_ringing(ringing) == pytest.approx(2.0 / np.sqrt(2.0), rel=0.25)
     assert run_yaw_ringing(no_imu) is None
+
+
+def test_yaw_ringing_reads_every_ringing_frequency_alike(experiment):
+    """The band is flat over the frequencies the robot and MuJoCo ring at, so a
+    2.5 Hz ringing and a 5 Hz one of the same amplitude score the same (the old
+    0.3 s moving average read them 0.73 vs 1.2)."""
+    exp = experiment(1)
+    paths = exp.paths(1)
+    write_run_csv(paths.benchmark_data_dir / "TR00.csv", yaw_ringing_amplitude=2.0, ringing_frequency_hz=2.5)
+    write_run_csv(paths.benchmark_data_dir / "TR01.csv", yaw_ringing_amplitude=2.0, ringing_frequency_hz=5.0)
+
+    slow, fast = load_run_logs(paths.benchmark_data_dir)
+
+    assert run_yaw_ringing(slow) == pytest.approx(run_yaw_ringing(fast), rel=0.05)
+    assert run_yaw_ringing(fast) == pytest.approx(2.0 / np.sqrt(2.0), rel=0.05)
+
+
+def test_yaw_ringing_does_not_score_the_references_own_yaw_rate(experiment):
+    """A reference whose yaw rate swings inside the band, tracked perfectly,
+    scores ~0: the reference yaw rate is subtracted before filtering."""
+    exp = experiment(1)
+    paths = exp.paths(1)
+    write_run_csv(paths.benchmark_data_dir / "TR00.csv", yaw_ringing_amplitude=0.0, reference_rate_wobble=2.0)
+
+    (run,) = load_run_logs(paths.benchmark_data_dir)
+
+    assert run_yaw_ringing(run) == pytest.approx(0.0, abs=1e-2)
+
+
+def test_yaw_ringing_stops_where_the_robot_leaves_the_track(experiment):
+    """A spin-out after the robot left the track is not ringing: the score is
+    the tracked part's, and a run that leaves too early has none."""
+    exp = experiment(1)
+    paths = exp.paths(1)
+    write_run_csv(paths.benchmark_data_dir / "TR00.csv", yaw_ringing_amplitude=2.0)
+    write_run_csv(paths.benchmark_data_dir / "TR01.csv", yaw_ringing_amplitude=2.0, departure_time=4.0)
+    write_run_csv(paths.benchmark_data_dir / "TR02.csv", yaw_ringing_amplitude=2.0, departure_time=0.5)
+
+    tracked, departed, early = load_run_logs(paths.benchmark_data_dir)
+
+    assert run_yaw_ringing(departed) == pytest.approx(run_yaw_ringing(tracked), rel=0.1)
+    assert run_yaw_ringing(early) is None
 
 
 def test_the_loops_own_shape_is_collected_as_the_pipeline_records_it(experiment):

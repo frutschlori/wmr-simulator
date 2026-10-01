@@ -19,8 +19,10 @@ panels:
   over the individual runs behind the recorded mean -- the runs are chained, so one of them diverging is a result rather
   than scatter an average may quietly absorb;
 - the yaw ringing of the recorded runs (``baseline_runs.run_yaw_ringing``), the
-  smoothness metric beside the tracking terms, as the run mean with the same
-  band over the individual runs. Recorded runs only: the JAX plant cannot ring.
+  smoothness metric beside the tracking terms, as the worst shape's median run
+  with a band over the other shapes' medians. Worst shape rather than a pooled
+  mean because only the fast shapes ring. Recorded runs only: the JAX plant
+  cannot ring.
 
 The per-iteration records (gains + sim/real loss terms) are computed by
 ``active_learning.progress.evaluate_pipeline_progress`` and only rendered here.
@@ -143,19 +145,24 @@ def plot_pipeline_progress(records, experiment_root, out_path=None, out_prefix="
             ax.text(0.5, 0.5, "no benchmark runs", ha="center", va="center", transform=ax.transAxes)
 
     # --- yaw ringing of the recorded runs ------------------------------------
-    ringing_records = [
-        (rec["index"], [value for value in rec.get("yaw_ringing_runs") or [] if value is not None])
-        for rec in records
-    ]
-    ringing_records = [(index, values) for index, values in ringing_records if values]
+    ringing_records = []
+    for rec in records:
+        shape_medians = [
+            float(np.median(scored))
+            for values in (rec.get("yaw_ringing_by_shape") or {}).values()
+            if (scored := [value for value in values if value is not None])
+        ]
+        if shape_medians:
+            ringing_records.append((rec["index"], shape_medians))
     if ringing_records:
         xs = [index for index, _ in ringing_records]
         ax_ringing.plot(
-            xs, [np.mean(values) for _, values in ringing_records],
-            color="black", linestyle="--", marker="o", markersize=3.5, linewidth=1.7, label="Real yaw ringing",
+            xs, [max(medians) for _, medians in ringing_records],
+            color="black", linestyle="--", marker="o", markersize=3.5, linewidth=1.7,
+            label="Real yaw ringing, worst shape",
         )
         ax_ringing.fill_between(
-            xs, [min(values) for _, values in ringing_records], [max(values) for _, values in ringing_records],
+            xs, [min(medians) for _, medians in ringing_records], [max(medians) for _, medians in ringing_records],
             color="black", alpha=0.15, linewidth=0,
         )
         ax_ringing.set_xticks(xs)
@@ -165,7 +172,7 @@ def plot_pipeline_progress(records, experiment_root, out_path=None, out_prefix="
     ax_ringing.set_xlabel("iteration", fontsize="small")
     ax_ringing.set_ylabel("yaw ringing [rad/s]", fontsize="small")
     ax_ringing.tick_params(labelsize="small")
-    ax_ringing.set_title("Yaw ringing (high-passed IMU yaw rate RMS)", fontsize="medium")
+    ax_ringing.set_title("Yaw ringing (band-passed IMU yaw-rate error RMS)", fontsize="medium")
 
     fig.tight_layout(rect=[0, 0, 1, 0.96])
     fig.savefig(out_path, bbox_inches="tight", transparent=False, facecolor="white")

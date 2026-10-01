@@ -63,12 +63,29 @@ BENCHMARK_SHAPE = "benchmark"
 # on the card. Anything else directly under data/ is a static-gain recording.
 GAIN_MLP_DIRECTORY_NAMES = ("with gain MLP", "with_gain_MLP")
 
-# Yaw ringing: the IMU yaw rate minus its own centered moving average over this
-# window. 0.3 s passes the 3-4 Hz yaw oscillation that precedes duty saturation
-# on the fast circle and removes the commanded yaw-rate profile, which changes
-# over seconds. Measured on the July exp01 circle runs: static controllers that
-# rang (and one that diverged) 1.7-3.4 rad/s, the gain MLP 0.15-0.63 rad/s.
-YAW_RINGING_WINDOW_S = 0.3
+# Yaw ringing: the RMS of the IMU yaw-rate tracking error (gyro minus the
+# reference yaw rate) inside this band, filtered forward and backward with a
+# 2nd-order Butterworth so the response is flat and phase-free. The ringing that
+# precedes duty saturation on the fast shapes sits at 1.9-3.6 Hz on the robot
+# (median 3.0) and 2.2-3.9 Hz in MuJoCo (median 3.8), so the band holds both
+# with margin. The reference is subtracted first because a perfectly tracked
+# lemniscate or designed curve carries 0.08-0.22 rad/s of its own yaw-rate
+# changes in the band, as much as a quiet controller scores. Until 2026-10-01
+# the metric was the gyro minus its 0.3 s centered moving average, whose gain
+# runs from 0.52 at 2 Hz to 1.2 at 5 Hz and so read MuJoCo's ringing about 1.25x
+# high against the robot's.
+YAW_RINGING_BAND_HZ = (1.5, 8.0)
+
+# A run is scored only up to the first reference instant its mocap position is
+# further than this from the reference (the default ``benchmark.
+# divergence_radius``). A spin-out past that point is broadband and scored
+# 1.1-1.9 rad/s, more than most genuine ringing, while a run that rang itself
+# off the track keeps the ringing that took it there.
+YAW_RINGING_DEPARTURE_RADIUS_M = 0.25
+
+# Less tracked time than this before the departure leaves no score: a second
+# holds three ringing periods.
+YAW_RINGING_MIN_DURATION_S = 1.0
 
 
 @dataclass(frozen=True)
@@ -239,6 +256,15 @@ def run_tracking_rmse(log) -> float | None:
     benchmark run: the reference is what the controller was asked for at those
     instants, and the mocap track is sampled on its own clock.
     """
+    errors = _position_errors(log)
+    if errors is None:
+        return None
+    return float(np.sqrt(np.mean(errors[1] ** 2)))
+
+
+def _position_errors(log) -> tuple[np.ndarray, np.ndarray] | None:
+    """``(time, distance)`` of the mocap position from the reference at every
+    reference instant after the first, or None without enough of either."""
     reference_states = np.asarray(log.reference.states, dtype=float)
     reference_time = np.asarray(log.reference.time_s, dtype=float)
     if len(reference_states) < 2:
@@ -250,42 +276,60 @@ def run_tracking_rmse(log) -> float | None:
         return None
     error_x = np.interp(target_time, pose_time, pose_states[:, 0]) - reference_states[1:, 0]
     error_y = np.interp(target_time, pose_time, pose_states[:, 1]) - reference_states[1:, 1]
-    return float(np.sqrt(np.mean(error_x**2 + error_y**2)))
+    return target_time, np.hypot(error_x, error_y)
 
 
-def run_yaw_ringing(run: RunLog, window_s: float = YAW_RINGING_WINDOW_S) -> float | None:
-    """RMS of the high-passed IMU yaw rate over the reference's time span [rad/s].
+def run_yaw_ringing(
+    run: RunLog,
+    band_hz: tuple[float, float] = YAW_RINGING_BAND_HZ,
+    departure_radius: float = YAW_RINGING_DEPARTURE_RADIUS_M,
+) -> float | None:
+    """RMS of the band-passed IMU yaw-rate tracking error [rad/s].
 
     The smoothness counterpart to ``run_tracking_rmse``: position RMSE cannot
     tell a controller that tracks through a 3-4 Hz yaw oscillation from one that
     does not, and that oscillation is what drives the wheels into duty
     saturation and the robot off the fast circle. Read off the gyro rather than
     the mocap twist, which the Savitzky-Golay smoothing attenuates, or the
-    encoders, which stop measuring the body once the wheels slip. The stream is
-    resampled onto its median sample period so the moving average is a plain
-    uniform filter. None when the log carries no IMU samples in that span.
+    encoders, which stop measuring the body once the wheels slip. The reference
+    yaw rate is subtracted and the error band-passed (``YAW_RINGING_BAND_HZ``)
+    over the reference's time span, cut at the first instant the robot is
+    ``departure_radius`` off the reference (``YAW_RINGING_DEPARTURE_RADIUS_M``).
+    The stream is resampled onto its median sample period first. None when the
+    log carries no IMU samples, or less than ``YAW_RINGING_MIN_DURATION_S`` of
+    them before the departure.
+
+    Ringing only appears on fast references, so compare it per shape (or on the
+    worst shape), never pooled over a set of slow and fast ones.
     """
+    from scipy import signal
+
     reference_time = np.asarray(run.log.reference.time_s, dtype=float)
+    reference_rate = np.asarray(run.log.reference.states, dtype=float)[:, 5]
     imu_time = np.asarray(run.imu_time_s, dtype=float)
     gyro = np.asarray(run.imu_gyro_z, dtype=float)
     if len(reference_time) < 2 or len(imu_time) < 3:
         return None
-    inside = (imu_time >= reference_time[0]) & (imu_time <= reference_time[-1])
+    end_time = reference_time[-1]
+    errors = _position_errors(run.log)
+    if errors is not None:
+        departed = np.nonzero(errors[1] > departure_radius)[0]
+        if len(departed):
+            end_time = errors[0][departed[0]]
+    inside = (imu_time >= reference_time[0]) & (imu_time <= end_time)
     if int(inside.sum()) < 3:
         return None
     imu_time, gyro = imu_time[inside], gyro[inside]
     period = float(np.median(np.diff(imu_time)))
-    if period <= 0.0:
+    if period <= 0.0 or band_hz[1] >= 0.5 / period:
         return None
     grid = np.arange(imu_time[0], imu_time[-1], period)
-    samples = int(round(window_s / period)) | 1  # odd, so the average is centered
-    if len(grid) <= samples:
+    if grid[-1] - grid[0] < YAW_RINGING_MIN_DURATION_S:
         return None
-    rate = np.interp(grid, imu_time, gyro)
-    trend = np.convolve(rate, np.ones(samples) / samples, mode="valid")
-    half = samples // 2
-    residual = rate[half : len(rate) - half] - trend
-    return float(np.sqrt(np.mean(residual**2)))
+    rate_error = np.interp(grid, imu_time, gyro) - np.interp(grid, reference_time, reference_rate)
+    sos = signal.butter(2, band_hz, btype="bandpass", fs=1.0 / period, output="sos")
+    ringing = signal.sosfiltfilt(sos, rate_error)
+    return float(np.sqrt(np.mean(ringing**2)))
 
 
 def variant_panels(records: list[BaselineIterationRuns]) -> tuple[tuple[str, str], ...]:
