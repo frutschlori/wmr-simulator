@@ -1,0 +1,52 @@
+# Phase 1 rerun (2026-10-01) on the new encoder alignment and window-10
+# identification: S-A-N, gain parametrization off, 2 x 2 of optimizer (BFGS /
+# July's LHS + Adam) x loss weights (unit / unit with heading 0.2). Heading at
+# 1.0 raised kth and yaw ringing in the first Phase 1 (0.67 vs 0.58 rad/s,
+# worst shape, 3/3 seeds); heading 0.2 is the one fractional weight under test.
+phase: phase1_tuner_v2
+iterations: 3
+seeds: [0, 1, 2]
+overrides:
+  benchmark: {max_workers: 4}
+configurations:
+  bfgs_unit:
+    tag: S-A-N
+    overrides:
+      gain_tuning: &unit
+        optimizer: bfgs
+        steps: 160
+        num_lhs_points: 0
+        k_max_stab: 20.0
+        position_tracking_weight: 1.0
+        heading_tracking_weight: 1.0
+        linear_velocity_tracking_weight: 1.0
+        angular_velocity_tracking_weight: 1.0
+        input_weight: 0.0
+        input_delta_weight: 1.0
+        omega_delta_weight: 0.0
+        gain_delta_weight: 0.0
+  bfgs_heading02:
+    tag: S-A-N
+    overrides:
+      gain_tuning:
+        <<: *unit
+        heading_tracking_weight: 0.2
+  july_unit:
+    tag: S-A-N
+    overrides:
+      gain_tuning: &july
+        <<: *unit
+        optimizer: adam
+        steps: 500
+        learning_rate: 1.0e-4
+        num_lhs_points: 500
+        num_adam_optimizations: 3
+        presearch_relative_range: 0.3
+        k_max_stab: 40.0
+        num_realizations: 1
+  july_heading02:
+    tag: S-A-N
+    overrides:
+      gain_tuning:
+        <<: *july
+        heading_tracking_weight: 0.2
