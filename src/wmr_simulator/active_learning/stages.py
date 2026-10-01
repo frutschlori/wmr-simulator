@@ -1521,7 +1521,10 @@ def stage_identify(
 
     from wmr_simulator.identification.outliers import robust_parameter_outliers
     from wmr_simulator.identification.pipeline import run_multi_log_identification
-    from wmr_simulator.pololu.log_loader import clip_log_to_duration, load_pololu_traj_control_log
+    from wmr_simulator.pololu.log_loader import (
+        clip_log_to_duration,
+        load_pololu_traj_control_log_and_encoder_lag,
+    )
     from wmr_simulator.types import PhysicalParams, physical_params_to_array, print_physical_params
     from wmr_simulator.visualization.identification import (
         plot_identification_log_parameters,
@@ -1554,13 +1557,28 @@ def stage_identify(
             window_length=config["window_length"],
         )
 
-    pololu_logs = [
-        load_pololu_traj_control_log(
+    loaded = [
+        load_pololu_traj_control_log_and_encoder_lag(
             log_path,
             clip_after_first_trajectory=log_config["clip_after_first_trajectory"],
         )
         for log_path in log_paths
     ]
+    pololu_logs = [log for log, _ in loaded]
+    # The encoder lag the loader measured and took out of each log, after
+    # undoing the firmware low-pass (pololu.measurement_smoothing): a few ms in
+    # MuJoCo, about -7 ms (yaw) on the robot; anything far outside that means
+    # the log's encoder and mocap clocks disagree.
+    encoder_lags = [
+        None if lag is None else {
+            "lag_ms": round(float(1000.0 * lag.lag_s), 2),
+            "yaw_correlation": round(float(lag.yaw_correlation), 4),
+            "speed_correlation": round(float(lag.speed_correlation), 4),
+        }
+        for _, lag in loaded
+    ]
+    for log_path, lag in zip(log_paths, encoder_lags):
+        print(f"  {log_path.name}: encoder lag " + ("not measurable" if lag is None else f"{lag['lag_ms']:+.1f} ms (corr yaw {lag['yaw_correlation']:.3f}, speed {lag['speed_correlation']:.3f})"))
     identified_duration = _identified_duration(paths)
     if identified_duration is not None:
         print(f"Fitting the first {identified_duration:.2f} s of each log (the trajectory's identified phases).")
@@ -1598,6 +1616,7 @@ def stage_identify(
         "estimated_params": _estimated_params_dict(estimated_params),
         "final_loss": float(joint_result["loss_history"][-1]),
         "final_motor_loss": float(joint_result["motor_loss_history"][-1]),
+        "encoder_lags": {log_path.name: lag for log_path, lag in zip(log_paths, encoder_lags)},
         "outlier_z_threshold": float(config["outlier_z_threshold"]),
         "outlier_detection_evaluated": bool(report.evaluated),
         "per_log": [
