@@ -45,3 +45,12 @@ configurations:
       h4:
         gain_tuning:
           gain_delta_weight: 1.0
+  # H3, base gains held at static: each iteration's base gains are that
+  # iteration's static result and stay frozen; only the network is trained
+  # (warm-started across iterations). D = static controller x schedule, so the
+  # network cannot undo runaway base gains -- there are none.
+  D-h3-static-base:
+    source: S-A-N
+    variants:
+      h3:
+        base_from_static: true
