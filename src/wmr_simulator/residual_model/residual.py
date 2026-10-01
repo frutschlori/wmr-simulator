@@ -940,6 +940,7 @@ def train_from_logs(
     log_dirs: list[str],
     out: str,
     *,
+    log_paths: list | None = None,
     num_experts: int = DEFAULT_NUM_EXPERTS,
     hidden_sizes: tuple = DEFAULT_HIDDEN_SIZES,
     spectral_norm_cap: float = DEFAULT_SPECTRAL_NORM_CAP,
@@ -977,7 +978,9 @@ def train_from_logs(
         plot_training_history,
     )
 
-    log_paths = gather_log_paths(log_dirs, recursive=recursive)
+    # An explicit list (the active-learning stage screens out diverged runs)
+    # wins over scanning log_dirs.
+    log_paths = gather_log_paths(log_dirs, recursive=recursive) if log_paths is None else list(log_paths)
     # One nominal model for every log: the one the residual will be added to.
     params = robot_params_from_problem(problem)
     print(f"Residual targets against the nominal model of {problem}")

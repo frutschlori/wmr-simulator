@@ -211,6 +211,10 @@ def _load_design_residual_model(path: Path, problem_path: Path):
     nominal model than ``problem_path``'s raises as well
     (residual_model.io.load_residual_model).
     """
+    skipped = path.with_name("residual_skipped.yaml")
+    if not path.is_file() and skipped.is_file():
+        print(f"No residual for this design ({skipped}: every pooled log diverged); designing nominal.")
+        return None
     if not path.is_file():
         raise FileNotFoundError(
             f"The residual model is enabled for trajectory design but {path} is missing; "
@@ -1791,6 +1795,34 @@ def residual_training_iterations(experiment: Experiment, iteration: int) -> list
     return [index for index in candidates if _list_log_csvs(experiment.paths(index))]
 
 
+def _screen_diverged_logs(
+    log_paths: list[Path], max_position_error: float, clip_after_first_trajectory: bool
+) -> tuple[list[Path], list[tuple[Path, float]]]:
+    """``(usable, [(diverged, max error)])``: a log whose mocap pose leaves its
+    reference by more than ``max_position_error`` [m] is a diverged run. 0
+    keeps every log."""
+    if max_position_error <= 0.0:
+        return list(log_paths), []
+    from wmr_simulator.pololu.log_loader import load_pololu_traj_control_log
+
+    usable, diverged = [], []
+    for path in log_paths:
+        log = load_pololu_traj_control_log(path, clip_after_first_trajectory=clip_after_first_trajectory)
+        reference_time = np.asarray(log.reference.time_s, dtype=float)
+        reference = np.asarray(log.reference.states, dtype=float)
+        pose_time = np.asarray(log.pose.time_s, dtype=float)
+        pose = np.asarray(log.pose.states, dtype=float)
+        error = float(np.max(np.hypot(
+            np.interp(reference_time, pose_time, pose[:, 0]) - reference[:, 0],
+            np.interp(reference_time, pose_time, pose[:, 1]) - reference[:, 1],
+        )))
+        if error > max_position_error:
+            diverged.append((path, error))
+        else:
+            usable.append(path)
+    return usable, diverged
+
+
 def stage_train_residual(experiment: Experiment, iteration: int) -> Path:
     """Train the residual dynamics model on the pooled decoded logs (see
     residual_training_log_dirs)."""
@@ -1813,15 +1845,34 @@ def stage_train_residual(experiment: Experiment, iteration: int) -> Path:
             f"No decoded Pololu logs in {paths.data_dir} or any earlier iteration."
         )
     log_dirs = [experiment.paths(index).data_dir for index in pooled_iterations]
-    num_logs = sum(len(_list_log_csvs(experiment.paths(index))) for index in pooled_iterations)
-    print(
-        f"Residual training pool: {num_logs} logs from {len(pooled_iterations)} iteration(s) "
-        f"({', '.join(f'{ITERATION_PREFIX}{index:02d}' for index in pooled_iterations)})"
+    pooled_logs = [log for index in pooled_iterations for log in _list_log_csvs(experiment.paths(index))]
+    usable_logs, diverged_logs = _screen_diverged_logs(
+        pooled_logs, float(config.get("max_position_error", 0.0)), log_config["clip_after_first_trajectory"]
     )
+    print(
+        f"Residual training pool: {len(usable_logs)} of {len(pooled_logs)} logs from "
+        f"{len(pooled_iterations)} iteration(s) "
+        f"({', '.join(f'{ITERATION_PREFIX}{index:02d}' for index in pooled_iterations)}); "
+        f"{len(diverged_logs)} diverged run(s) left out"
+    )
+    if not usable_logs:
+        paths.residual_model.unlink(missing_ok=True)
+        save_yaml(
+            paths.residual_skipped,
+            {
+                "reason": "every pooled identification log diverged (residual.max_position_error)",
+                "max_position_error": float(config["max_position_error"]),
+                "diverged_logs": {str(path): round(error, 4) for path, error in diverged_logs},
+            },
+        )
+        print(f"No usable log: no residual this iteration ({paths.residual_skipped}).")
+        return paths.residual_skipped
+    paths.residual_skipped.unlink(missing_ok=True)
 
     train_from_logs(
         problem=str(problem_path),
         log_dirs=[str(directory) for directory in log_dirs],
+        log_paths=[str(path) for path in usable_logs],
         out=str(paths.residual_model),
         num_experts=int(config["num_experts"]),
         hidden_sizes=tuple(int(size) for size in config["hidden_sizes"]),
@@ -1840,6 +1891,11 @@ def stage_train_residual(experiment: Experiment, iteration: int) -> Path:
         recursive=False,
         out_dir=str(paths.visualize_dir / "residual model"),
     )
+    diagnostics_path = paths.results_dir / "residual_diagnostics.yaml"
+    if diagnostics_path.is_file():
+        diagnostics = load_yaml(diagnostics_path)
+        diagnostics["excluded_diverged_logs"] = {str(path): round(error, 4) for path, error in diverged_logs}
+        save_yaml(diagnostics_path, diagnostics)
     return paths.residual_model
 
 
@@ -1900,6 +1956,8 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
     if experiment.config["use_residual_model"] and not refine["use_residual_model"]:
         print("Gain tuning: residual model trained but disabled for tuning "
               "(gain_tuning.use_residual_model); rolling out the nominal plant.")
+    elif experiment.config["use_residual_model"] and paths.residual_skipped.is_file() and not paths.residual_model.is_file():
+        print(f"Gain tuning: no residual this iteration ({paths.residual_skipped}); rolling out the nominal plant.")
     elif experiment.config["use_residual_model"]:
         if not paths.residual_model.is_file():
             raise FileNotFoundError(
@@ -2245,7 +2303,11 @@ def iteration_status(experiment: Experiment, iteration: int) -> dict[str, bool]:
         "plan-id-trajectory": has_id_trajectory,
         "decode-logs": bool(_list_log_csvs(paths)),
         "identify": paths.identification_result.is_file(),
-        "train-residual": paths.residual_model.is_file() or not experiment.config["use_residual_model"],
+        "train-residual": (
+            paths.residual_model.is_file()
+            or paths.residual_skipped.is_file()
+            or not experiment.config["use_residual_model"]
+        ),
         "plan-tuning-trajectories": any(paths.tuning_trajectories_dir.glob("*.pkl")),
         "tune-gains": paths.gains_result.is_file(),
         "benchmark": _benchmark_recorded(paths, experiment.config["benchmark"]),
@@ -2437,7 +2499,7 @@ def _run_iteration(
     if not status["identify"]:
         with logged_stage(paths, "identify"):
             stage_identify(experiment, iteration, log=log)
-    if experiment.config["use_residual_model"] and not paths.residual_model.is_file():
+    if not iteration_status(experiment, iteration)["train-residual"]:
         with logged_stage(paths, "train-residual"):
             stage_train_residual(experiment, iteration)
     if not status["plan-tuning-trajectories"]:

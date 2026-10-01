@@ -290,7 +290,17 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         # Per-matrix spectral-norm cap on the experts (Lipschitz bound); 0 disables.
         "spectral_norm_cap": 1.5,
         # Gaussian gate bandwidth = intra-cluster RMS distance * this (>1 overlaps).
-        "gate_bandwidth_scale": 1.0,
+        # 0.25 since 2026-10-01: at 1.0 the gate stayed at ~1 everywhere, so the
+        # yaw deficit the residual learned from slipping fast phases applied to
+        # every regime, and the tuner fought it with stiff heading gains
+        # (Phase 2 v3 S-F-R: ky/kth on the box in 4/5 seeds, 175 divergences).
+        # Retuning iteration 2 (S-F-R seeds 0/2/3, S-A-R seed 0), ky/kth at gate
+        # 1.0 / 0.5 / 0.25: s0 20/20, 20/17.6, 11.5/7.7; s2 8.0/19.4, 6.4/11.6,
+        # 4.0/6.4; s3 8.2/13.2, 8.2/9.2, 8.2/9.2. The price: the residual then
+        # explains 2-39 % of the yaw targets instead of 38-78 %, i.e. it mostly
+        # switches itself off in the fast regime. An additive twist correction
+        # cannot represent friction-limited slip, which feedback cannot beat.
+        "gate_bandwidth_scale": 0.25,
         # Null "zero expert" distance in bandwidths; beyond it the residual -> 0.
         "ood_sigma": 3.0,
         "epochs": 1500,
@@ -306,6 +316,18 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         # nominal model being trained on (this iteration's identified params),
         # the one the residual is later added to (residual.train_from_logs).
         "pool_previous_iterations": True,
+        # A log whose mocap pose leaves its reference by more than this [m] is
+        # a diverged run and stays out of every residual pool; with no log left
+        # the iteration trains no residual and runs nominal
+        # (results/residual_skipped.yaml). Same radius the benchmark calls a run
+        # diverged. Measured 2026-10-01 (Phase 2 v3): iteration 1's unit-gain
+        # controller diverges on every identification log (max error 1.3-1.4
+        # m), healthy iterations stay at 0.09-0.14 m. A residual fitted to the
+        # iteration-1 logs learned to correct the badly identified wheelbase of
+        # that iteration (slow-phase yaw slope -0.3), and the residual-tuned
+        # controllers came out stiffer than the nominal ones in every seed. 0
+        # disables the screen.
+        "max_position_error": 0.25,
     },
     "tuning_trajectories": {
         # Design on the residual-augmented plant, using *this* iteration's
@@ -600,6 +622,12 @@ class IterationPaths:
     @property
     def identification_result(self) -> Path:
         return self.results_dir / "identification.yaml"
+
+    @property
+    def residual_skipped(self) -> Path:
+        """Written instead of residual_model.pkl when no pooled log is usable
+        (every one diverged); the iteration's designs and tuning run nominal."""
+        return self.results_dir / "residual_skipped.yaml"
 
     @property
     def gains_result(self) -> Path:

@@ -118,3 +118,16 @@ def test_interrupted_decode_removes_the_binary_logs_too(tmp_path):
             raise RuntimeError("killed")
     clean_interrupted_stages(Experiment.load(experiment.root))
     assert not list(paths.data_dir.glob("TR*"))
+
+
+def test_a_skipped_residual_counts_as_done_and_designs_run_nominal(tmp_path):
+    # An iteration whose pooled logs all diverged trains no residual
+    # (residual.max_position_error); the loop must move on, nominal.
+    from wmr_simulator.active_learning.stages import _load_design_residual_model, iteration_status
+
+    experiment = stage_init(tmp_path / "exp", {"problem": PROBLEM, "use_residual_model": True})
+    paths = experiment.paths(1)
+    assert not iteration_status(experiment, 1)["train-residual"]
+    save_yaml(paths.residual_skipped, {"reason": "every pooled identification log diverged"})
+    assert iteration_status(experiment, 1)["train-residual"]
+    assert _load_design_residual_model(paths.residual_model, paths.problem) is None

@@ -1,0 +1,35 @@
+# Phase 2 v4 (2026-10-01): the R configurations only, rerun after two residual
+# fixes (residual.max_position_error 0.25: diverged logs, e.g. all of iteration 1,
+# stay out of the pool, an iteration with none left runs nominal; residual.
+# gate_bandwidth_scale 1.0 -> 0.25). The N configurations of phase2_static_v3 do
+# not touch the residual code and stay valid; they pair with these on the same
+# benchmark seeds.
+phase: phase2_static_v4
+iterations: 5
+seeds:
+- 0
+- 1
+- 2
+- 3
+- 4
+overrides:
+  benchmark:
+    max_workers: 4
+  gain_tuning:
+    optimizer: bfgs
+    steps: 160
+    num_lhs_points: 0
+    k_max_stab: 20.0
+    position_tracking_weight: 1.0
+    heading_tracking_weight: 1.0
+    linear_velocity_tracking_weight: 1.0
+    angular_velocity_tracking_weight: 1.0
+    input_weight: 0.0
+    input_delta_weight: 1.0
+    omega_delta_weight: 0.0
+    gain_delta_weight: 0.0
+configurations:
+  S-F-R:
+    tag: S-F-R
+  S-A-R:
+    tag: S-A-R
