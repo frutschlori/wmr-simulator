@@ -80,7 +80,7 @@ _STAGE_OUTPUTS = {
     # other seeds. Removing both makes the rerun reproduce the original logs.
     "decode-logs": ("data/TR*",),
     "identify": ("results/identification.yaml", "problem_identified.yaml"),
-    "train-residual": ("results/residual_model.pkl", "results/residual_diagnostics.yaml"),
+    "train-residual": ("results/residual_model.pkl", "results/residual_diagnostics.yaml", "results/residual_skipped.yaml"),
     "plan-tuning-trajectories": ("tuning_trajectories/*", "problem_tuning.yaml"),
     "tune-gains": ("results/gains.yaml",),
 }
