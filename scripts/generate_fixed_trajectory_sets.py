@@ -8,6 +8,7 @@ experiment defaults, so the sets match what the loop would design.
 
     python scripts/generate_fixed_trajectory_sets.py
     python scripts/generate_fixed_trajectory_sets.py --sets random-twist --random-sizes 15 45 150 --seed 1
+    python scripts/generate_fixed_trajectory_sets.py --sets identification-random --random-identification 10
     python scripts/generate_fixed_trajectory_sets.py --sets matched \\
         --compare "Pololu Data/test31 1 start gains/iteration_01/tuning_trajectories"
 
@@ -38,7 +39,7 @@ from wmr_simulator.visualization.motion_histograms import (
 )
 from wmr_simulator.visualization.trajectories import plot_reference_set_overview
 
-SETS = ("identification", "matched", "benchmark", "random-bspline", "random-twist")
+SETS = ("identification", "identification-random", "matched", "benchmark", "random-bspline", "random-twist")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -47,6 +48,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--out-dir", default="trajectory_exports/fixed_sets")
     parser.add_argument("--sets", nargs="+", choices=SETS, default=list(SETS))
     parser.add_argument("--random-sizes", nargs="+", type=int, default=[15, 45, 150])
+    parser.add_argument(
+        "--random-identification", type=int, default=10,
+        help="Random identification references drawn (the F level uses draw k for seed k).",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--benchmark-dir", default=DEFAULT_EXPERIMENT_CONFIG["benchmark"]["trajectory"])
     parser.add_argument("--compare", nargs="*", default=[], help="Extra pickle directories for the histogram.")
@@ -70,6 +75,36 @@ def write_set(name, references, out_dir, dt, limits, environment, control_points
         f"worst limit ratio {ranges['worst_limit_ratio'][1]:.2f}"
     )
     return set_dir
+
+
+def random_identification_references(problem_path: str, count: int):
+    """``count`` random identification references from the design's curve
+    family (fixed_sets.random_identification_reference), draw k from seed k."""
+    import tempfile
+
+    from wmr_simulator.trajectory_optimization.pipeline import TrajectoryOptimizationPipeline
+
+    config = DEFAULT_EXPERIMENT_CONFIG["identification_trajectory"]
+    problem_cfg = yaml.safe_load(Path(problem_path).read_text())
+    problem_cfg["sim_time"] = sum(float(phase["duration"]) for phase in config["phases"])
+    with tempfile.TemporaryDirectory() as directory:
+        identification_problem = Path(directory) / "problem_identification.yaml"
+        identification_problem.write_text(yaml.safe_dump(problem_cfg, sort_keys=False))
+        pipeline = TrajectoryOptimizationPipeline(
+            str(identification_problem),
+            time_scaling=config["time_scaling"],
+            objective_mode="identification",
+            motion_phases=config["phases"],
+        )
+        references, control_points = {}, {}
+        for index in range(count):
+            states, identified_duration, points = fixed_sets.random_identification_reference(
+                pipeline, int(config["num_control_points"]), seed=index
+            )
+            name = f"random_identification_{index:02d}"
+            references[name] = states
+            control_points[name] = points
+    return references, control_points, identified_duration, pipeline.phase_breaks
 
 
 def main(argv=None) -> int:
@@ -98,6 +133,22 @@ def main(argv=None) -> int:
             title=f"fixed identification reference (identified: first {identified_duration:.1f} s)",
             environment=environment,
         )
+    if "identification-random" in args.sets:
+        references, control_points, identified_duration, phase_breaks = random_identification_references(
+            args.problem, args.random_identification
+        )
+        set_dir = Path(args.out_dir) / "identification_random"
+        fixed_sets.export_reference_set(
+            references, set_dir, dt, control_points=control_points,
+            fixed_set="identification_random", identified_duration=identified_duration,
+            phase_breaks=list(phase_breaks),
+        )
+        plot_reference_set_overview(
+            references, dt, set_dir / "identification_random_overview.pdf",
+            title=f"random identification references (identified: first {identified_duration:.1f} s)",
+            environment=environment,
+        )
+        print(f"identification_random: {len(references)} references")
     if "matched" in args.sets:
         if len(fixed_sets.MATCHED_SET_SHAPES) != int(tuning["num_trajectories"]):
             print(f"Note: the matched set has {len(fixed_sets.MATCHED_SET_SHAPES)} shapes, the designed set "
