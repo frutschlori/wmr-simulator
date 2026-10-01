@@ -106,7 +106,7 @@ def test_static_design_gains_prefer_the_static_baseline(tmp_path):
                 "gains": [9.1, 8.2, 41.0, 21.5, 0.0],
                 "static_gains": STATIC_GAINS,
                 "schedule_enabled": True,
-                "schedule": {"scheduled_indices": [0, 1, 2], "rho": [0.5] * 3, "W": [[0.1, 0.0]] * 3},
+                "schedule": {"kind": "error_mlp", "hidden_sizes": [8], "seed": 3},
             },
             file,
         )

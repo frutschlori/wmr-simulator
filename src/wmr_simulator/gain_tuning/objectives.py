@@ -359,7 +359,7 @@ def scheduled_closed_loop_objective_terms(
     input, input_delta, omega_delta) plus a rate-scaled gain-schedule
     smoothness penalty. The penalty is a pure function of the reference trajectory
     (independent of rollout noise). With ``gain_delta_weight = 0`` and an
-    identity schedule (W = 0, b = 0) this reproduces the static objective terms
+    identity schedule (theta = 0) this reproduces the static objective terms
     padded with a trailing zero.
     """
     reference_states = pipeline.reference_states if reference_states is None else reference_states

@@ -87,7 +87,6 @@ def stage_finalize(experiment: Experiment, iteration: int) -> IterationPaths:
     robot_config["robot"].update(identification["estimated_params"])
     robot_config["controller"]["gains"] = [float(gain) for gain in gains_result["gains"]]
     if gains_result.get("schedule") is not None:
-        robot_config["controller"].pop("gain_schedule", None)
         robot_config["controller"]["gain_parametrization"] = {
             **gains_result["schedule"],
             "enabled": bool(gains_result["schedule_enabled"]),
@@ -156,7 +155,6 @@ def _write_static_gain_config(
     static_config = copy.deepcopy(robot_config)
     static_config["controller"]["gains"] = [float(gain) for gain in static_gains]
     static_config["controller"].pop("gain_parametrization", None)
-    static_config["controller"].pop("gain_schedule", None)
     save_yaml(paths.robot_config_static, static_config)
     export_robot_config(
         paths.robotcfg_static_cfg,
@@ -169,15 +167,15 @@ def _write_static_gain_config(
 def _export_gain_mlp_if_configured(problem_path: Path, output_path: Path) -> Path | None:
     """Export the error-MLP gain parametrization to GAINMLP.JSN for the robot.
 
-    No-op unless the generated iteration problem enables an ``error_mlp`` gain
+    No-op unless the generated iteration problem enables the gain
     parametrization; the factors are multiplicative so the file sits next to
     ROBOTCFG.CFG on the SD card and scales the firmware base gains it holds.
     """
-    from wmr_simulator.gain_parametrization import error_mlp, params_from_cfg, parametrization_kind
+    from wmr_simulator.gain_parametrization import params_from_cfg
 
     problem_cfg = load_yaml(problem_path)
     cfg = problem_cfg["controller"].get("gain_parametrization")
-    if cfg is None or not cfg.get("enabled", False) or parametrization_kind(cfg) != error_mlp.KIND:
+    if cfg is None or not cfg.get("enabled", False):
         return None
 
     from wmr_simulator.pololu.gain_mlp_exporter import export_gain_mlp
@@ -1287,7 +1285,7 @@ def _log_gain_parametrization(paths: IterationPaths):
     problem_cfg = load_yaml(paths.problem)
     controller = problem_cfg["controller"]
     base_gains = [float(gain) for gain in controller["gains"]]
-    cfg = controller.get("gain_parametrization", controller.get("gain_schedule"))
+    cfg = controller.get("gain_parametrization")
     if cfg is None or not cfg.get("enabled", False):
         return base_gains, None
 
@@ -1919,7 +1917,7 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
         # The experiment's master switch wins; on, the stage config (None =
         # follow the problem yaml) decides.
         schedule_enabled=(
-            config.get("gain_parametrization", config.get("gain_schedule"))
+            config.get("gain_parametrization")
             if experiment.config["use_gain_parametrization"]
             else False
         ),

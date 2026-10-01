@@ -129,8 +129,8 @@ def main():
     parser.add_argument("--fixed-wheel-radius", type=float, default=None)
     parser.add_argument("--fixed-base-diameter", type=float, default=None)
     parser.add_argument("--num-summary-training-trajectories", type=int, default=None)
-    # Gain schedule: jointly tune base gains + outer-gain schedule (W), default follows problem yaml, --no-gain-schedule forces W=0 (static)
-    parser.add_argument("--gain-schedule", action=argparse.BooleanOptionalAction, default=GAIN_TUNING_DEFAULTS["gain_parametrization"])
+    # Gain parametrization: jointly tune base gains + the gain MLP, default follows problem yaml, --no-gain-parametrization tunes static gains only
+    parser.add_argument("--gain-parametrization", action=argparse.BooleanOptionalAction, default=GAIN_TUNING_DEFAULTS["gain_parametrization"])
     parser.add_argument("--gain-delta-weight", type=float, default=GAIN_TUNING_DEFAULTS["gain_delta_weight"])
     # Also run the static routine (LHS + multistart Adam on the base gains only)
     # as an independent controller option next to the parametrized one; it takes
@@ -193,7 +193,7 @@ def main():
         num_lhs_points=args.num_lhs_points,
         num_adam_optimizations=args.num_adam_optimizations,
         optimizer=args.optimizer,
-        schedule_enabled=args.gain_schedule,
+        schedule_enabled=args.gain_parametrization,
         gain_delta_weight=args.gain_delta_weight,
         residual_model=residual_model,
         static_tune=args.static_tune,
@@ -236,26 +236,18 @@ def main():
     if result.get("schedule_params") is not None:
         import numpy as _np
 
-        from wmr_simulator.gain_parametrization import BoundedReferenceParams, ErrorMlpParams, num_params
+        from wmr_simulator.gain_parametrization import num_params
+        from wmr_simulator.gain_parametrization.error_mlp import hidden_sizes
 
         schedule_params = result["schedule_params"]
         print(f"Gain delta weight: {args.gain_delta_weight:.8g}")
-        if isinstance(schedule_params, BoundedReferenceParams):
-            print("Scheduled indices:", list(map(int, schedule_params.scheduled_indices)))
-            print("Feature scale [v_max, omega_max]:", list(map(float, pipeline.gain_schedule_feature_scale)))
-            print("rho:", _np.array2string(_np.asarray(schedule_params.rho), precision=5))
-            print("W (rows = scheduled gains, cols = [v_d, |omega_d|]):")
-            print(_np.array2string(_np.asarray(schedule_params.W), precision=5))
-        elif isinstance(schedule_params, ErrorMlpParams):
-            from wmr_simulator.gain_parametrization.error_mlp import hidden_sizes
-
-            print(f"Error-MLP parametrization: hidden sizes {list(hidden_sizes(schedule_params))}, "
-                  f"{num_params(schedule_params)} trainable parameters")
-            print("Scheduled indices:", list(map(int, schedule_params.scheduled_indices)))
-            print(f"Factor bound: {float(schedule_params.bound):.5g} "
-                  f"({'learned' if schedule_params.learn_bound else 'fixed'})")
-            print(f"Spectral norm cap: {float(schedule_params.spectral_norm_cap):.5g} (0 = disabled)")
-            print("Feature scale:", _np.array2string(_np.asarray(schedule_params.feature_scale), precision=5))
+        print(f"Error-MLP parametrization: hidden sizes {list(hidden_sizes(schedule_params))}, "
+              f"{num_params(schedule_params)} trainable parameters")
+        print("Scheduled indices:", list(map(int, schedule_params.scheduled_indices)))
+        print(f"Factor bound: {float(schedule_params.bound):.5g} "
+              f"({'learned' if schedule_params.learn_bound else 'fixed'})")
+        print(f"Spectral norm cap: {float(schedule_params.spectral_norm_cap):.5g} (0 = disabled)")
+        print("Feature scale:", _np.array2string(_np.asarray(schedule_params.feature_scale), precision=5))
 
     save_tuning_result(args.out, args.problem, result)
 
