@@ -204,6 +204,10 @@ def build_parser() -> argparse.ArgumentParser:
         "plan-tuning-trajectories": "Optimize (or copy) the gain-tuning trajectory set.",
         "tune-gains": "Tune controller gains on the identified model.",
         "finalize": "Fold the iteration results into the next iteration folder.",
+        "tune-parametrized": (
+            "Tune a state-dependent gain variant post hoc on this (static) iteration and deploy it "
+            "into the next one (active_learning.posthoc; the variant's config must exist)."
+        ),
         "plot-run-logs": (
             "Plot every data/ subdirectory recording of every iteration into that "
             "iteration's visualize/logs/<same subdirectory>/, and rewrite each iteration's "
@@ -233,6 +237,8 @@ def build_parser() -> argparse.ArgumentParser:
                 default=None,
                 help="Deployments to run (default: mujoco_deployment.num_logs in experiment.yaml).",
             )
+        if command == "tune-parametrized":
+            stage_parser.add_argument("--variant", required=True, help="Variant name (parametrized_variants/<name>.yaml).")
         if command == "benchmark":
             stage_parser.add_argument(
                 "--num-runs",
@@ -318,7 +324,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     iteration = experiment.resolve_iteration(args.iteration)
-    with stages.logged_stage(experiment.paths(iteration), args.command):
+    stage_name = args.command if args.command != "tune-parametrized" else f"{args.command}:{args.variant}"
+    with stages.logged_stage(experiment.paths(iteration), stage_name):
         run_stage(args, experiment, iteration)
     return 0
 
@@ -342,6 +349,10 @@ def run_stage(args, experiment, iteration: int) -> None:
         stages.stage_tune_gains(experiment, iteration)
     elif args.command == "finalize":
         stages.stage_finalize(experiment, iteration)
+    elif args.command == "tune-parametrized":
+        from wmr_simulator.active_learning.posthoc import stage_tune_parametrized
+
+        stage_tune_parametrized(experiment, iteration, args.variant)
 
 
 if __name__ == "__main__":

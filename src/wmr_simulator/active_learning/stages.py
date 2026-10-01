@@ -1033,13 +1033,23 @@ def _benchmark_variant_specs(
         return base if shape is None or num_shapes <= 1 else base / shape
 
     if not paths.robotcfg_static_cfg.is_file():
-        return [
+        specs = [
             (baseline_runs.STATIC_VARIANT, paths.robotcfg_cfg, data_dir(paths.benchmark_static_data_dir))
         ]
-    return [
-        (baseline_runs.STATIC_VARIANT, paths.robotcfg_static_cfg, data_dir(paths.benchmark_static_data_dir)),
-        (baseline_runs.PARAMETRIZED_VARIANT, paths.robotcfg_cfg, data_dir(paths.benchmark_data_dir)),
-    ]
+    else:
+        specs = [
+            (baseline_runs.STATIC_VARIANT, paths.robotcfg_static_cfg, data_dir(paths.benchmark_static_data_dir)),
+            (baseline_runs.PARAMETRIZED_VARIANT, paths.robotcfg_cfg, data_dir(paths.benchmark_data_dir)),
+        ]
+    # Parametrized controllers tuned post hoc on a static run
+    # (active_learning.posthoc), one per variant, each driven in place with
+    # its own network beside it.
+    from wmr_simulator.active_learning.posthoc import VARIANT_PREFIX
+
+    for config in sorted((paths.root / "parametrized").glob("*/ROBOTCFG.CFG")):
+        variant = VARIANT_PREFIX + config.parent.name
+        specs.append((variant, config, data_dir(paths.data_dir / f"benchmark_{variant}")))
+    return specs
 
 
 def _staged_benchmark_config(paths: IterationPaths, variant: str, source: Path) -> Path:
@@ -1053,7 +1063,7 @@ def _staged_benchmark_config(paths: IterationPaths, variant: str, source: Path) 
     swap the real SD card needs (ROBOTCFG_static.CFG as ROBOTCFG.CFG, with no
     GAINMLP.JSN beside it). The deployed config is driven where it lives.
     """
-    if source == paths.robotcfg_cfg:
+    if source == paths.robotcfg_cfg or source.parent.parent == paths.root / "parametrized":
         return source
     staged_dir = paths.benchmark_dir / variant
     staged_dir.mkdir(parents=True, exist_ok=True)

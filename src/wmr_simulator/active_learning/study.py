@@ -73,7 +73,9 @@ _PATH_KEYS = (
 # was interrupted can be undone. ``finalize`` writes the *next* iteration.
 _STAGE_OUTPUTS = {
     "plan-id-trajectory": ("identification_trajectory/*", "problem_identification.yaml"),
-    "benchmark": ("data/benchmark", "data/benchmark_static", "benchmark", "results/benchmark.yaml"),
+    "benchmark": (
+        "data/benchmark", "data/benchmark_static", "data/benchmark_parametrized_*", "benchmark", "results/benchmark.yaml",
+    ),
     "simulate-deployment": ("data/TR*",),
     # Not just the csvs: `run` redeploys whenever no decoded log exists, and a
     # redeployment next to surviving binaries numbers its logs after them, with
@@ -211,6 +213,14 @@ def clean_interrupted_stages(experiment: Experiment) -> list[str]:
         paths = experiment.paths(iteration)
         if stage == "finalize":
             targets = [experiment.paths(iteration + 1).root]
+        elif stage.startswith("tune-parametrized:"):
+            from wmr_simulator.active_learning.posthoc import deploy_dir, tuning_dir
+
+            variant = stage.split(":", 1)[1]
+            targets = [
+                path for path in (tuning_dir(experiment, iteration, variant), deploy_dir(experiment, iteration + 1, variant))
+                if path.exists()
+            ]
         else:
             targets = [match for pattern in _STAGE_OUTPUTS[stage] for match in paths.root.glob(pattern)]
         for target in targets:
@@ -293,6 +303,8 @@ def launch_run(
     """
     from wmr_simulator.active_learning import stages
 
+    if spec.get("source_phase"):
+        return launch_posthoc_run(study_root, spec, spec_path, name, seed, processes=processes)
     run_dir = run_directory(study_root, spec, name, seed)
     configuration = spec["configurations"][name]
     baseline_gains = configuration.get("baseline_gains")
@@ -430,6 +442,108 @@ def _process_tree_rss_gb(root_pids: list[int]) -> float:
     return total_kb / 1e6
 
 
+def launch_posthoc_run(
+    study_root: Path, spec: dict, spec_path: Path, name: str, seed: int, processes: list | None = None
+) -> dict:
+    """Tune and benchmark the spec's parametrized variants post hoc on a copy of
+    a finished static run (``active_learning.posthoc``).
+
+    The static run ``<source_phase>/<name>_seed<k>`` is copied once into this
+    phase, so the source phase stays as it was; per variant and iteration the
+    tuning and the next iteration's benchmark each run in their own process.
+    """
+    from wmr_simulator.active_learning import posthoc
+
+    run_dir = run_directory(study_root, spec, name, seed)
+    # A configuration names the static run it builds on (``source``, default:
+    # its own name) and its variants (default: the spec's), so hypotheses can
+    # run side by side as separate configurations.
+    configuration = spec["configurations"][name] or {}
+    source_name = configuration.get("source", name)
+    source = Path(study_root) / spec["source_phase"] / f"{source_name}_seed{int(seed)}"
+    iterations = int(spec["iterations"])
+    variants = configuration.get("variants") or spec.get("variants") or {}
+    manifest = _load_manifest(run_dir)
+    if not (run_dir / "experiment.yaml").is_file():
+        if not (source / "experiment.yaml").is_file():
+            raise FileNotFoundError(f"No static run to build on at {source}.")
+        shutil.copytree(source, run_dir, ignore=shutil.ignore_patterns(RUN_SUMMARY_NAME, "logs"))
+        manifest = {
+            "phase": spec["phase"],
+            "configuration": name,
+            "tag": f"posthoc:{source_name}",
+            "seed": int(seed),
+            "iterations": iterations,
+            "spec": str(spec_path),
+            "created": _now(),
+            "source_run": str(source),
+            "source_manifest": _load_manifest(source),
+            "variants": variants,
+            "sessions": [],
+        }
+        save_yaml(run_dir / MANIFEST_NAME, manifest)
+    experiment = Experiment.load(run_dir)
+    for variant, overrides in variants.items():
+        posthoc.save_variant_config(experiment, variant, overrides)
+    if all(posthoc.finished(experiment, variant, iterations) for variant in variants):
+        print(f"{run_dir.name}: finished, skipping.", flush=True)
+        return {}
+
+    session_index = len(manifest.get("sessions", []))
+    head, diff = git_state()
+    diff_name = f"git_diff_session{session_index}.patch"
+    (run_dir / diff_name).write_text(diff)
+    session = {
+        "started": _now(),
+        "finished": None,
+        "wall_clock_s": None,
+        "git_head": head,
+        "git_dirty": bool(diff.strip()),
+        "git_diff": diff_name,
+        "host": platform.node(),
+        "cleaned": clean_interrupted_stages(experiment),
+        "exit_codes": {},
+    }
+    manifest.setdefault("sessions", []).append(session)
+    save_yaml(run_dir / MANIFEST_NAME, manifest)
+    (run_dir / "logs").mkdir(exist_ok=True)
+    start = time.monotonic()
+    print(f"{run_dir.name}: session {session_index} (post hoc on {source.name}, variants {list(variants)})", flush=True)
+    with (run_dir / "logs" / f"session{session_index}.log").open("a", encoding="utf-8") as log_file:
+        for variant in variants:
+            for iteration in range(1, iterations + 1):
+                code = 0
+                if not posthoc.result_path(experiment, iteration, variant).is_file():
+                    code = _cli(
+                        run_dir, log_file, "tune-parametrized", "--iteration", str(iteration),
+                        "--variant", variant, processes=processes,
+                    )
+                    session["exit_codes"][f"{variant}_tune_{iteration}"] = code
+                if code == 0:
+                    code = _cli(run_dir, log_file, "benchmark", "--iteration", str(iteration + 1), processes=processes)
+                    session["exit_codes"][f"{variant}_benchmark_{iteration + 1}"] = code
+                if code != 0:
+                    break
+    session["finished"] = _now()
+    session["wall_clock_s"] = round(time.monotonic() - start, 1)
+    save_yaml(run_dir / MANIFEST_NAME, manifest)
+    if all(code == 0 for code in session["exit_codes"].values()):
+        score = [sys.executable, "-c", "import sys; from wmr_simulator.active_learning.study import score_run; score_run(sys.argv[1])", str(run_dir)]
+        with (run_dir / "logs" / f"session{session_index}.log").open("a", encoding="utf-8") as log_file:
+            process = subprocess.Popen(score, cwd=run_dir, stdout=log_file, stderr=subprocess.STDOUT, start_new_session=True)
+            if processes is not None:
+                processes.append(process)
+            try:
+                session["exit_codes"]["score"] = process.wait()
+            finally:
+                if processes is not None:
+                    processes.remove(process)
+        save_yaml(run_dir / MANIFEST_NAME, manifest)
+    status = "ok" if all(code == 0 for code in session["exit_codes"].values()) else "FAILED"
+    print(f"{run_dir.name}: {status} after {session['wall_clock_s']:.0f} s, exit codes {session['exit_codes']}", flush=True)
+    return session
+
+
 def launch_study(
     spec_path: str | Path,
     study_root: str | Path,
@@ -559,7 +673,14 @@ def _yaw_ringing_by_log(data_dir: Path) -> dict[str, float | None]:
 
 
 def _controller_gains(paths, variant: str) -> list[float] | None:
-    source = paths.robot_config_static if variant == "static" and paths.robot_config_static.is_file() else paths.robot_config
+    from wmr_simulator.active_learning.posthoc import VARIANT_PREFIX
+
+    if variant.startswith(VARIANT_PREFIX):
+        source = paths.root / "parametrized" / variant[len(VARIANT_PREFIX):] / "robot_config.yaml"
+    elif variant == "static" and paths.robot_config_static.is_file():
+        source = paths.robot_config_static
+    else:
+        source = paths.robot_config
     if not source.is_file():
         return None
     gains = [float(gain) for gain in load_yaml(source)["controller"]["gains"]]
@@ -655,7 +776,13 @@ def summarize_run(run_dir: Path) -> tuple[list[dict], list[dict]]:
             gains = _controller_gains(paths, variant)
             for name, value in zip(GAIN_NAMES, gains or [None] * len(GAIN_NAMES)):
                 row[name] = value
-            checks = (gains_result.get("checks") or {}).get(variant, {})
+            from wmr_simulator.active_learning.posthoc import VARIANT_PREFIX
+
+            if variant.startswith(VARIANT_PREFIX) and tuned is not None:
+                variant_result = tuned.results_dir / "parametrized" / variant[len(VARIANT_PREFIX):] / "gains.yaml"
+                checks = ((load_yaml(variant_result) or {}).get("checks") or {}).get("parametrized", {}) if variant_result.is_file() else {}
+            else:
+                checks = (gains_result.get("checks") or {}).get(variant, {})
             row["stalled"] = checks.get("stalled")
             row["unchanged_from_init"] = checks.get("unchanged_from_init")
             hits = checks.get("bound_hits", [])
