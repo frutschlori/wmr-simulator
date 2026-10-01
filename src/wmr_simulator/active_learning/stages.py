@@ -266,6 +266,16 @@ def stage_plan_identification_trajectory(experiment: Experiment, iteration: int)
                 "optimize_identification_trajectory is disabled but "
                 "baseline_identification_trajectory is not set in experiment.yaml."
             )
+        baseline = Path(baseline)
+        if baseline.is_dir():
+            # A directory holds one random draw per seed (fixed_sets.
+            # random_identification_reference): seed k drives draw k, so the
+            # fixed level averages over uninformed choices instead of betting
+            # on one.
+            draws = sorted(baseline.glob("*.pkl"))
+            if not draws:
+                raise FileNotFoundError(f"No identification references in {baseline}.")
+            baseline = draws[int(experiment.config["seed"]) % len(draws)]
         pickle_path = Path(shutil.copy2(baseline, paths.identification_trajectory_dir))
         print(f"Copied baseline identification trajectory: {pickle_path}")
     else:

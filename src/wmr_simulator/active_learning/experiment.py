@@ -99,7 +99,13 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
     # the identify stage cuts its logs as it does a designed trajectory's. The
     # tuning directory is copied whole; other sets there: benchmark (needs
     # tuning_trajectories.sim_time 7.3), random_bspline_N<n>, random_twist_N<n>.
-    "baseline_identification_trajectory": "trajectory_exports/fixed_sets/identification/fixed_identification.pkl",
+    # The identification reference is a directory of random draws from the
+    # designer's own curve family (one per seed, see stage_plan_identification_
+    # trajectory); a single pickle, e.g. the hand-made two-arc reference in
+    # fixed_sets/identification/, is driven by every seed. Measured 2026-10-01
+    # (Phase 2b v2): the hand-made reference identifies L about as well as a
+    # median random draw, the design 1.4x better than that.
+    "baseline_identification_trajectory": "trajectory_exports/fixed_sets/identification_random",
     "baseline_tuning_trajectories_dir": "trajectory_exports/fixed_sets/matched",
     # Firmware export template (None -> built-in defaults from robot_config.py).
     "robotcfg_template": None,
