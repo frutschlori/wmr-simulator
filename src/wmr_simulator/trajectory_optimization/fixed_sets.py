@@ -289,6 +289,108 @@ def fixed_identification_reference(
     return placed, float(slow_phase["duration"])
 
 
+def random_identification_reference(
+    pipeline,
+    num_control_points: int,
+    seed: int,
+    slow_speed_range: tuple[float, float] = (0.6, 1.0),
+    fast_speed_range: tuple[float, float] = (1.3, 1.8),
+    max_turn: float = 0.5 * np.pi,
+    num_steps: int = 400,
+    learning_rate: float = 1e-2,
+    constraint_smooth_max_beta: float = 10.0,
+    floor_fraction: float = 0.9,
+    check_every: int = 10,
+    max_draws: int = 30,
+) -> tuple[np.ndarray, float, np.ndarray]:
+    """A random identification reference from the designer's own curve family:
+    ``(reference_states, identified_duration, control_points)``.
+
+    ``pipeline`` is the identification design's ``TrajectoryOptimizationPipeline``
+    (identification mode, ``motion_phases``), so the curve has the designed
+    trajectory's basis, pinned start, phases and per-phase limits and floors.
+    A random-walk control polygon as long as a random mean speed per phase asks
+    for is projected into the limits by Adam on the constraint and tangent-floor
+    terms alone -- the design objective without the FIM -- and kept as soon as
+    every phase is inside its true limits and reaches ``floor_fraction`` of its
+    floors. At the end of the budget a draw inside the limits is kept even if
+    short of its floors (the designer keeps such designs too); one still over a
+    limit is redrawn.
+    """
+    import jax
+    import jax.numpy as jnp
+    import optax
+
+    from wmr_simulator.trajectory_optimization.constraints import constraint_loss_from_reference_states
+    from wmr_simulator.trajectory_optimization.objectives import DEFAULT_CONSTRAINT_VIOLATION_TOLERANCE
+
+    phases = pipeline.motion_phases
+    if not phases:
+        raise ValueError("A random identification reference needs the design's motion phases.")
+    problem = pipeline.problem
+    dt = float(problem.dt)
+    durations = [float(phase["duration"]) for phase in phases]
+    identified_duration = sum(d for d, phase in zip(durations, phases) if phase.get("identify", True))
+    plan = pipeline._spline_plan(num_control_points, pipeline.time_scaling)
+    limits = pipeline.motion_limits()
+    weights = pipeline.constraint_weights()
+    tolerance = DEFAULT_CONSTRAINT_VIOLATION_TOLERANCE
+
+    def loss(control_points):
+        control_points = pipeline.clamp_control_points(control_points)
+        states = pipeline.reference_states_from_control_points(control_points)
+        constraint = constraint_loss_from_reference_states(
+            states, dt, limits, weights, smooth_max_beta=constraint_smooth_max_beta
+        )
+        tangent = pipeline.stabilization_loss_from_control_points(
+            control_points, constraint_smooth_max_beta=constraint_smooth_max_beta
+        )
+        return constraint / tolerance + tangent
+
+    optimizer = optax.adam(learning_rate)
+    grad = jax.jit(jax.grad(loss))
+    breaks = np.cumsum([0.0] + durations)
+
+    def assess(control_points):
+        """(inside every phase's limits with no stalled tangent, also meets the floors, states)."""
+        states = np.asarray(
+            pipeline.reference_states_from_control_points(pipeline.clamp_control_points(control_points)), dtype=float
+        )
+        if pipeline.stabilization_loss_from_control_points(control_points) > 1e-6:
+            return False, False, states
+        floors_met = True
+        for phase, start, stop in zip(phases, breaks[:-1], breaks[1:]):
+            segment = states[int(round(start / dt)): int(round(stop / dt)) + 1]
+            if not is_within_limits(segment, dt, motion_limits(problem.robot_cfg, phase.get("motion_limits"))):
+                return False, False, states
+            summary = summarize_motion(segment, dt)
+            floors_met &= summary["v_mean"] >= floor_fraction * float(phase.get("min_speed", 0.0))
+            floors_met &= summary["a_lat_mean"] >= floor_fraction * float(phase.get("min_lateral_acceleration", 0.0))
+        return True, bool(floors_met), states
+
+    rng = np.random.default_rng(seed)
+    start = np.asarray(problem.start[:2], dtype=float)
+    for _ in range(max_draws):
+        length = rng.uniform(*slow_speed_range) * durations[0] + sum(
+            rng.uniform(*fast_speed_range) * duration for duration in durations[1:]
+        )
+        polygon = random_walk_control_points(
+            rng, plan.B0, length, problem.environment_min, problem.environment_max, max_turn=max_turn
+        )
+        control_points = jnp.asarray(polygon - polygon[0] + start, dtype=jnp.float32)
+        control_points = pipeline.clamp_control_points(control_points)
+        opt_state = optimizer.init(control_points)
+        for step in range(num_steps + 1):
+            if step % check_every == 0 or step == num_steps:
+                feasible, floors_met, states = assess(control_points)
+                if feasible and (floors_met or step == num_steps):
+                    return states, identified_duration, np.asarray(control_points, dtype=float)
+            if step < num_steps:
+                updates, opt_state = optimizer.update(grad(control_points), opt_state, control_points)
+                control_points = pipeline.clamp_control_points(optax.apply_updates(control_points, updates))
+    raise RuntimeError(f"No feasible random identification reference after {max_draws} draws (seed {seed}).")
+
+
 # ---------------------------------------------------------------------------
 # random twist profiles
 # ---------------------------------------------------------------------------

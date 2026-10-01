@@ -184,7 +184,9 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         # fell short of its floors (mean speed 0.99 against 1.5 in a trial).
         "num_control_points": 12,
         "time_scaling": "s-curve",
-        "window_length": 50,
+        # The replay window the design's FIM scores, the same one the identify
+        # stage fits with (identification.window_length).
+        "window_length": 10,
         # The trajectory is a slow phase followed by a fast one, resting in
         # between (TrajectoryOptimizationPipeline motion_phases). The durations
         # add up to the design's sim_time. Each phase has its own motion limits
@@ -258,7 +260,17 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         # (MuJoCo test20 it5, real 2026_07_27 it4, real 2026_09_07 it3), in ~6 s.
         "steps": 600,
         "learning_rate": 1e-3,
-        "window_length": 50,
+        # Replay window [samples]: every window restarts from the measured mocap
+        # pose. Measured 2026-10-01 on 20 MuJoCo seeds per trajectory (converged
+        # controller, identified 3 s phase; plant L 83.96 on arcs / 84.70 spinning):
+        #   window       1      10     25     50     none
+        #   L designed  85.48  84.76  83.08  83.61  84.33  mm (std 0.04-0.13)
+        #   L fixed     84.97  84.19  84.41  84.50  84.51
+        # r is within 0.05 % and u within 0.7 % at every window up to 100. The
+        # window decides how much unmodeled error (residual lag, encoder
+        # quantization) piles up before the reset; 10 keeps that short while a
+        # window still spans enough motion to separate r from L.
+        "window_length": 10,
         # Robust deviation (modified z-score) above which a log's own parameter
         # estimate counts as disagreeing with the rest of the batch and is left
         # out of the joint fit; 0 disables the screening, and it needs at least
