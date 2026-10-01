@@ -460,7 +460,8 @@ def launch_posthoc_run(
     # run side by side as separate configurations.
     configuration = spec["configurations"][name] or {}
     source_name = configuration.get("source", name)
-    source = Path(study_root) / spec["source_phase"] / f"{source_name}_seed{int(seed)}"
+    source_phase = configuration.get("source_phase", spec["source_phase"])
+    source = Path(study_root) / source_phase / f"{source_name}_seed{int(seed)}"
     iterations = int(spec["iterations"])
     variants = configuration.get("variants") or spec.get("variants") or {}
     manifest = _load_manifest(run_dir)

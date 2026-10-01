@@ -1,0 +1,25 @@
+# Phase 4 (2026-10-02): the state-dependent (D) matrix with the method fixed in
+# Phase 3: H3, D = each iteration's static gains x a learned schedule (base
+# gains frozen, network warm-started across iterations, gain_delta 0, frozen
+# tuner). Tuned post hoc on the final static matrix: N runs from
+# phase2_static_v3, R runs from phase2_static_v4 (residual fixes), on the same
+# paired benchmark seeds.
+phase: phase4_parametrized_matrix
+source_phase: phase2_static_v3
+iterations: 5
+seeds: [0, 1, 2, 3, 4]
+configurations:
+  D-F-N:
+    source: S-F-N
+    variants: {h3: {base_from_static: true}}
+  D-A-N:
+    source: S-A-N
+    variants: {h3: {base_from_static: true}}
+  D-F-R:
+    source: S-F-R
+    source_phase: phase2_static_v4
+    variants: {h3: {base_from_static: true}}
+  D-A-R:
+    source: S-A-R
+    source_phase: phase2_static_v4
+    variants: {h3: {base_from_static: true}}
