@@ -1,0 +1,25 @@
+# Phase 2 v5b (2026-10-02): the R configurations of phase2_static_v5 rerun with the
+# residual pool screened at 0.25 m again (v5 used 0.5 m, and S-A-R seed 3 learned
+# from logs that tracked the identified phase 14 cm RMS off; see STUDY_LOG). The N
+# configurations of v5 never train a residual and pair with these on the same seeds.
+phase: phase2_static_v5b
+iterations: 5
+seeds: [0, 1, 2, 3, 4]
+overrides:
+  benchmark: {max_workers: 4}
+  gain_tuning:
+    optimizer: bfgs
+    steps: 160
+    num_lhs_points: 0
+    k_max_stab: 20.0
+    position_tracking_weight: 1.0
+    heading_tracking_weight: 1.0
+    linear_velocity_tracking_weight: 1.0
+    angular_velocity_tracking_weight: 1.0
+    input_weight: 0.0
+    input_delta_weight: 1.0
+    omega_delta_weight: 0.0
+    gain_delta_weight: 0.0
+configurations:
+  S-F-R: {tag: S-F-R}
+  S-A-R: {tag: S-A-R}
