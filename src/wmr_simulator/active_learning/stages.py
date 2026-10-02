@@ -331,6 +331,8 @@ def stage_plan_identification_trajectory(experiment: Experiment, iteration: int)
         )
         print(f"Saved identification trajectory pickle: {pickle_path}")
 
+    appended = _append_tuning_trajectories(experiment, iteration, pickle_path, config)
+
     from wmr_simulator.pololu.reference_exporter import export_reference_trajectory, load_reference_trajectory
 
     jsn_path = export_reference_trajectory(
@@ -341,16 +343,65 @@ def stage_plan_identification_trajectory(experiment: Experiment, iteration: int)
 
     from wmr_simulator.pololu.bridge_exporter import append_bridge_reference
 
+    # The appended tuning trajectories take the place of the fast phase and of
+    # most of the slow return: the budget is the bridged JSN's 48 KiB.
+    bridge = "appended_bridge" if appended else "bridge"
     bridged_path = append_bridge_reference(
         jsn_path,
-        wait_time=float(config["bridge_wait_time"]),
-        bridge_time=float(config["bridge_time"]),
+        wait_time=float(config[f"{bridge}_wait_time"]),
+        bridge_time=float(config[f"{bridge}_time"]),
         plot_path=identification_plot_dir / "identification_trajectory_bridge.pdf",
     )
     print(f"Exported bridged repeat variant: {bridged_path}")
     print(f"Copy {jsn_path.name} and {paths.robotcfg_cfg.name} to the robot SD card, run the")
     print(f"experiment, then place the logs in {paths.data_dir} and run decode-logs.")
     return jsn_path
+
+
+def _append_tuning_trajectories(
+    experiment: Experiment, iteration: int, pickle_path: Path, config: dict
+) -> list[str]:
+    """Replace everything after the identified phase of this iteration's
+    identification reference by trajectories of the previous iteration's tuning
+    set (``trajectory_optimization.reference_extension``), so the residual is
+    trained where the tuner rolls out. Iteration 1 has no tuning set yet and
+    keeps its fast phase. The reference as designed (or copied) is kept in
+    ``identification_trajectory/designed/``; the pickle the stages read is the
+    extended one, with the same ``identified_duration``. Returns the appended
+    trajectories' names (empty when nothing was appended)."""
+    import pickle
+
+    from wmr_simulator.trajectory_optimization.reference_extension import (
+        extended_payload,
+        representative_trajectories,
+    )
+
+    count = int(config.get("append_tuning_trajectories", 0))
+    if count <= 0 or iteration <= 1:
+        return []
+    previous = sorted(experiment.paths(iteration - 1).tuning_trajectories_dir.glob("*.pkl"))
+    if not previous:
+        print(f"No tuning set in iteration {iteration - 1}; the identification reference keeps its own phases.")
+        return []
+    chosen = representative_trajectories(previous, count)
+    designed_dir = pickle_path.parent / "designed"
+    designed_dir.mkdir(exist_ok=True)
+    designed = Path(shutil.move(str(pickle_path), designed_dir / pickle_path.name))
+    environment = load_yaml(_identification_problem(experiment.paths(iteration), config))["environment"]
+    payload = extended_payload(
+        designed, chosen, box_min=environment["min"], box_max=environment["max"],
+        margin=float(config["appended_box_margin"]), turn_duration=float(config["appended_turn_duration"]),
+    )
+    with pickle_path.open("wb") as file:
+        pickle.dump(payload, file)
+    duration = (len(payload["reference_states"]) - 1) * payload["dt"]
+    print(
+        f"Identification reference: identified phase ({payload['identified_duration']:.1f} s) + "
+        f"{len(chosen)} trajectories of iteration {iteration - 1}'s tuning set "
+        f"({', '.join(path.stem for path in chosen)}), {duration:.1f} s in all, placed {payload['placement']}; "
+        f"as designed: {designed}"
+    )
+    return [path.name for path in chosen]
 
 
 def _check_fixed_tuning_references(pickles: list[Path], problem_path: Path) -> None:
@@ -757,6 +808,9 @@ def stage_run_benchmark(
         shape = source.stem
         trajectory = _benchmark_reference(paths, config, source)
         reference_start = _reference_start_pose(trajectory)
+        # Scored over the reference alone: a bridged copy adds a wait and a slow
+        # return path that would dilute the position RMSE of open references.
+        score_duration = _reference_duration(source)
         entry = report["trajectories"].setdefault(shape, {})
         entry["trajectory"] = str(trajectory)
         entry.setdefault("variants", {})
@@ -775,6 +829,7 @@ def stage_run_benchmark(
                 _benchmark_chain_job(
                     experiment, iteration, variant, robot_config, trajectory, data_dir, count,
                     config, reference_start, shape=shape if len(sources) > 1 else None,
+                    score_duration=score_duration,
                 )
             )
             job_targets.append((entry, variant, robot_config_source, data_dir))
@@ -815,12 +870,13 @@ def _record_benchmark_runs(
     config: dict,
     reference_start: tuple[float, float, float],
     shape: str | None = None,
+    score_duration: float | None = None,
 ) -> tuple[list[Path], list[dict]]:
     """Drive ``count`` chained runs of ``trajectory`` under one controller."""
     written, runs, lines = _drive_benchmark_chain(
         _benchmark_chain_job(
             experiment, iteration, variant, robot_config, trajectory, data_dir, count, config,
-            reference_start, shape,
+            reference_start, shape, score_duration=score_duration,
         )
     )
     for line in lines:
@@ -839,8 +895,13 @@ def _benchmark_chain_job(
     config: dict,
     reference_start: tuple[float, float, float],
     shape: str | None = None,
+    score_duration: float | None = None,
 ) -> dict:
     """Everything one chain needs, as plain data.
+
+    ``score_duration`` is the length of the unbridged reference: the runs are
+    scored over it only (``mujoco_sim.deploy.run_deployment``). ``None`` scores
+    whole runs.
 
     The seeds are resolved here rather than inside the chain so the job carries
     no ``Experiment``: chains are driven in worker *processes*, and the seeds
@@ -860,6 +921,7 @@ def _benchmark_chain_job(
         "divergence_radius": float(config["divergence_radius"]),
         "start_offset_radius": float(config["start_offset_radius"]),
         "start_offset_angle": float(config["start_offset_angle"]),
+        "score_duration": None if score_duration is None else float(score_duration),
         "seeds": [
             _benchmark_seed(experiment, iteration, index) + shape_offset for index in range(count)
         ],
@@ -910,6 +972,7 @@ def _drive_benchmark_chain(job: dict) -> tuple[list[Path], list[dict], list[str]
             start_pose=start_pose,
             start_offset_radius=job["start_offset_radius"],
             start_offset_angle=job["start_offset_angle"],
+            score_duration=job.get("score_duration"),
         )
         written.append(result.log_path)
         placement = "placed by hand" if start_pose is None else "left by the previous run"
@@ -934,6 +997,11 @@ def _drive_benchmark_chain(job: dict) -> tuple[list[Path], list[dict], list[str]
                 "start_offset": [float(value) for value in offset],
                 "tracking_rmse": float(result.tracking_rmse),
                 "tracking_max": float(result.tracking_max),
+                # tracking_rmse/tracking_max/duty_saturated_fraction cover the
+                # first scored_duration seconds (the unbridged reference);
+                # tracking_rmse_full is the whole run, bridge included.
+                "scored_duration": float(result.scored_duration),
+                "tracking_rmse_full": float(result.tracking_rmse_full),
                 "distance_to_start": float(distance_to_start),
                 "diverged": bool(diverged),
                 "max_duty": float(result.max_duty),
@@ -1162,6 +1230,15 @@ def _reference_start_pose(trajectory: Path) -> tuple[float, float, float]:
 
     start = load_pololu_reference(trajectory).states[0]
     return (float(start[0]), float(start[1]), float(start[2]))
+
+
+def _reference_duration(trajectory: Path) -> float:
+    """How long the firmware follows ``trajectory`` [s]: ``SetpointFinder::duration``,
+    states times dt, the same rule as ``mujoco_sim.firmware``."""
+    from wmr_simulator.pololu.reference_importer import load_reference
+
+    reference = load_reference(trajectory)
+    return float(reference.states.shape[0] * reference.dt)
 
 
 def _is_self_closing(trajectory: Path) -> bool:
@@ -1865,17 +1942,21 @@ def stage_train_residual(experiment: Experiment, iteration: int) -> Path:
         f"({', '.join(f'{ITERATION_PREFIX}{index:02d}' for index in pooled_iterations)}); "
         f"{len(diverged_logs)} diverged run(s) left out"
     )
-    if not usable_logs:
+    # Training holds whole logs out for validation, so it needs two.
+    if len(usable_logs) < 2:
         paths.residual_model.unlink(missing_ok=True)
         save_yaml(
             paths.residual_skipped,
             {
-                "reason": "every pooled identification log diverged (residual.max_position_error)",
+                "reason": (
+                    f"{len(usable_logs)} usable pooled identification log(s), training needs 2 "
+                    "(the rest diverged, residual.max_position_error)"
+                ),
                 "max_position_error": float(config["max_position_error"]),
                 "diverged_logs": {str(path): round(error, 4) for path, error in diverged_logs},
             },
         )
-        print(f"No usable log: no residual this iteration ({paths.residual_skipped}).")
+        print(f"Fewer than 2 usable logs: no residual this iteration ({paths.residual_skipped}).")
         return paths.residual_skipped
     paths.residual_skipped.unlink(missing_ok=True)
 
@@ -1900,6 +1981,11 @@ def stage_train_residual(experiment: Experiment, iteration: int) -> Path:
         # log_dirs are the data/ directories themselves; no subdirectories to walk.
         recursive=False,
         out_dir=str(paths.visualize_dir / "residual model"),
+        training=str(config["training"]),
+        closed_loop_window_s=float(config["closed_loop_window_s"]),
+        closed_loop_stride_s=float(config["closed_loop_stride_s"]),
+        closed_loop_steps=int(config["closed_loop_steps"]),
+        closed_loop_learning_rate=float(config["closed_loop_learning_rate"]),
     )
     diagnostics_path = paths.results_dir / "residual_diagnostics.yaml"
     if diagnostics_path.is_file():

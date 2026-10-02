@@ -255,6 +255,25 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         # start, so the experiment can be repeated without repositioning the robot.
         "bridge_wait_time": 1.5,
         "bridge_time": 8.5,
+        # From iteration 2 the reference after the identified phase is this many
+        # trajectories of the previous iteration's tuning set (the most
+        # demanding one, then the medoid; trajectory_optimization.
+        # reference_extension), so the residual learns where the tuner rolls
+        # out; iteration 1 keeps the fast phase. The segments are mirrored,
+        # reordered and re-aimed by turns in place (appended_turn_duration each)
+        # to stay inside the problem's environment box by appended_box_margin.
+        # The return is then short: 3 s + 2 x 4 s (+ up to 2 x 0.75 s of turns)
+        # + 0.5 s + 3.5 s <= 16.5 s, about 47 kB bridged (limit 48 KiB). One
+        # SD-card swap per iteration as before. Measured 2026-10-02 (MuJoCo,
+        # S-A-R v4 seeds 0-4, post hoc at iteration 5, closed-loop residual):
+        # held-out fidelity -2.4 % (5/5) and retuned tracking -1.1 mm (5/5);
+        # one trajectory was inconsistent, the fast phase made the residual
+        # 16 % worse. 0 keeps the designed phases.
+        "append_tuning_trajectories": 2,
+        "appended_bridge_wait_time": 0.5,
+        "appended_bridge_time": 3.5,
+        "appended_turn_duration": 0.75,
+        "appended_box_margin": 0.15,
     },
     "identification": {
         # 150 steps at 1e-4 (2026-09-09 to 09-13) does not converge: every
@@ -290,17 +309,13 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         # Per-matrix spectral-norm cap on the experts (Lipschitz bound); 0 disables.
         "spectral_norm_cap": 1.5,
         # Gaussian gate bandwidth = intra-cluster RMS distance * this (>1 overlaps).
-        # 0.25 since 2026-10-01: at 1.0 the gate stayed at ~1 everywhere, so the
-        # yaw deficit the residual learned from slipping fast phases applied to
-        # every regime, and the tuner fought it with stiff heading gains
-        # (Phase 2 v3 S-F-R: ky/kth on the box in 4/5 seeds, 175 divergences).
-        # Retuning iteration 2 (S-F-R seeds 0/2/3, S-A-R seed 0), ky/kth at gate
-        # 1.0 / 0.5 / 0.25: s0 20/20, 20/17.6, 11.5/7.7; s2 8.0/19.4, 6.4/11.6,
-        # 4.0/6.4; s3 8.2/13.2, 8.2/9.2, 8.2/9.2. The price: the residual then
-        # explains 2-39 % of the yaw targets instead of 38-78 %, i.e. it mostly
-        # switches itself off in the fast regime. An additive twist correction
-        # cannot represent friction-limited slip, which feedback cannot beat.
-        "gate_bandwidth_scale": 0.25,
+        # 1.0 again since 2026-10-02 with closed-loop training. 0.25 (2026-10-01)
+        # was a fix for the one-step residual, whose yaw deficit from slipping
+        # fast phases leaked into every regime at 1.0 (Phase 2 v3 S-F-R: ky/kth
+        # on the box); at 0.25 it switched itself off (2-4 % of its target
+        # explained). With closed-loop training the gate at 0.25 leaves the
+        # residual inert (0 % fidelity change), 1.0 is best (-19.5 %), 4.0 -7 %.
+        "gate_bandwidth_scale": 1.0,
         # Null "zero expert" distance in bandwidths; beyond it the residual -> 0.
         "ood_sigma": 3.0,
         "epochs": 1500,
@@ -309,6 +324,18 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         "validation_split": 0.2,
         "output_reg_weight": 1e-2,
         "resample_uniform": True,
+        # "closed_loop" (residual_model.closed_loop) or "one_step". The one-step
+        # fit lowers the one-step error but makes the closed loop predict
+        # held-out MuJoCo runs worse (+20 % position error at gate 1.0, 5 seeds;
+        # a teacher-forced multi-step loss +23..45 %). Closed-loop windows from a
+        # zero residual: -19.5 % where the data covers the regime (1 s windows;
+        # 0.5 s -5 %, 2 s -13 %; size, cap, output penalty and 3x the steps
+        # within a few % of these settings). epochs only applies to one_step.
+        "training": "closed_loop",
+        "closed_loop_window_s": 1.0,
+        "closed_loop_stride_s": 1.0,
+        "closed_loop_steps": 400,
+        "closed_loop_learning_rate": 1e-3,
         # Pool the decoded logs of every iteration up to the one being trained
         # (never later ones, so rerunning an old iteration stays reproducible).
         # One-step training is gain-independent, so iterations with different
@@ -326,8 +353,10 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         # iteration-1 logs learned to correct the badly identified wheelbase of
         # that iteration (slow-phase yaw slope -0.3), and the residual-tuned
         # controllers came out stiffer than the nominal ones in every seed. 0
-        # disables the screen.
-        "max_position_error": 0.25,
+        # disables the screen. 0.5 since 2026-10-02: the appended tuning
+        # trajectories are driven by the previous controller, which in iteration
+        # 2 (the first tuned one) leaves them by up to 0.44 m without diverging.
+        "max_position_error": 0.5,
     },
     "tuning_trajectories": {
         # Design on the residual-augmented plant, using *this* iteration's

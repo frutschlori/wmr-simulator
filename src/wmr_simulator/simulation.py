@@ -67,12 +67,16 @@ class SimulationPipeline:
         reference_trajectories_dir: str | None = None,
         window_length: int | None = None,
         residual_model=None,
+        sim_time: float | None = None,
     ):
         # Optional learned residual dynamics (residual_model.residual.ResidualEnsemble);
         # None keeps the nominal dynamics untouched.
         self.residual_model = residual_model
         with open(problem_path, "r", encoding="utf-8") as file:
             problem_cfg = yaml.safe_load(file)
+        # A recorded run is replayed over its own length, not the problem's.
+        if sim_time is not None:
+            problem_cfg["sim_time"] = float(sim_time)
         self.problem = apply_noise_configuration(problem_cfg)
 
         self.problem_path = problem_path
@@ -220,10 +224,16 @@ class SimulationPipeline:
         reference_states = self.reference_states if reference_states is None else reference_states
         return jnp.asarray(reference_states[0, :3], dtype=jnp.float32)
 
-    def _init_states(self, robot_key, estimator_key, reference_states=None, start_pose=None):
+    def _init_states(self, robot_key, estimator_key, reference_states=None, start_pose=None, wheel_speeds=None):
         pose0 = self.initial_reference_pose(reference_states) if start_pose is None else start_pose
         robot_state = self.robot.get_init_state(key=robot_key, init_pose=pose0)
         estimator_state = self.estimator.get_init_state(key=estimator_key, start_pose=pose0)
+        if wheel_speeds is not None:
+            # A rollout that starts mid-run (residual_model.closed_loop): the
+            # wheels already turn, and the estimator has measured it.
+            wheel_speeds = jnp.asarray(wheel_speeds, dtype=jnp.float32)
+            robot_state = robot_state._replace(wheel_speeds=wheel_speeds)
+            estimator_state = estimator_state._replace(u_hat=wheel_speeds, u_true=wheel_speeds, u_lp=wheel_speeds)
         controller_state = initial_controller_state()
         return robot_state, estimator_state, controller_state
 
@@ -246,6 +256,7 @@ class SimulationPipeline:
         reference_states=None,
         residual_model=None,
         initial_pose=None,
+        initial_wheel_speeds=None,
     ) -> SimulationLog:
         """Roll out the closed loop along ``reference_states``.
 
@@ -253,7 +264,8 @@ class SimulationPipeline:
         somewhere other than the reference's first pose. Comparing a simulated
         run against a recorded one needs it: the real robot is never placed
         exactly on the reference start, and the initial offset it has to drive
-        out is part of what the tracking error measures.
+        out is part of what the tracking error measures. ``initial_wheel_speeds``
+        [right, left] starts it moving (default at rest).
         """
         if wheel_speed_log_source not in {"estimated", "true"}:
             raise ValueError("wheel_speed_log_source must be 'estimated' or 'true'.")
@@ -267,7 +279,7 @@ class SimulationPipeline:
             if initial_pose is None
             else jnp.asarray(initial_pose, dtype=jnp.float32)
         )
-        carry0 = self._init_states(robot_key, estimator_key, reference_states, start_pose)
+        carry0 = self._init_states(robot_key, estimator_key, reference_states, start_pose, initial_wheel_speeds)
 
         if controller_gains is not None:
             controller_gains = controller_gains_array(controller_gains)

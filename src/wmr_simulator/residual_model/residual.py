@@ -833,7 +833,14 @@ def simulate_closed_loop_on_log_reference(
         else None
     )
 
-    pipeline = SimulationPipeline(problem_path=problem_path, seed=seed, residual_model=model)
+    # Over the log's own length: the problem's sim_time would cut long runs.
+    reference_time = np.asarray(log.reference.time_s, dtype=float)
+    pipeline = SimulationPipeline(
+        problem_path=problem_path,
+        seed=seed,
+        residual_model=model,
+        sim_time=float(reference_time[-1] - reference_time[0]),
+    )
     # The hidden robot is the plant: swap the recorded controller's belief for
     # the residual's own nominal model.
     pipeline.robot = DiffDrive(robot_cfg=plant_robot_cfg, dt=pipeline.wheel_dt)
@@ -841,19 +848,38 @@ def simulate_closed_loop_on_log_reference(
         pipeline._fit_reference_states(np.asarray(log.reference.states, dtype=float)),
         dtype=jnp.float32,
     )
-    # Start where the real robot started, not where the reference starts: the
-    # robot is placed by hand and the initial offset it has to drive out is part
-    # of the recorded tracking error. Simulating from the reference start hands
-    # the sim a head start the real run never had.
+    # Start where the real robot was when its controller took the first
+    # reference sample -- not where the reference starts (the robot is placed
+    # by hand, and the offset it drives out is part of the recorded error), and
+    # not at the log's first pose either: the reference stream starts later than
+    # the pose stream (40 ms on the MuJoCo logs, about 8 cm at 2 m/s), and the
+    # simulated controller takes reference sample 0 at its own t = 0.
+    t0 = float(reference_time[0])
+    pose_time = np.asarray(log.pose.time_s, dtype=float)
+    pose = np.asarray(log.pose.states, dtype=float)
+    initial_pose = [np.interp(t0, pose_time, pose[:, 0]), np.interp(t0, pose_time, pose[:, 1]),
+                    np.interp(t0, pose_time, np.unwrap(pose[:, 2]))]
     sim_log = pipeline.run_closed_loop(
         pipeline.hidden_params,
         use_hidden_robot=True,
         controller_gains=pipeline.gains,
         schedule_params=schedule_params,
         reference_states=reference_states,
-        initial_pose=jnp.asarray(log.pose.states[0], dtype=jnp.float32),
+        initial_pose=jnp.asarray(initial_pose, dtype=jnp.float32),
     )
-    return sim_log, log
+    # On the recording's clock, so the two logs compare sample for sample.
+    return shift_simulation_log_time(sim_log, t0), log
+
+
+def shift_simulation_log_time(sim_log, offset: float):
+    """The same simulated log with every time axis moved by ``offset`` seconds."""
+    return sim_log._replace(
+        reference=sim_log.reference._replace(time_s=sim_log.reference.time_s + offset),
+        wheel=sim_log.wheel._replace(time_s=sim_log.wheel.time_s + offset),
+        pose=sim_log.pose._replace(
+            time_s=sim_log.pose.time_s + offset, command_time_s=sim_log.pose.command_time_s + offset
+        ),
+    )
 
 
 def robot_params_from_problem(problem_path: str):
@@ -956,8 +982,19 @@ def train_from_logs(
     resample_uniform: bool = True,
     recursive: bool = True,
     out_dir: str = "visualize",
+    training: str = "one_step",
+    closed_loop_window_s: float = 1.0,
+    closed_loop_stride_s: float = 1.0,
+    closed_loop_steps: int = 400,
+    closed_loop_learning_rate: float = 1e-3,
 ) -> ResidualEnsemble:
     """Build datasets from all logs under ``log_dirs``, train, save checkpoint + plots.
+
+    ``training`` is ``"one_step"`` (``train_residual_ensemble``, ``epochs`` of
+    Adam on the one-step targets) or ``"closed_loop"``: the gate and the
+    normalization are fitted on the one-step data as always, then the residual
+    starts from zero and is trained on closed-loop windows of the training logs
+    (``residual_model.closed_loop``; ``epochs`` is unused).
 
     ``log_dirs`` may span several active-learning iterations: one-step training is
     gain-independent (the descriptor is built from the logged duty, so whatever
@@ -984,11 +1021,15 @@ def train_from_logs(
     # One nominal model for every log: the one the residual will be added to.
     params = robot_params_from_problem(problem)
     print(f"Residual targets against the nominal model of {problem}")
+    if training not in ("one_step", "closed_loop"):
+        raise ValueError(f"training must be 'one_step' or 'closed_loop', got {training!r}")
     datasets = []
+    logs = []
     for path in log_paths:
         log = load_pololu_traj_control_log(path, clip_after_first_trajectory=clip_after_first_trajectory)
         dataset = build_residual_dataset(log, params, resample_uniform=resample_uniform)
         datasets.append(dataset)
+        logs.append(log)
         print(f"{path}: {len(dataset['features'])} samples")
 
     train_indices, validation_indices = split_datasets_by_file(datasets, validation_split, seed)
@@ -1014,11 +1055,18 @@ def train_from_logs(
         spectral_norm_cap=spectral_norm_cap,
         gate_bandwidth_scale=gate_bandwidth_scale,
         ood_sigma=ood_sigma,
-        epochs=epochs,
+        epochs=epochs if training == "one_step" else 0,
         batch_size=batch_size,
         learning_rate=learning_rate,
         output_reg_weight=output_reg_weight,
     )
+    closed_loop_report = None
+    if training == "closed_loop":
+        model, closed_loop_report = _train_closed_loop_from_logs(
+            model, problem, logs, log_paths, train_indices, validation_indices,
+            window_s=closed_loop_window_s, stride_s=closed_loop_stride_s,
+            steps=closed_loop_steps, learning_rate=closed_loop_learning_rate,
+        )
 
     config = {
         "input_dim": int(train_features.shape[1]),
@@ -1041,8 +1089,10 @@ def train_from_logs(
         "gate_bandwidth_scale": gate_bandwidth_scale,
         "ood_sigma": ood_sigma,
         "seed": seed,
-        "final_train_loss": history["train_loss"][-1],
-        "final_validation_loss": history["validation_loss"][-1],
+        "training": training,
+        "final_train_loss": history["train_loss"][-1] if history["train_loss"] else None,
+        "final_validation_loss": history["validation_loss"][-1] if history["validation_loss"] else None,
+        "closed_loop": closed_loop_report,
         "trained_at": datetime.now().isoformat(timespec="seconds"),
     }
     save_residual_model(out, model, config, params, metadata)
@@ -1052,6 +1102,8 @@ def train_from_logs(
         model, train_features, train_targets, validation_features, validation_targets
     )
     diagnostics["num_logs"] = len(log_paths)
+    if closed_loop_report is not None:
+        diagnostics["closed_loop"] = closed_loop_report
     diagnostics_path = Path(out).with_name("residual_diagnostics.yaml")
     with diagnostics_path.open("w", encoding="utf-8") as file:
         yaml.safe_dump(diagnostics, file, sort_keys=False)
@@ -1062,7 +1114,8 @@ def train_from_logs(
         f"{diagnostics['gate_weight_train']['p50']:.3f}"
     )
 
-    plot_training_history(history, out_dir=out_dir)
+    if history["train_loss"]:
+        plot_training_history(history, out_dir=out_dir)
     plot_gate_map(model, train_features, out_dir=out_dir)
     for split_name, features, targets, segments in (
         ("train", train_features, train_targets, train_segments),
@@ -1098,6 +1151,51 @@ def train_from_logs(
     )
     print(f"Plots saved to {out_dir}/")
     return model
+
+
+def _train_closed_loop_from_logs(
+    model, problem, logs, log_paths, train_indices, validation_indices, *, window_s, stride_s, steps, learning_rate
+):
+    """Closed-loop training on the training logs' windows; reports the window
+    loss of the nominal plant and of the trained residual on both splits."""
+    from wmr_simulator.residual_model import closed_loop
+
+    plant_robot = yaml.safe_load(open(problem, "r", encoding="utf-8"))["robot"]
+    pipeline = closed_loop.window_pipeline(problem, plant_robot, window_s)
+
+    def windows_of(indices):
+        return closed_loop.build_windows(
+            [logs[i] for i in indices],
+            [controller_problem_for_log(str(log_paths[i]), problem) for i in indices],
+            window_s=window_s, stride_s=stride_s,
+            geometry_dt=pipeline.geometry_dt, wheel_dt=pipeline.wheel_dt,
+        )
+
+    train_windows = windows_of(train_indices)
+    if train_windows is None:
+        raise ValueError(f"No training log is longer than one closed-loop window ({window_s} s).")
+    validation_windows = windows_of(validation_indices)
+    model = closed_loop.zero_residual(model)
+    train_loss = closed_loop.window_loss_fn(pipeline, train_windows)
+    print(f"Closed-loop residual training: {len(train_windows)} windows of {window_s} s "
+          f"from {len(train_indices)} log(s), {steps} Adam steps at {learning_rate}")
+    model, history = closed_loop.train_closed_loop(model, train_loss, steps=steps, learning_rate=learning_rate)
+    report = {
+        "window_s": float(window_s),
+        "train_windows": len(train_windows),
+        "train_loss_nominal": history[0] if history else None,
+        "train_loss": float(jax.jit(train_loss)(model)[0]),
+    }
+    if validation_windows is not None:
+        validation_loss = jax.jit(closed_loop.window_loss_fn(pipeline, validation_windows))
+        report["validation_windows"] = len(validation_windows)
+        report["validation_loss_nominal"] = float(validation_loss(closed_loop.zero_residual(model))[0])
+        report["validation_loss"] = float(validation_loss(model)[0])
+    print(f"Closed-loop window loss (nominal -> residual): train {report['train_loss_nominal']:.4f} -> "
+          f"{report['train_loss']:.4f}" + (
+              f", validation {report['validation_loss_nominal']:.4f} -> {report['validation_loss']:.4f}"
+              if "validation_loss" in report else ""))
+    return model, report
 
 
 def evaluate_on_log(

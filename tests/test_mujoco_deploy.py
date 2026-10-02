@@ -156,3 +156,25 @@ def test_the_robot_actually_drives_the_trajectory(tmp_path, robot_config, short_
     assert result.tracking_rmse < 0.10
     assert result.final_pose_error < 0.10
     assert result.duty_saturated_fraction == 0.0
+
+
+def test_scores_can_be_limited_to_the_start_of_the_run(tmp_path, robot_config, short_trajectory):
+    """How a bridged benchmark reference is scored over its unbridged part only:
+    the run is driven to the end, but only the first score_duration seconds count."""
+    full = run_deployment(robot_config, short_trajectory, tmp_path / "full", seed=0)
+    assert full.tracking_rmse == full.tracking_rmse_full
+    assert full.scored_duration == pytest.approx(full.duration)
+
+    same = run_deployment(
+        robot_config, short_trajectory, tmp_path / "same", seed=0, score_duration=full.duration
+    )
+    assert same.tracking_rmse == full.tracking_rmse
+    assert same.duty_saturated_fraction == full.duty_saturated_fraction
+
+    start = run_deployment(robot_config, short_trajectory, tmp_path / "start", seed=0, score_duration=1.0)
+    assert start.scored_duration == pytest.approx(1.0)
+    assert start.tracking_rmse_full == full.tracking_rmse_full  # the same run, scored differently
+    assert start.tracking_rmse != full.tracking_rmse
+
+    with pytest.raises(ValueError):
+        run_deployment(robot_config, short_trajectory, tmp_path / "none", seed=0, score_duration=0.0)

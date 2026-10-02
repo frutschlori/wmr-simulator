@@ -200,6 +200,26 @@ def test_a_reference_that_does_not_close_is_bridged(experiment, tmp_path):
     assert (paths.benchmark_dir / "benchmark_arc_bridge.JSN").is_file()
 
 
+def test_a_bridged_run_is_scored_over_the_reference_alone(experiment, tmp_path):
+    """The wait at the goal and the slow return path are driven but not scored,
+    so they cannot dilute the position RMSE of an open reference."""
+    import yaml
+
+    arc = write_arc_jsn(tmp_path / "benchmark_arc.JSN", duration=2.0)
+    exp = experiment()
+    exp.config["benchmark"]["trajectory"] = str(arc)
+    exp.config["benchmark"]["num_runs"] = 1
+    paths = exp.paths(1)
+
+    stage_run_benchmark(exp, 1)
+
+    report = yaml.safe_load(paths.benchmark_result.read_text())
+    run = report["trajectories"]["benchmark_arc"]["variants"]["static"]["runs"][0]
+    assert run["scored_duration"] == pytest.approx(41 * 0.05)
+    assert run["tracking_rmse_full"] > 0.0
+    assert run["tracking_rmse"] != run["tracking_rmse_full"]
+
+
 def test_a_self_closing_reference_is_driven_as_it_is(experiment):
     exp = experiment(num_runs=1)
     paths = exp.paths(1)
