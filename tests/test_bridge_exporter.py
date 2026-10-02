@@ -62,3 +62,19 @@ def test_zero_wait_time_adds_no_wait_samples(tmp_path):
     num_with = json.loads(with_wait.read_text())["result"][0]["num_states"]
     num_without = json.loads(without_wait.read_text())["result"][0]["num_states"]
     assert num_with - num_without == round(2.0 / dt)
+
+
+def test_turn_drive_turn_return_is_drivable():
+    import numpy as np
+
+    from wmr_simulator.pololu.bridge_exporter import turn_drive_turn_states
+
+    start, goal = np.array([1.0, 1.5, 2.5]), np.array([-0.5, -1.0, 0.0])
+    states = turn_drive_turn_states(start, goal, bridge_time=3.5, dt=0.05, turn_time=0.75, peak_speed=1.5)
+    np.testing.assert_allclose(states[0, :3], start)
+    np.testing.assert_allclose(states[-1, :2], goal[:2], atol=1e-9)
+    assert abs((states[-1, 2] - goal[2] + np.pi) % (2 * np.pi) - np.pi) < 1e-9
+    assert np.hypot(states[:, 3], states[:, 4]).max() <= 1.5 + 1e-9
+    assert np.abs(states[:, 5]).max() < 10.0
+    # No jumps: every step moves at most peak speed x dt.
+    assert np.linalg.norm(np.diff(states[:, :2], axis=0), axis=1).max() <= 1.5 * 0.05 + 1e-9
