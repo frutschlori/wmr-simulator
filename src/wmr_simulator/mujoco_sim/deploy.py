@@ -61,11 +61,18 @@ class DeploymentResult:
     # of drawing a new placement, which is what driving a bridged trajectory
     # buys on the real robot: nobody carries it back to the start.
     final_pose: tuple[float, float, float]
+    # Scored over the first ``scored_duration`` seconds of the trajectory only
+    # (the whole run when the caller gives no ``score_duration``), so that the
+    # wait and the return path of a bridged reference do not dilute the score.
     tracking_rmse: float
     tracking_max: float
     final_pose_error: float
     max_duty: float
     duty_saturated_fraction: float
+    scored_duration: float
+    # The same position RMSE over the whole run, bridge included: what every
+    # run before 2026-10-02 reported as ``tracking_rmse``.
+    tracking_rmse_full: float
 
 
 def run_deployment(
@@ -81,6 +88,7 @@ def run_deployment(
     plant_config: HiddenPlantConfig | None = None,
     boot_time_ms: int = DEFAULT_BOOT_TIME_MS,
     observer: Callable[["object", MujocoPlant], None] | None = None,
+    score_duration: float | None = None,
 ) -> DeploymentResult:
     """Execute ``trajectory`` under ``robot_config`` and write a ``TRxx`` log.
 
@@ -94,9 +102,17 @@ def run_deployment(
     is how the video renderer gets at the run without a second copy of this
     loop; it may read the plant's ground truth, which is why it is a caller's
     hook and not something the log ever sees.
+
+    ``score_duration`` limits the ground-truth scores (position RMSE and
+    maximum, duty saturation) to the first ``score_duration`` seconds of the
+    trajectory. A bridged reference passes the duration of its unbridged
+    original, so the wait at the goal and the slow return path are driven but
+    not scored. ``None`` scores the whole run.
     """
     from wmr_simulator.pololu.reference_importer import load_reference
 
+    if score_duration is not None and score_duration <= 0.0:
+        raise ValueError(f"score_duration must be positive, got {score_duration}")
     config = FirmwareConfig.from_file(robot_config)
     reference = load_reference(trajectory)
 
@@ -127,6 +143,10 @@ def run_deployment(
 
     errors: list[float] = []
     duties: list[float] = []
+    errors_full: list[float] = []
+    # Small tolerance so that score_duration = the run's own duration scores
+    # exactly the ticks an unlimited score would.
+    score_end = math.inf if score_duration is None else float(score_duration) + 1e-9
     with BinaryLogWriter(log_path) as writer:
         for tick in firmware.clock(plant.timestep, boot_time_ms).ticks(firmware.duration):
             if tick.mocap:
@@ -140,7 +160,8 @@ def run_deployment(
                 plant.set_duty(*duty)
                 writer.motor(tick.t_ms, *duty)
                 writer.encoder(tick.t_ms, *firmware.inner.omega_lp)
-                duties.append(float(np.abs(duty).max()))
+                if tick.time <= score_end:
+                    duties.append(float(np.abs(duty).max()))
             if tick.outer:
                 outputs = firmware.outer_tick(tick.time)
                 setpoint = outputs.setpoint
@@ -152,7 +173,10 @@ def run_deployment(
                 writer.wheel_cmd(output_t_ms, outputs.omega_left, outputs.omega_right)
                 writer.tracking_error(output_t_ms, outputs.x_err, outputs.y_err, outputs.yaw_err)
                 true_pose = plant.pose()
-                errors.append(math.hypot(setpoint.x_des - true_pose[0], setpoint.y_des - true_pose[1]))
+                error = math.hypot(setpoint.x_des - true_pose[0], setpoint.y_des - true_pose[1])
+                errors_full.append(error)
+                if tick.time <= score_end:
+                    errors.append(error)
             plant.step()
             if observer is not None:
                 observer(tick, plant)
@@ -160,6 +184,9 @@ def run_deployment(
 
     error_array = np.asarray(errors)
     duty_array = np.asarray(duties)
+    if error_array.size == 0 or duty_array.size == 0:
+        raise ValueError(f"score_duration {score_duration} s leaves no tick to score.")
+    error_full_array = np.asarray(errors_full)
     return DeploymentResult(
         log_path=log_path,
         num_records=num_records,
@@ -172,6 +199,8 @@ def run_deployment(
         final_pose_error=float(np.linalg.norm(plant.pose()[:2] - reference.states[-1, :2])),
         max_duty=float(duty_array.max()),
         duty_saturated_fraction=float(np.mean(duty_array >= 0.999)),
+        scored_duration=float(firmware.duration if score_duration is None else min(score_duration, firmware.duration)),
+        tracking_rmse_full=float(np.sqrt((error_full_array**2).mean())),
     )
 
 
