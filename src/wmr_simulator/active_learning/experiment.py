@@ -353,10 +353,13 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         # iteration-1 logs learned to correct the badly identified wheelbase of
         # that iteration (slow-phase yaw slope -0.3), and the residual-tuned
         # controllers came out stiffer than the nominal ones in every seed. 0
-        # disables the screen. 0.5 since 2026-10-02: the appended tuning
-        # trajectories are driven by the previous controller, which in iteration
-        # 2 (the first tuned one) leaves them by up to 0.44 m without diverging.
-        "max_position_error": 0.5,
+        # disables the screen. Tried at 0.5 m on 2026-10-02 (Phase 2 v5): S-A-R
+        # seed 3 kept identification logs that left the slow phase by 0.49 m
+        # (14 cm RMS); the closed-loop residual learned that tracking as plant
+        # behaviour (window loss 193 -> 61, against 2-10 elsewhere) and the
+        # tuner answered with ky on the lower bound and kth 17 (23 of 30
+        # benchmark runs diverged). Healthy logs stay at 0.04-0.23 m.
+        "max_position_error": 0.25,
     },
     "tuning_trajectories": {
         # Design on the residual-augmented plant, using *this* iteration's
