@@ -51,6 +51,59 @@ def bridge_reference_states(start_pose: np.ndarray, goal_pose: np.ndarray, bridg
     return reference_states
 
 
+def turn_drive_turn_states(
+    start_pose: np.ndarray,
+    goal_pose: np.ndarray,
+    bridge_time: float,
+    dt: float,
+    turn_time: float,
+    peak_speed: float = 1.5,
+) -> np.ndarray:
+    """A return a differential drive can follow even when it is short: turn on
+    the spot toward the goal, drive a straight minimum-jerk line to it, turn on
+    the spot to the goal heading. The free-form bridge (``bridge_reference_states``)
+    enforces both end headings on one smooth curve; squeezed into a few seconds
+    it loops and spins (yaw-rate peaks of 30-66 rad/s), the robot cannot follow,
+    and in MuJoCo 13-17 % of the chained repeats then started more than 0.5 rad
+    off heading (3 % with the 8.5 s bridge). ``bridge_time`` is the minimum;
+    the line takes longer when it would otherwise exceed ``peak_speed`` (the
+    minimum-jerk peak is 1.875 x the mean speed). Starts at ``start_pose``
+    (included)."""
+    from wmr_simulator.trajectory_optimization.reference_extension import turn_in_place
+
+    def wrap(angle):
+        return (angle + np.pi) % (2.0 * np.pi) - np.pi
+
+    start = np.zeros(8)
+    start[:3] = start_pose[:3]
+    states = [start[None, :]]
+    offset = np.asarray(goal_pose[:2], dtype=float) - start[:2]
+    distance = float(np.linalg.norm(offset))
+    heading = float(start[2])
+    if distance > 1e-3:
+        direction = float(np.arctan2(offset[1], offset[0]))
+        states.append(turn_in_place(start, wrap(direction - heading), turn_time, dt, 8))
+        heading = heading + wrap(direction - heading)
+        drive_time = max(bridge_time - 2.0 * turn_time, 1.875 * distance / peak_speed)
+        steps = max(int(np.ceil(drive_time / dt)), 1)
+        duration = steps * dt
+        tau = np.arange(1, steps + 1) / steps
+        shape = 10 * tau**3 - 15 * tau**4 + 6 * tau**5
+        speed = distance * (30 * tau**2 - 60 * tau**3 + 30 * tau**4) / duration
+        accel = distance * (60 * tau - 180 * tau**2 + 120 * tau**3) / duration**2
+        drive = np.zeros((steps, 8))
+        drive[:, 0] = start[0] + offset[0] * shape
+        drive[:, 1] = start[1] + offset[1] * shape
+        drive[:, 2] = heading
+        drive[:, 3], drive[:, 4] = speed * np.cos(direction), speed * np.sin(direction)
+        drive[:, 6], drive[:, 7] = accel * np.cos(direction), accel * np.sin(direction)
+        states.append(drive)
+    end = states[-1][-1].copy()
+    end[3:] = 0.0
+    states.append(turn_in_place(end, wrap(float(goal_pose[2]) - heading), turn_time, dt, 8))
+    return np.vstack(states)
+
+
 def bridged_output_path(input_path: str | Path) -> Path:
     input_path = Path(input_path)
     return input_path.with_name(f"{input_path.stem}_bridge.JSN")
@@ -67,8 +120,12 @@ def append_bridge_reference(
     time_stamp: float = 0.0,
     decimals: int = 6,
     plot_path: str | Path | None = None,
+    turn_time: float | None = None,
 ) -> Path:
-    """Write ``<name>_bridge.JSN`` (default: next to the input) and return its path."""
+    """Write ``<name>_bridge.JSN`` (default: next to the input) and return its path.
+
+    With ``turn_time`` the return is turn - straight line - turn
+    (``turn_drive_turn_states``) instead of the free-form bridge."""
     if output_path is None:
         output_path = bridged_output_path(input_path)
     reference = load_pololu_reference(input_path, result_index=result_index)
@@ -82,12 +139,17 @@ def append_bridge_reference(
     reference_states[-1, 3:] = 0.0
 
     wait_states = wait_reference_states(reference_states[-1, :3], wait_time, reference.dt)
-    bridge_states = bridge_reference_states(
-        start_pose=reference_states[-1, :3],
-        goal_pose=reference_states[0, :3],
-        bridge_time=bridge_time,
-        dt=reference.dt,
-    )
+    if turn_time is None:
+        bridge_states = bridge_reference_states(
+            start_pose=reference_states[-1, :3],
+            goal_pose=reference_states[0, :3],
+            bridge_time=bridge_time,
+            dt=reference.dt,
+        )
+    else:
+        bridge_states = turn_drive_turn_states(
+            reference_states[-1, :3], reference_states[0, :3], bridge_time, reference.dt, float(turn_time)
+        )
     full_reference_states = np.vstack([reference_states, wait_states, bridge_states[1:]])
 
     output_path = Path(output_path)

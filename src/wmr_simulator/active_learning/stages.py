@@ -351,6 +351,8 @@ def stage_plan_identification_trajectory(experiment: Experiment, iteration: int)
         wait_time=float(config[f"{bridge}_wait_time"]),
         bridge_time=float(config[f"{bridge}_time"]),
         plot_path=identification_plot_dir / "identification_trajectory_bridge.pdf",
+        # A short return has to be turn - line - turn to be drivable.
+        turn_time=float(config["appended_turn_duration"]) if appended else None,
     )
     print(f"Exported bridged repeat variant: {bridged_path}")
     print(f"Copy {jsn_path.name} and {paths.robotcfg_cfg.name} to the robot SD card, run the")

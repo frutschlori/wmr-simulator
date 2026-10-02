@@ -262,15 +262,19 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         # out; iteration 1 keeps the fast phase. The segments are mirrored,
         # reordered and re-aimed by turns in place (appended_turn_duration each)
         # to stay inside the problem's environment box by appended_box_margin.
-        # The return is then short: 3 s + 2 x 4 s (+ up to 2 x 0.75 s of turns)
-        # + 0.5 s + 3.5 s <= 16.5 s, about 47 kB bridged (limit 48 KiB). One
+        # The return is turn - straight line - turn (pololu.bridge_exporter.
+        # turn_drive_turn_states; 3.5 s, longer when the line would exceed
+        # 1.5 m/s): the free-form bridge squeezed into 3.5 s spun at up to 66
+        # rad/s and left 13-17 % of the chained repeats > 0.5 rad off heading.
+        # 3 s + 2 x 4 s (+ up to 2 x 0.75 s of turns) + 0.25 s + 3.5-4.1 s
+        # <= 17.1 s, under the bridged JSN's 48 KiB. One
         # SD-card swap per iteration as before. Measured 2026-10-02 (MuJoCo,
         # S-A-R v4 seeds 0-4, post hoc at iteration 5, closed-loop residual):
         # held-out fidelity -2.4 % (5/5) and retuned tracking -1.1 mm (5/5);
         # one trajectory was inconsistent, the fast phase made the residual
         # 16 % worse. 0 keeps the designed phases.
         "append_tuning_trajectories": 2,
-        "appended_bridge_wait_time": 0.5,
+        "appended_bridge_wait_time": 0.25,
         "appended_bridge_time": 3.5,
         "appended_turn_duration": 0.75,
         "appended_box_margin": 0.15,

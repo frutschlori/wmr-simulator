@@ -1,0 +1,20 @@
+# Phase 4 v6 (2026-10-02): the state-dependent (D) matrix with the H3 method
+# (each iteration's static gains x a learned schedule), tuned post hoc on the
+# Phase 2 v6 static runs, on the same paired benchmark seeds.
+phase: phase4_parametrized_matrix_v6
+source_phase: phase2_static_v6
+iterations: 5
+seeds: [0, 1, 2, 3, 4]
+configurations:
+  D-F-N:
+    source: S-F-N
+    variants: {h3: {base_from_static: true}}
+  D-A-N:
+    source: S-A-N
+    variants: {h3: {base_from_static: true}}
+  D-F-R:
+    source: S-F-R
+    variants: {h3: {base_from_static: true}}
+  D-A-R:
+    source: S-A-R
+    variants: {h3: {base_from_static: true}}

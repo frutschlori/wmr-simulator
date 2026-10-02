@@ -1,0 +1,55 @@
+# Phase 2 v6 (2026-10-02): the static matrix after the residual rework (v5 with the
+# residual pool screen at 0.25 m and a turn - line - turn return; v5 and v5b
+# started 13-17 % of the chained identification repeats > 0.5 rad off heading).
+# - Residual trained closed-loop (residual.training closed_loop, gate 1.0,
+#   screen 0.25 m) instead of one-step.
+# - From iteration 2 the identification reference is its identified phase + 2
+#   trajectories of the previous iteration's tuning set (placed inside the
+#   environment box), replacing the fast phase.
+# - Benchmark RMSE scored over the unbridged reference only.
+# Adds the sample-efficiency arm: designed identification with tuning on the
+# matched fixed set and on random B-spline sets (the designer's curve family
+# without the FIM) of 15, 45 and 150 trajectories, against the 15 designed ones.
+# Frozen tuner as in v3; gain parametrization off in every run.
+phase: phase2_static_v6
+iterations: 5
+seeds: [0, 1, 2, 3, 4]
+overrides:
+  benchmark: {max_workers: 4}
+  gain_tuning: &frozen_tuner
+    optimizer: bfgs
+    steps: 160
+    num_lhs_points: 0
+    k_max_stab: 20.0
+    position_tracking_weight: 1.0
+    heading_tracking_weight: 1.0
+    linear_velocity_tracking_weight: 1.0
+    angular_velocity_tracking_weight: 1.0
+    input_weight: 0.0
+    input_delta_weight: 1.0
+    omega_delta_weight: 0.0
+    gain_delta_weight: 0.0
+configurations:
+  S-F-N: {tag: S-F-N}
+  S-A-N: {tag: S-A-N}
+  S-F-R: {tag: S-F-R}
+  S-A-R: {tag: S-A-R}
+  # Designed identification, fixed (matched) tuning set: separates the two
+  # design problems (RQ3).
+  S-AF-N: {tag: S-AF-N}
+  # Sample efficiency: random tuning sets from the designer's curve family.
+  S-AF-N_random15:
+    tag: S-AF-N
+    overrides:
+      baseline_tuning_trajectories_dir: trajectory_exports/fixed_sets/random_bspline_N15
+  S-AF-N_random45:
+    tag: S-AF-N
+    overrides:
+      baseline_tuning_trajectories_dir: trajectory_exports/fixed_sets/random_bspline_N45
+  S-AF-N_random150:
+    tag: S-AF-N
+    overrides:
+      baseline_tuning_trajectories_dir: trajectory_exports/fixed_sets/random_bspline_N150
+  # Hand-tuned reference outside the matrix: the stock firmware gains on the
+  # same paired benchmark seeds as every iteration of the tuned runs.
+  stock: {baseline_gains: [4.5, 6.0, 12.0, 2.5, 5.0, 0.0]}
