@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 
@@ -51,57 +53,93 @@ def bridge_reference_states(start_pose: np.ndarray, goal_pose: np.ndarray, bridg
     return reference_states
 
 
-def turn_drive_turn_states(
-    start_pose: np.ndarray,
-    goal_pose: np.ndarray,
-    bridge_time: float,
-    dt: float,
-    turn_time: float,
-    peak_speed: float = 1.5,
-) -> np.ndarray:
-    """A return a differential drive can follow even when it is short: turn on
-    the spot toward the goal, drive a straight minimum-jerk line to it, turn on
-    the spot to the goal heading. The free-form bridge (``bridge_reference_states``)
-    enforces both end headings on one smooth curve; squeezed into a few seconds
-    it loops and spins (yaw-rate peaks of 30-66 rad/s), the robot cannot follow,
-    and in MuJoCo 13-17 % of the chained repeats then started more than 0.5 rad
-    off heading (3 % with the 8.5 s bridge). ``bridge_time`` is the minimum;
-    the line takes longer when it would otherwise exceed ``peak_speed`` (the
-    minimum-jerk peak is 1.875 x the mean speed). Starts at ``start_pose``
-    (included)."""
-    from wmr_simulator.trajectory_optimization.reference_extension import turn_in_place
+class ArcReturn(NamedTuple):
+    """How ``arc_line_arc_states`` drives a return: arcs of ``radius`` (halved up
+    to twice when no route at full radius stays in the box) at up to
+    ``lateral_acceleration``, a straight line at up to ``peak_speed``, each
+    piece rest to rest and at least ``min_piece_duration`` long, inside
+    ``box_min``/``box_max`` by ``margin`` when a box is given."""
 
-    def wrap(angle):
-        return (angle + np.pi) % (2.0 * np.pi) - np.pi
+    radius: float = 0.25
+    lateral_acceleration: float = 3.0
+    peak_speed: float = 1.5
+    min_piece_duration: float = 0.75
+    box_min: tuple[float, float] | None = None
+    box_max: tuple[float, float] | None = None
+    margin: float = 0.15
+
+
+def _tangent_routes(start_pose: np.ndarray, goal_pose: np.ndarray, radius: float):
+    """(first arc angle, line length, second arc angle) of the four forward
+    circle - tangent - circle routes (LSL, LSR, RSL, RSR) from ``start_pose`` to
+    ``goal_pose``; a route whose circles are too close for its tangent is left
+    out. Arc angles are signed (positive: left) and in (-2 pi, 2 pi)."""
+    two_pi = 2.0 * math.pi
+    theta_start, theta_goal = float(start_pose[2]), float(goal_pose[2])
+    for sigma_start in (1.0, -1.0):
+        for sigma_goal in (1.0, -1.0):
+            center_start = np.asarray(start_pose[:2], dtype=float) + sigma_start * radius * np.array(
+                [-math.sin(theta_start), math.cos(theta_start)]
+            )
+            center_goal = np.asarray(goal_pose[:2], dtype=float) + sigma_goal * radius * np.array(
+                [-math.sin(theta_goal), math.cos(theta_goal)]
+            )
+            offset = center_goal - center_start
+            distance = float(np.linalg.norm(offset))
+            if distance < 1e-9:
+                if sigma_start != sigma_goal:
+                    continue
+                direction, line = theta_start, 0.0
+            else:
+                ratio = (sigma_goal - sigma_start) * radius / distance
+                if abs(ratio) > 1.0:
+                    continue
+                bearing = math.atan2(offset[1], offset[0])
+                direction = bearing - math.asin(ratio)
+                line = distance * math.cos(bearing - direction)
+
+            def sweep(sigma, angle):
+                swept = (sigma * angle) % two_pi
+                return 0.0 if swept > two_pi - 1e-9 else sigma * swept
+
+            yield sweep(sigma_start, direction - theta_start), line, sweep(sigma_goal, theta_goal - direction)
+
+
+def arc_line_arc_states(start_pose: np.ndarray, goal_pose: np.ndarray, dt: float, route: ArcReturn) -> np.ndarray:
+    """A return a differential drive tracks with heading feedback all the way:
+    a forward arc onto the tangent line, the line, a forward arc onto the goal
+    pose -- the fastest of the four tangent routes that stays in the box, each
+    piece rest to rest. The turn-line-turn return it replaces turned on the spot,
+    where the Kanayama law has no heading feedback (``v_ref * kth * sin
+    theta_e``), and the robot arrived wherever its wheelbase belief put it: 119 of
+    159 iteration-2 repeats in Phase 2 v6 started more than 0.5 rad off heading.
+    When no route fits the box at any radius, the one leaving it least is
+    driven. Starts at ``start_pose`` (included)."""
+    from wmr_simulator.trajectory_optimization.reference_extension import arc_turn, straight_line
 
     start = np.zeros(8)
     start[:3] = start_pose[:3]
-    states = [start[None, :]]
-    offset = np.asarray(goal_pose[:2], dtype=float) - start[:2]
-    distance = float(np.linalg.norm(offset))
-    heading = float(start[2])
-    if distance > 1e-3:
-        direction = float(np.arctan2(offset[1], offset[0]))
-        states.append(turn_in_place(start, wrap(direction - heading), turn_time, dt, 8))
-        heading = heading + wrap(direction - heading)
-        drive_time = max(bridge_time - 2.0 * turn_time, 1.875 * distance / peak_speed)
-        steps = max(int(np.ceil(drive_time / dt)), 1)
-        duration = steps * dt
-        tau = np.arange(1, steps + 1) / steps
-        shape = 10 * tau**3 - 15 * tau**4 + 6 * tau**5
-        speed = distance * (30 * tau**2 - 60 * tau**3 + 30 * tau**4) / duration
-        accel = distance * (60 * tau - 180 * tau**2 + 120 * tau**3) / duration**2
-        drive = np.zeros((steps, 8))
-        drive[:, 0] = start[0] + offset[0] * shape
-        drive[:, 1] = start[1] + offset[1] * shape
-        drive[:, 2] = heading
-        drive[:, 3], drive[:, 4] = speed * np.cos(direction), speed * np.sin(direction)
-        drive[:, 6], drive[:, 7] = accel * np.cos(direction), accel * np.sin(direction)
-        states.append(drive)
-    end = states[-1][-1].copy()
-    end[3:] = 0.0
-    states.append(turn_in_place(end, wrap(float(goal_pose[2]) - heading), turn_time, dt, 8))
-    return np.vstack(states)
+    best = None
+    for radius in (route.radius, 0.5 * route.radius, 0.25 * route.radius):
+        arc = dict(lateral_acceleration=route.lateral_acceleration, min_duration=route.min_piece_duration)
+        for first, line, second in _tangent_routes(start, np.asarray(goal_pose, dtype=float), radius):
+            states = start[None, :]
+            states = np.vstack([states, arc_turn(states[-1], first, radius, dt, 8, **arc)])
+            states = np.vstack([states, straight_line(
+                states[-1], line, dt, 8, peak_speed=route.peak_speed, min_duration=route.min_piece_duration
+            )])
+            states = np.vstack([states, arc_turn(states[-1], second, radius, dt, 8, **arc)])
+            violation = 0.0
+            if route.box_min is not None and route.box_max is not None:
+                low = np.asarray(route.box_min, dtype=float) + route.margin
+                high = np.asarray(route.box_max, dtype=float) - route.margin
+                violation = float(max(np.max(low - states[:, :2]), np.max(states[:, :2] - high), 0.0))
+            score = (round(violation, 3), len(states))
+            if best is None or score < best[0]:
+                best = (score, states)
+        if best[0][0] == 0.0:
+            break
+    return best[1]
 
 
 def bridged_output_path(input_path: str | Path) -> Path:
@@ -114,18 +152,19 @@ def append_bridge_reference(
     output_path: str | Path | None = None,
     *,
     wait_time: float,
-    bridge_time: float,
+    bridge_time: float | None = None,
     result_index: int = 0,
     cost: float = 100.0,
     time_stamp: float = 0.0,
     decimals: int = 6,
     plot_path: str | Path | None = None,
-    turn_time: float | None = None,
+    arc_return: ArcReturn | None = None,
 ) -> Path:
     """Write ``<name>_bridge.JSN`` (default: next to the input) and return its path.
 
-    With ``turn_time`` the return is turn - straight line - turn
-    (``turn_drive_turn_states``) instead of the free-form bridge."""
+    With ``arc_return`` the return is arc - straight line - arc
+    (``arc_line_arc_states``) instead of the free-form bridge, and
+    ``bridge_time`` is unused."""
     if output_path is None:
         output_path = bridged_output_path(input_path)
     reference = load_pololu_reference(input_path, result_index=result_index)
@@ -139,7 +178,9 @@ def append_bridge_reference(
     reference_states[-1, 3:] = 0.0
 
     wait_states = wait_reference_states(reference_states[-1, :3], wait_time, reference.dt)
-    if turn_time is None:
+    if arc_return is None:
+        if bridge_time is None:
+            raise ValueError("The free-form bridge needs a bridge_time.")
         bridge_states = bridge_reference_states(
             start_pose=reference_states[-1, :3],
             goal_pose=reference_states[0, :3],
@@ -147,9 +188,7 @@ def append_bridge_reference(
             dt=reference.dt,
         )
     else:
-        bridge_states = turn_drive_turn_states(
-            reference_states[-1, :3], reference_states[0, :3], bridge_time, reference.dt, float(turn_time)
-        )
+        bridge_states = arc_line_arc_states(reference_states[-1, :3], reference_states[0, :3], reference.dt, arc_return)
     full_reference_states = np.vstack([reference_states, wait_states, bridge_states[1:]])
 
     output_path = Path(output_path)
@@ -173,7 +212,9 @@ def append_bridge_reference(
         decimals=decimals,
     )
     with output_path.open("w", encoding="utf-8") as file:
-        json.dump(formatted, file, indent=2)
+        # Compact: the firmware reads the JSN into a 48 KiB buffer, and indented
+        # JSON spends about half of it on whitespace (serde_json_core reads both).
+        json.dump(formatted, file, separators=(",", ":"))
         file.write("\n")
     from wmr_simulator.pololu.reference_exporter import check_firmware_limits
 
