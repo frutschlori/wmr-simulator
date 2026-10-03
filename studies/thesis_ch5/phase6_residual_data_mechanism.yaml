@@ -1,0 +1,42 @@
+# Phase 6 (2026-10-04 night): why does the designed tuning set win by more with
+# the residual on? Two paths: the tuner rolls out the designed references, and
+# the residual is trained on the two appended representatives of that set.
+# Paired with phase2_static_v9 (S-A-R, S-AF-R_random15; same seeds, same code
+# path for append 2):
+#   S-A-R_appendrandom15: designed tuning set, residual data from random 15
+#   S-A-R_append0 / S-AF-R_random15_append0: nothing appended (the fast phase
+#     stays in the identification reference, free-form bridge as before
+#     2026-10-02), so the residual sees identification logs only.
+phase: phase6_residual_data_mechanism
+iterations: 5
+seeds: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+overrides:
+  benchmark: {max_workers: 4}
+  gain_tuning: &frozen_tuner
+    optimizer: bfgs
+    steps: 160
+    num_lhs_points: 0
+    k_max_stab: 20.0
+    position_tracking_weight: 1.0
+    heading_tracking_weight: 1.0
+    linear_velocity_tracking_weight: 0.25
+    angular_velocity_tracking_weight: 1.0
+    input_weight: 0.0
+    input_delta_weight: 1.0
+    omega_delta_weight: 0.0
+    gain_delta_weight: 0.0
+configurations:
+  S-A-R_appendrandom15:
+    tag: S-A-R
+    overrides:
+      identification_trajectory:
+        append_tuning_trajectories_from: trajectory_exports/fixed_sets/random_bspline_N15
+  S-A-R_append0:
+    tag: S-A-R
+    overrides:
+      identification_trajectory: {append_tuning_trajectories: 0}
+  S-AF-R_random15_append0:
+    tag: S-AF-R
+    overrides:
+      baseline_tuning_trajectories_dir: trajectory_exports/fixed_sets/random_bspline_N15
+      identification_trajectory: {append_tuning_trajectories: 0}
