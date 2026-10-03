@@ -22,10 +22,17 @@ end, and two tuning trajectories easily take the reference 5-8 m from its start
 -- far outside the arena the robot is tracked in. Placement therefore has two
 dynamically clean degrees of freedom, both at a point where the robot rests: a
 segment may be *mirrored* about its start heading (the same motion with the yaw
-rate negated), and a short smooth *turn in place* may re-aim it. A small search
+rate negated), and a short rest-to-rest *arc turn* may re-aim it. A small search
 over the segments' order, mirrors and turn angles keeps the whole reference
 inside the environment box, preferring no turns and an end near the start (a
 short return).
+
+Re-aiming turns are driven forward on an arc, never on the spot: the Kanayama
+law's heading feedback is ``v_ref * kth * sin(theta_e)``, so a turn in place
+(v_ref = 0) is open loop in heading and lands wherever the controller's
+wheelbase belief puts it. With turns in place, 119 of 159 iteration-2
+identification repeats (Phase 2 v6) started more than 0.5 rad off heading,
+because iteration 1 identified the wheelbase 10-50 % too large.
 """
 
 from __future__ import annotations
@@ -114,18 +121,74 @@ def mirror(segment: np.ndarray) -> np.ndarray:
     return out
 
 
-def turn_in_place(pose: np.ndarray, angle: float, duration: float, dt: float, width: int) -> np.ndarray:
-    """Samples of a smooth (minimum-jerk) turn by ``angle`` on the spot, after
-    ``pose`` (the first sample is not repeated)."""
-    steps = max(int(round(duration / dt)), 1)
+def _minimum_jerk_path(length: float, duration: float, dt: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Arc length, speed and tangential acceleration of a rest-to-rest
+    minimum-jerk run over ``length`` in at least ``duration`` (rounded up to
+    whole steps), sampled after the start. The peak speed is 1.875 x the mean."""
+    steps = max(int(np.ceil(duration / dt - 1e-9)), 1)
+    total = steps * dt
     tau = np.arange(1, steps + 1) / steps
-    shape = 10 * tau**3 - 15 * tau**4 + 6 * tau**5
-    rate = (30 * tau**2 - 60 * tau**3 + 30 * tau**4) / (steps * dt)
-    out = np.zeros((steps, width))
-    out[:, 0], out[:, 1] = pose[0], pose[1]
-    out[:, 2] = pose[2] + angle * shape
-    out[:, 5] = angle * rate
+    s = length * (10 * tau**3 - 15 * tau**4 + 6 * tau**5)
+    speed = length * (30 * tau**2 - 60 * tau**3 + 30 * tau**4) / total
+    accel = length * (60 * tau - 180 * tau**2 + 120 * tau**3) / total**2
+    return s, speed, accel
+
+
+def _path_states(x, y, theta, speed, omega, accel, width: int) -> np.ndarray:
+    """Reference rows with world-frame velocity and acceleration (the centripetal
+    part ``speed * omega`` included)."""
+    out = np.zeros((len(x), width))
+    c, s = np.cos(theta), np.sin(theta)
+    out[:, 0], out[:, 1], out[:, 2] = x, y, theta
+    out[:, 3], out[:, 4], out[:, 5] = speed * c, speed * s, omega
+    out[:, 6] = accel * c - speed * omega * s
+    out[:, 7] = accel * s + speed * omega * c
     return out
+
+
+def arc_turn(
+    pose: np.ndarray,
+    angle: float,
+    radius: float,
+    dt: float,
+    width: int,
+    *,
+    lateral_acceleration: float,
+    min_duration: float,
+) -> np.ndarray:
+    """Samples of a rest-to-rest forward arc of ``radius`` that turns the heading
+    by ``angle`` (positive: left), after ``pose`` (the first sample is not
+    repeated). The minimum-jerk speed profile peaks at the speed that keeps the
+    lateral acceleration at ``lateral_acceleration``; the turn takes at least
+    ``min_duration``. A zero angle returns no samples."""
+    if abs(angle) < 1e-9:
+        return np.zeros((0, width))
+    sigma = 1.0 if angle > 0 else -1.0
+    length = radius * abs(angle)
+    peak_speed = math.sqrt(lateral_acceleration * radius)
+    s, speed, accel = _minimum_jerk_path(length, max(min_duration, 1.875 * length / peak_speed), dt)
+    x0, y0, theta0 = (float(value) for value in pose[:3])
+    theta = theta0 + sigma * s / radius
+    center_x = x0 - sigma * radius * math.sin(theta0)
+    center_y = y0 + sigma * radius * math.cos(theta0)
+    x = center_x + sigma * radius * np.sin(theta)
+    y = center_y - sigma * radius * np.cos(theta)
+    return _path_states(x, y, theta, speed, sigma * speed / radius, accel, width)
+
+
+def straight_line(
+    pose: np.ndarray, length: float, dt: float, width: int, *, peak_speed: float, min_duration: float
+) -> np.ndarray:
+    """Samples of a rest-to-rest minimum-jerk drive of ``length`` along the
+    heading of ``pose``, after ``pose``. A zero length returns no samples."""
+    if length < 1e-9:
+        return np.zeros((0, width))
+    s, speed, accel = _minimum_jerk_path(length, max(min_duration, 1.875 * length / peak_speed), dt)
+    x0, y0, theta0 = (float(value) for value in pose[:3])
+    theta = np.full_like(s, theta0)
+    return _path_states(
+        x0 + s * math.cos(theta0), y0 + s * math.sin(theta0), theta, speed, np.zeros_like(s), accel, width
+    )
 
 
 def _box_violation(states: np.ndarray, box_min, box_max, margin: float) -> float:
@@ -144,11 +207,13 @@ def extend_identification_reference(
     box_min=None,
     box_max=None,
     margin: float = 0.15,
-    turn_duration: float = 0.75,
+    turn_radius: float = 0.25,
+    turn_lateral_acceleration: float = 3.0,
+    turn_min_duration: float = 0.75,
 ) -> tuple[np.ndarray, dict]:
     """The identified part of ``states`` followed by ``segments``. Without a box
     the segments are attached end to end as they come; with one, the order,
-    mirrors and turns in place that keep the reference inside it (by
+    mirrors and arc turns (``arc_turn``) that keep the reference inside it (by
     ``margin``) are searched, preferring fewer and smaller turns, then an end
     near the start. Returns the states and the placement chosen."""
     keep = int(round(float(identified_duration) / float(dt))) + 1
@@ -161,23 +226,33 @@ def extend_identification_reference(
         for segment in segments:
             extended = np.vstack([extended, attach(extended[-1, :3], segment)[1:]])
         return extended, {"order": list(range(len(segments))), "mirrored": [False] * len(segments),
-                          "turns_deg": [0.0] * len(segments), "box_violation": None}
+                          "turns_deg": [0.0] * len(segments), "turn_radii": [0.0] * len(segments),
+                          "box_violation": None}
 
     variants = [(segment, mirror(segment)) for segment in segments]
+    # (angle, radius) per joint; a turn may also use half the radius, which the
+    # box often needs (a forward arc sweeps up to 2 radii off the joint).
+    turn_options = [(0.0, 0.0)] + [
+        (angle, radius) for angle in TURN_ANGLES if angle != 0.0 for radius in (turn_radius, 0.5 * turn_radius)
+    ]
     best = None
     for order in itertools.permutations(range(len(segments))):
         for flips in itertools.product((False, True), repeat=len(segments)):
-            for turns in itertools.product(TURN_ANGLES, repeat=len(segments)):
+            for turns in itertools.product(turn_options, repeat=len(segments)):
                 extended = base
-                for index, flip, turn in zip(order, flips, turns):
-                    if turn != 0.0:
-                        extended = np.vstack([extended, turn_in_place(extended[-1], turn, turn_duration, dt, width)])
+                for index, flip, (angle, radius) in zip(order, flips, turns):
+                    if angle != 0.0:
+                        extended = np.vstack([extended, arc_turn(
+                            extended[-1], angle, radius, dt, width,
+                            lateral_acceleration=turn_lateral_acceleration, min_duration=turn_min_duration,
+                        )])
                     extended = np.vstack([extended, attach(extended[-1, :3], variants[index][flip])[1:]])
                 violation = _box_violation(extended, box_min, box_max, margin)
                 score = (
                     round(violation, 3),
-                    sum(turn != 0.0 for turn in turns),
-                    round(sum(abs(turn) for turn in turns), 3),
+                    sum(angle != 0.0 for angle, _ in turns),
+                    round(sum(abs(angle) for angle, _ in turns), 3),
+                    -sum(radius for _, radius in turns),
                     float(np.linalg.norm(extended[-1, :2] - extended[0, :2])),
                 )
                 if best is None or score < best[0]:
@@ -186,9 +261,10 @@ def extend_identification_reference(
     return extended, {
         "order": list(order),
         "mirrored": [bool(flip) for flip in flips],
-        "turns_deg": [round(math.degrees(turn), 1) for turn in turns],
+        "turns_deg": [round(math.degrees(angle), 1) for angle, _ in turns],
+        "turn_radii": [round(radius, 3) for _, radius in turns],
         "box_violation": score[0],
-        "end_to_start": round(score[3], 3),
+        "end_to_start": round(score[-1], 3),
     }
 
 

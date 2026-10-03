@@ -8,8 +8,9 @@ from wmr_simulator.trajectory_optimization.reference_extension import (
     extend_identification_reference,
     extended_payload,
     mirror,
+    arc_turn,
     representative_trajectories,
-    turn_in_place,
+    straight_line,
 )
 
 DT = 0.05
@@ -96,11 +97,33 @@ def test_mirror_turns_the_other_way():
     np.testing.assert_allclose(np.cos(heading_of_velocity - flipped[1:-1, 2]), 1.0, atol=1e-9)
 
 
-def test_turn_in_place_rests_and_turns_by_the_angle():
-    turn = turn_in_place(np.array([1.0, 2.0, 0.5, 0, 0, 0, 0, 0]), np.pi / 2, 0.75, DT, 8)
-    np.testing.assert_allclose(turn[:, :2], [[1.0, 2.0]] * len(turn))
-    np.testing.assert_allclose(turn[-1, 2], 0.5 + np.pi / 2, atol=1e-12)
-    np.testing.assert_allclose(np.sum(turn[:, 5]) * DT, np.pi / 2, rtol=0.05)
+def test_arc_turn_drives_forward_on_the_arc_and_rests_at_both_ends():
+    pose = np.array([1.0, 2.0, 0.5, 0, 0, 0, 0, 0])
+    for angle in (np.pi / 2, -3 * np.pi / 4):
+        turn = arc_turn(pose, angle, 0.25, DT, 8, lateral_acceleration=3.0, min_duration=0.75)
+        np.testing.assert_allclose(turn[-1, 2], 0.5 + angle, atol=1e-12)
+        # On the circle through the start, tangent to the start heading.
+        sigma = np.sign(angle)
+        center = pose[:2] + sigma * 0.25 * np.array([-np.sin(0.5), np.cos(0.5)])
+        np.testing.assert_allclose(np.linalg.norm(turn[:, :2] - center, axis=1), 0.25, atol=1e-12)
+        speed = np.hypot(turn[:, 3], turn[:, 4])
+        # Forward along the heading, never on the spot inside, at rest at the end.
+        np.testing.assert_allclose(turn[:-1, 3] * np.cos(turn[:-1, 2]) + turn[:-1, 4] * np.sin(turn[:-1, 2]),
+                                   speed[:-1], atol=1e-12)
+        assert speed[:-1].min() > 0.0 and speed[-1] < 1e-12
+        np.testing.assert_allclose(turn[:, 5], sigma * speed / 0.25, atol=1e-12)
+        assert (speed**2 / 0.25).max() <= 3.0 + 1e-9
+        # The samples follow from one another at the listed speed.
+        steps = np.linalg.norm(np.diff(np.vstack([pose[None, :2], turn[:, :2]]), axis=0), axis=1)
+        assert steps.max() <= speed.max() * DT + 1e-9
+    assert len(arc_turn(pose, 0.0, 0.25, DT, 8, lateral_acceleration=3.0, min_duration=0.75)) == 0
+
+
+def test_straight_line_ends_at_the_length_along_the_heading():
+    line = straight_line(np.array([0.0, 1.0, np.pi / 3]), 1.2, DT, 8, peak_speed=1.5, min_duration=0.75)
+    np.testing.assert_allclose(line[-1, :2], [1.2 * np.cos(np.pi / 3), 1.0 + 1.2 * np.sin(np.pi / 3)], atol=1e-12)
+    assert np.hypot(line[:, 3], line[:, 4]).max() <= 1.5 + 1e-9
+    assert np.all(line[:, 5] == 0.0)
 
 
 def test_placement_keeps_the_reference_inside_the_box():

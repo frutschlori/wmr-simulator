@@ -341,19 +341,32 @@ def stage_plan_identification_trajectory(experiment: Experiment, iteration: int)
     )
     print(f"Exported Pololu reference JSN: {jsn_path}")
 
-    from wmr_simulator.pololu.bridge_exporter import append_bridge_reference
+    from wmr_simulator.pololu.bridge_exporter import ArcReturn, append_bridge_reference
 
     # The appended tuning trajectories take the place of the fast phase and of
     # most of the slow return: the budget is the bridged JSN's 48 KiB.
-    bridge = "appended_bridge" if appended else "bridge"
-    bridged_path = append_bridge_reference(
-        jsn_path,
-        wait_time=float(config[f"{bridge}_wait_time"]),
-        bridge_time=float(config[f"{bridge}_time"]),
-        plot_path=identification_plot_dir / "identification_trajectory_bridge.pdf",
-        # A short return has to be turn - line - turn to be drivable.
-        turn_time=float(config["appended_turn_duration"]) if appended else None,
-    )
+    if appended:
+        environment = load_yaml(_identification_problem(paths, config))["environment"]
+        bridged_path = append_bridge_reference(
+            jsn_path,
+            wait_time=float(config["appended_bridge_wait_time"]),
+            plot_path=identification_plot_dir / "identification_trajectory_bridge.pdf",
+            arc_return=ArcReturn(
+                radius=float(config["appended_turn_radius"]),
+                lateral_acceleration=float(config["appended_turn_lateral_acceleration"]),
+                min_piece_duration=float(config["appended_min_piece_duration"]),
+                box_min=tuple(environment["min"]),
+                box_max=tuple(environment["max"]),
+                margin=float(config["appended_box_margin"]),
+            ),
+        )
+    else:
+        bridged_path = append_bridge_reference(
+            jsn_path,
+            wait_time=float(config["bridge_wait_time"]),
+            bridge_time=float(config["bridge_time"]),
+            plot_path=identification_plot_dir / "identification_trajectory_bridge.pdf",
+        )
     print(f"Exported bridged repeat variant: {bridged_path}")
     print(f"Copy {jsn_path.name} and {paths.robotcfg_cfg.name} to the robot SD card, run the")
     print(f"experiment, then place the logs in {paths.data_dir} and run decode-logs.")
@@ -392,7 +405,10 @@ def _append_tuning_trajectories(
     environment = load_yaml(_identification_problem(experiment.paths(iteration), config))["environment"]
     payload = extended_payload(
         designed, chosen, box_min=environment["min"], box_max=environment["max"],
-        margin=float(config["appended_box_margin"]), turn_duration=float(config["appended_turn_duration"]),
+        margin=float(config["appended_box_margin"]),
+        turn_radius=float(config["appended_turn_radius"]),
+        turn_lateral_acceleration=float(config["appended_turn_lateral_acceleration"]),
+        turn_min_duration=float(config["appended_min_piece_duration"]),
     )
     with pickle_path.open("wb") as file:
         pickle.dump(payload, file)
