@@ -136,3 +136,44 @@ def test_placement_keeps_the_reference_inside_the_box():
     assert chosen["box_violation"] == 0.0
     assert placed[:, 0].min() >= -1.15 - 1e-9 and placed[:, 0].max() <= 1.15 + 1e-9
     assert placed[:, 1].min() >= -2.15 - 1e-9 and placed[:, 1].max() <= 2.15 + 1e-9
+
+
+def test_pruned_placement_search_matches_full_enumeration():
+    """The depth-first search returns exactly what enumerating every (order,
+    mirrors, turns) placement and keeping the first best one returns."""
+    import itertools
+    import math
+
+    from wmr_simulator.trajectory_optimization.reference_extension import TURN_ANGLES, _box_violation
+
+    ident = arc(0.6, 0.0, steps=60)
+    segments = [arc(1.0, 1.2, steps=50), arc(1.2, -0.4, steps=40), arc(0.8, 2.0, steps=30)]
+    box_min, box_max, margin = [-1.3, -1.6], [2.4, 1.6], 0.15
+    placed, chosen = extend_identification_reference(ident, DT, 3.0, segments, box_min=box_min, box_max=box_max)
+
+    base = ident[:61]
+    variants = [(segment, mirror(segment)) for segment in segments]
+    options = [(0.0, 0.0)] + [(a, r) for a in TURN_ANGLES if a != 0.0 for r in (0.25, 0.125)]
+    best = None
+    for order in itertools.permutations(range(3)):
+        for flips in itertools.product((False, True), repeat=3):
+            for turns in itertools.product(options, repeat=3):
+                extended = base
+                for index, flip, (angle, radius) in zip(order, flips, turns):
+                    if angle != 0.0:
+                        extended = np.vstack([extended, arc_turn(extended[-1], angle, radius, DT, 8,
+                                                                 lateral_acceleration=3.0, min_duration=0.75)])
+                    extended = np.vstack([extended, attach(extended[-1, :3], variants[index][flip])[1:]])
+                score = (
+                    round(_box_violation(extended, box_min, box_max, margin), 3),
+                    sum(a != 0.0 for a, _ in turns),
+                    round(sum(abs(a) for a, _ in turns), 3),
+                    -sum(r for _, r in turns),
+                    float(np.linalg.norm(extended[-1, :2] - extended[0, :2])),
+                )
+                if best is None or score < best[0]:
+                    best = (score, extended, order, flips, turns)
+    assert np.array_equal(placed, best[1])
+    assert chosen["order"] == list(best[2])
+    assert chosen["mirrored"] == list(best[3])
+    assert chosen["turns_deg"] == [round(math.degrees(a), 1) for a, _ in best[4]]

@@ -235,29 +235,52 @@ def extend_identification_reference(
     turn_options = [(0.0, 0.0)] + [
         (angle, radius) for angle in TURN_ANGLES if angle != 0.0 for radius in (turn_radius, 0.5 * turn_radius)
     ]
+    # Depth-first over (segment, mirror, turn) per joint. The score's first three
+    # entries (box violation, number of turns, total turn angle) can only grow
+    # as segments are added, so a prefix already worse in them than the best
+    # complete placement is cut; ties go to the first placement in the order
+    # (permutation, mirrors, turns) a full enumeration would visit. Exhaustive
+    # enumeration grows as 6 x 8 x 15^3 = 162000 placements for three segments.
     best = None
-    for order in itertools.permutations(range(len(segments))):
-        for flips in itertools.product((False, True), repeat=len(segments)):
-            for turns in itertools.product(turn_options, repeat=len(segments)):
-                extended = base
-                for index, flip, (angle, radius) in zip(order, flips, turns):
+
+    def visit(extended, violation, order, flips, turns, turn_indices):
+        nonlocal best
+        num_turns = sum(angle != 0.0 for angle, _ in turns)
+        total_angle = round(sum(abs(angle) for angle, _ in turns), 3)
+        if best is not None and (round(violation, 3), num_turns, total_angle) > best[0][:3]:
+            return
+        if len(order) == len(segments):
+            score = (
+                round(violation, 3),
+                num_turns,
+                total_angle,
+                -sum(radius for _, radius in turns),
+                float(np.linalg.norm(extended[-1, :2] - extended[0, :2])),
+            )
+            key = (tuple(order), tuple(flips), tuple(turn_indices))
+            if best is None or (score, key) < (best[0], best[1]):
+                best = (score, key, extended, tuple(order), tuple(flips), tuple(turns))
+            return
+        for index in range(len(segments)):
+            if index in order:
+                continue
+            for flip in (False, True):
+                for turn_index, (angle, radius) in enumerate(turn_options):
+                    grown = extended
                     if angle != 0.0:
-                        extended = np.vstack([extended, arc_turn(
-                            extended[-1], angle, radius, dt, width,
+                        grown = np.vstack([grown, arc_turn(
+                            grown[-1], angle, radius, dt, width,
                             lateral_acceleration=turn_lateral_acceleration, min_duration=turn_min_duration,
                         )])
-                    extended = np.vstack([extended, attach(extended[-1, :3], variants[index][flip])[1:]])
-                violation = _box_violation(extended, box_min, box_max, margin)
-                score = (
-                    round(violation, 3),
-                    sum(angle != 0.0 for angle, _ in turns),
-                    round(sum(abs(angle) for angle, _ in turns), 3),
-                    -sum(radius for _, radius in turns),
-                    float(np.linalg.norm(extended[-1, :2] - extended[0, :2])),
-                )
-                if best is None or score < best[0]:
-                    best = (score, extended, order, flips, turns)
-    score, extended, order, flips, turns = best
+                    grown = np.vstack([grown, attach(grown[-1, :3], variants[index][flip])[1:]])
+                    added = grown[len(extended):]
+                    visit(
+                        grown, max(violation, _box_violation(added, box_min, box_max, margin)),
+                        order + [index], flips + [flip], turns + [(angle, radius)], turn_indices + [turn_index],
+                    )
+
+    visit(base, _box_violation(base, box_min, box_max, margin), [], [], [], [])
+    score, _, extended, order, flips, turns = best
     return extended, {
         "order": list(order),
         "mirrored": [bool(flip) for flip in flips],
