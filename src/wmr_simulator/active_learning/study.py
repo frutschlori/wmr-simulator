@@ -126,7 +126,10 @@ def run_overrides(spec: dict, name: str, seed: int) -> dict:
     # A baseline run never tunes or designs; it only needs the static controller.
     overrides = merge_config(overrides, configuration_overrides(configuration.get("tag", "S-F-N")))
     if configuration.get("baseline_gains") is not None:
+        # The stock firmware configuration: its gains with the robot's nominal
+        # parameters (the problem's robot block), no tuning on any model.
         overrides = merge_config(overrides, {"prior_tuning": False})
+        overrides["initial_robot_params"] = None
     overrides = merge_config(
         overrides,
         {

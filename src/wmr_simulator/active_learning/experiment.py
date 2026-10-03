@@ -95,6 +95,25 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
     # append_tuning_trajectories), and its controller is generation 0 of the
     # study summaries.
     "prior_tuning": True,
+    # The model the loop starts from (iteration 0's tuning, iteration 1's
+    # controller and identification design and fit init), overriding the
+    # problem yaml's robot block, which stays the simulator's plant for the
+    # standalone scripts. Deliberately off the real robot (r 16.0 mm, L 84.2
+    # mm, tau 0.16 s, MuJoCo plant 15.999 / 83.96-84.70 / 0.160): the loop has
+    # to find the parameters from data, as it would for a quantity nobody can
+    # measure by hand. null starts from the problem's robot block. Measured
+    # 2026-10-03 (iteration 0 only, S-A-R, 10 seeds): from L 100 mm / tau 0.1 s
+    # the unit-gain start diverged in every tuning rollout and 4 of 10 first
+    # tunes stalled or ran to box-bound gains (270-910 mm at generation 0; a
+    # 64-point LHS presearch for the first tune fixed 5 of 6 of those); from
+    # these values all 10 tune cleanly (110-117 mm, 0 divergences), i.e. room
+    # for the loop to show what the data buys.
+    "initial_robot_params": {
+        "wheel_radius": 0.020,
+        "base_diameter": 0.090,
+        "max_wheel_speed": 250.0,
+        "time_constant": 0.25,
+    },
     # Design the identification trajectory / the tuning set every iteration
     # (FIM), or use the fixed references below instead. Separate so that a
     # designed identification can be combined with a fixed tuning set.
