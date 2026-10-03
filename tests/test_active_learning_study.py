@@ -53,9 +53,20 @@ def test_run_overrides_resolve_paths_and_let_the_tag_win():
     assert study_runs(spec) == [("a", 0), ("a", 1)]
 
 
+def test_a_baseline_run_skips_the_prior_tuning():
+    spec = {
+        "phase": "p",
+        "iterations": 3,
+        "seeds": [0],
+        "configurations": {"stock": {"baseline_gains": [4.5, 6.0, 12.0, 2.5, 5.0, 0.0]}, "a": {"tag": "S-A-N"}},
+    }
+    assert run_overrides(spec, "stock", 0)["prior_tuning"] is False
+    assert "prior_tuning" not in run_overrides(spec, "a", 0)
+
+
 def test_gain_parametrization_switch_disables_the_network(tmp_path):
     experiment = stage_init(
-        tmp_path / "exp", {"problem": PROBLEM, "use_residual_model": False, "use_gain_parametrization": False}
+        tmp_path / "exp", {"problem": PROBLEM, "prior_tuning": False, "use_residual_model": False, "use_gain_parametrization": False}
     )
     paths = experiment.paths(1)
     assert load_yaml(paths.problem)["controller"]["gain_parametrization"]["enabled"] is False
@@ -63,7 +74,7 @@ def test_gain_parametrization_switch_disables_the_network(tmp_path):
 
 
 def test_interrupted_stage_outputs_are_removed(tmp_path):
-    experiment = stage_init(tmp_path / "exp", {"problem": PROBLEM, "use_residual_model": False})
+    experiment = stage_init(tmp_path / "exp", {"problem": PROBLEM, "prior_tuning": False, "use_residual_model": False})
     paths = experiment.paths(1)
     with logged_stage(paths, "identify"):
         save_yaml(paths.identification_result, {"estimated_params": {}})
@@ -107,7 +118,7 @@ def test_bound_hits_and_stall_checks():
 def test_interrupted_decode_removes_the_binary_logs_too(tmp_path):
     # `run` redeploys whenever no decoded log exists; binaries left behind would
     # make it add more logs next to them instead of reproducing them.
-    experiment = stage_init(tmp_path / "exp", {"problem": PROBLEM, "use_residual_model": False})
+    experiment = stage_init(tmp_path / "exp", {"problem": PROBLEM, "prior_tuning": False, "use_residual_model": False})
     paths = experiment.paths(1)
     with logged_stage(paths, "simulate-deployment"):
         for name in ("TR00", "TR01"):
@@ -125,7 +136,7 @@ def test_a_skipped_residual_counts_as_done_and_designs_run_nominal(tmp_path):
     # (residual.max_position_error); the loop must move on, nominal.
     from wmr_simulator.active_learning.stages import _load_design_residual_model, iteration_status
 
-    experiment = stage_init(tmp_path / "exp", {"problem": PROBLEM, "use_residual_model": True})
+    experiment = stage_init(tmp_path / "exp", {"problem": PROBLEM, "prior_tuning": False, "use_residual_model": True})
     paths = experiment.paths(1)
     assert not iteration_status(experiment, 1)["train-residual"]
     save_yaml(paths.residual_skipped, {"reason": "every pooled identification log diverged"})

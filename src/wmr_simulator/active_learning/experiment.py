@@ -83,6 +83,18 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
     # runs one static tune whatever gain_tuning.gain_parametrization says. On
     # follows the problem yaml.
     "use_gain_parametrization": True,
+    # Iteration 0: design a tuning set and tune the gains on the prior model
+    # (the problem yaml's robot parameters, no logs, no residual) before the
+    # first identification run, so iteration 1 records its logs under a tuned
+    # controller instead of the problem's initial gains. The unit initial
+    # gains diverged on 25-30 of 30 iteration-1 benchmark runs in Phase 2 v6,
+    # and identification and residual data recorded under them got the
+    # wheelbase 10-50 % too large. On the robot this needs nothing but the
+    # prior a datasheet gives. Iteration 0's tuning set also feeds iteration
+    # 1's identification reference (identification_trajectory.
+    # append_tuning_trajectories), and its controller is generation 0 of the
+    # study summaries.
+    "prior_tuning": True,
     # Design the identification trajectory / the tuning set every iteration
     # (FIM), or use the fixed references below instead. Separate so that a
     # designed identification can be combined with a fixed tuning set.
@@ -747,6 +759,16 @@ class Experiment:
                 except ValueError:
                     continue
         return sorted(indices)
+
+    @property
+    def first_iteration(self) -> int:
+        """The iteration the loop starts at: 0 when it tunes on the prior model
+        first (prior_tuning), else 1. Read off the directories once init has
+        made them, so an experiment from before prior tuning stays at 1."""
+        indices = self.iteration_indices()
+        if indices:
+            return indices[0]
+        return 0 if self.config["prior_tuning"] else 1
 
     def latest_iteration(self) -> int:
         indices = self.iteration_indices()

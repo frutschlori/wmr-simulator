@@ -69,7 +69,7 @@ def make_experiment(tmp_path, **deployment):
     config.update(deployment)
     experiment = stage_init(
         tmp_path / "exp",
-        {"problem": PROBLEM, "use_residual_model": False, "mujoco_deployment": config},
+        {"problem": PROBLEM, "prior_tuning": False, "use_residual_model": False, "mujoco_deployment": config},
     )
     paths = experiment.paths(1)
     write_reference_jsn(
@@ -187,14 +187,14 @@ def test_the_bridged_variant_is_what_gets_deployed(experiment_with_trajectory):
 
 
 def test_a_missing_trajectory_names_the_stage_that_makes_one(tmp_path):
-    experiment = stage_init(tmp_path / "exp", {"problem": PROBLEM})
+    experiment = stage_init(tmp_path / "exp", {"problem": PROBLEM, "prior_tuning": False})
     with pytest.raises(FileNotFoundError, match="plan-id-trajectory"):
         _identification_trajectory_jsn(experiment.paths(1))
 
 
 def test_run_stops_once_the_iteration_target_is_reached(tmp_path, capsys):
     """A finished experiment is a no-op, not another iteration's work."""
-    experiment = stage_init(tmp_path / "exp", {"problem": PROBLEM, "num_iterations": 1})
+    experiment = stage_init(tmp_path / "exp", {"problem": PROBLEM, "prior_tuning": False, "num_iterations": 1})
     paths = experiment.paths(1)
     with paths.identification_result.open("w") as file:
         yaml.safe_dump({"estimated_params": {}}, file)
