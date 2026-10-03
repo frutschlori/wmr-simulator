@@ -431,9 +431,11 @@ def _append_tuning_trajectories(
 
     if count <= 0 or iteration <= experiment.first_iteration:
         return []
-    previous = sorted(experiment.paths(iteration - 1).tuning_trajectories_dir.glob("*.pkl"))
+    source = config.get("append_tuning_trajectories_from")
+    source_dir = Path(source) if source else experiment.paths(iteration - 1).tuning_trajectories_dir
+    previous = sorted(source_dir.glob("*.pkl"))
     if not previous:
-        print(f"No tuning set in iteration {iteration - 1}; the identification reference keeps its own phases.")
+        print(f"No tuning references in {source_dir}; the identification reference keeps its own phases.")
         return []
     chosen = representative_trajectories(previous, count)
     designed_dir = pickle_path.parent / "designed"
@@ -454,7 +456,7 @@ def _append_tuning_trajectories(
     duration = (len(payload["reference_states"]) - 1) * payload["dt"]
     print(
         f"Identification reference: identified phase ({payload['identified_duration']:.1f} s) + "
-        f"{len(chosen)} trajectories of iteration {iteration - 1}'s tuning set "
+        f"{len(chosen)} trajectories of {source_dir} "
         f"({', '.join(path.stem for path in chosen)}), {duration:.1f} s in all, placed {payload['placement']}; "
         f"as designed: {designed}"
     )

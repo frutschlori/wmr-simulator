@@ -309,6 +309,11 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         # one trajectory was inconsistent, the fast phase made the residual
         # 16 % worse. 0 keeps the designed phases.
         "append_tuning_trajectories": 2,
+        # Ablation only: take the appended trajectories from this directory of
+        # tuning references instead of the previous iteration's tuning set, so
+        # the residual's data and the tuner's references can differ. null: the
+        # tuning set (the method).
+        "append_tuning_trajectories_from": None,
         "appended_bridge_wait_time": 0.25,
         "appended_turn_radius": 0.25,
         "appended_turn_lateral_acceleration": 3.0,

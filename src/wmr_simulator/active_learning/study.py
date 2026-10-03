@@ -67,6 +67,7 @@ _PATH_KEYS = (
     ("baseline_identification_trajectory",),
     ("baseline_tuning_trajectories_dir",),
     ("benchmark", "trajectory"),
+    ("identification_trajectory", "append_tuning_trajectories_from"),
 )
 
 # What each stage writes, relative to its iteration directory, so a stage that
