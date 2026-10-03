@@ -1,5 +1,5 @@
 # Phase 4 v9 (2026-10-03 night): the state-dependent (D) matrix post hoc on the Phase 2
-# v9 static runs, on the same paired benchmark seeds. h3_gate is the thesis
+# v9 static runs, on the same paired benchmark seeds (seeds 0-4: the v8 runs). h3_gate is the thesis
 # method (static base gains x learned schedule behind the out-of-distribution
 # gate, Phase 4b); h3 is the same without the gate (ablation).
 phase: phase4_parametrized_matrix_v9
