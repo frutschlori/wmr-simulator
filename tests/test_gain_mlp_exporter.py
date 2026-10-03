@@ -104,3 +104,57 @@ def test_identity_parametrization_exports_unit_factors():
     payload = gain_mlp_payload(params)
     factors = reference_forward(payload, [0.3, -0.2, 0.5, 0.4, 1.0], [0.1, 0.0, 0.2], [0.3, 0.8])
     np.testing.assert_allclose(factors, np.ones(NUM_SCHEDULABLE_GAINS), atol=1e-7)
+
+
+def _gated_params(seed: int = 7):
+    from wmr_simulator.gain_parametrization.error_mlp import with_gate
+
+    cfg = {"kind": "error_mlp", "hidden_sizes": [16], "bound": 5.0, "spectral_norm_cap": 1.0, "gate_num_centers": 4}
+    params = _random_params(cfg, seed=seed, scale=0.5)
+    # Training-like features: small errors, moderate speeds.
+    rng = np.random.default_rng(0)
+    samples = np.column_stack([
+        rng.normal(0, 0.05, 400), rng.normal(0, 0.05, 400), rng.normal(0, 0.1, 400),
+        rng.normal(0, 0.03, 400), rng.normal(0, 0.05, 400), rng.uniform(0.1, 0.5, 400), rng.uniform(0, 0.2, 400),
+    ])
+    return with_gate(params, samples)
+
+
+def test_gate_keeps_the_network_on_its_data_and_the_static_gains_off_it():
+    from wmr_simulator.gain_parametrization.error_mlp import _forward, effective_layers, features, gate
+
+    params = _gated_params()
+    on = (jnp.asarray([0.0, 0.0, 0.0, 0.75, 0.0, 0.0, 1.0, 0.0]), jnp.zeros(3), jnp.asarray([0.75, 1.0]))
+    off = (jnp.asarray([0.0, 0.0, 0.0, 2.5, 0.0, 9.0, 0.0, 0.0]), jnp.asarray([-0.4, 0.3, 0.8]), jnp.asarray([1.0, 3.0]))
+    z_on = features(*on, params.feature_scale)
+    assert float(gate(params, z_on)) > 0.9
+    ungated = np.clip(1.0 + np.asarray(_forward(effective_layers(params), z_on)), 0.0, 5.0)
+    np.testing.assert_allclose(np.asarray(jax_factors(params, *on)), ungated, atol=0.05)
+    z_off = features(*off, params.feature_scale)
+    assert float(gate(params, z_off)) < 1e-3
+    np.testing.assert_allclose(np.asarray(jax_factors(params, *off)), 1.0, atol=1e-3)
+
+
+def test_gate_round_trips_through_the_config_and_the_firmware_payload():
+    from wmr_simulator.gain_parametrization import to_cfg
+
+    params = _gated_params()
+    restored = params_from_cfg(to_cfg(params), FEATURE_SCALE)
+    np.testing.assert_allclose(np.asarray(restored.gate_centers), np.asarray(params.gate_centers))
+    payload = gain_mlp_payload(params)
+    assert "gate" in payload
+    rng = np.random.default_rng(5)
+    for _ in range(20):
+        ref = [*rng.uniform(-1.0, 1.0, size=2), rng.uniform(-np.pi, np.pi), rng.uniform(0.0, 2.5), rng.uniform(-6.0, 6.0)]
+        pose = [ref[0] + rng.normal(0, 0.1), ref[1] + rng.normal(0, 0.1), ref[2] + rng.normal(0, 0.2)]
+        twist = [ref[3] + rng.normal(0, 0.1), ref[4] + rng.normal(0, 0.3)]
+        ref_state = jnp.asarray([ref[0], ref[1], ref[2], ref[3], 0.0, ref[4], 0.0, 0.0], dtype=jnp.float32)
+        expected = np.asarray(jax_factors(restored, ref_state, jnp.asarray(pose), jnp.asarray(twist)))
+        np.testing.assert_allclose(reference_forward(payload, ref, pose, twist), expected, rtol=1e-4, atol=1e-5)
+
+
+def test_no_gate_is_the_ungated_network():
+    cfg = {"kind": "error_mlp", "hidden_sizes": [16], "bound": 5.0, "spectral_norm_cap": 1.0}
+    params = _random_params(cfg)
+    assert params.gate_centers.shape[0] == 0
+    assert "gate" not in gain_mlp_payload(params)

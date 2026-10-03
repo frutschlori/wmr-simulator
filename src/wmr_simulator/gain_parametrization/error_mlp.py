@@ -18,6 +18,20 @@ to ``spectral_norm_cap`` (Miyato et al. 2018), which caps the Lipschitz
 constant of the whole network (tanh is 1-Lipschitz) in normalized feature
 space. This bounds how fast the factors can change under noisy or unseen
 inputs by construction, independent of the tuning objective. 0 disables it.
+
+Out-of-distribution gate (``gate_num_centers`` > 0; 0 disables it): the
+network is only trained where the tuning rollouts go, so away from them its
+output is extrapolation. The gate is the residual model's (k-means centers
+with Gaussian responsibilities against a null component at ``gate_ood_sigma``
+bandwidths, ``residual_model.residual._gate_weights``) fitted on the features
+the tuning rollouts visit, and scales the network's output:
+
+    gains[i] = base_gains[i] * clip(1 + g(z) * mlp(z)[i], 0, bound)
+
+g is ~1 on the tuning data and falls to 0 away from it, where the controller
+is then exactly the static one. The gate is fitted before the network is
+trained (``with_gate``, from rollouts of the controller the run starts from)
+and frozen, so the tuner trains the gated controller it ships.
 """
 
 import math
@@ -57,6 +71,15 @@ class ErrorMlpParams(NamedTuple):
     learn_bound: bool             # whether the bound is part of the flat trainable vector
     seed: int                     # PRNG seed of the frozen init (kept for serialization)
     spectral_norm_cap: float      # per-matrix spectral norm cap at forward time; 0 disables
+    # Out-of-distribution gate (module docstring). gate_num_centers etc. are the
+    # fitting settings; the fitted gate is the arrays (no centers = no gate yet).
+    gate_num_centers: int = 0
+    gate_bandwidth_scale: float = 1.5
+    gate_ood_sigma: float = 3.0
+    gate_centers: jax.Array = jnp.zeros((0, NUM_FEATURES), dtype=jnp.float32)  # (K, NUM_FEATURES)
+    gate_scales: jax.Array = jnp.zeros((0,), dtype=jnp.float32)               # (K,)
+    gate_mean: jax.Array = jnp.zeros((NUM_FEATURES,), dtype=jnp.float32)      # standardization of z
+    gate_std: jax.Array = jnp.ones((NUM_FEATURES,), dtype=jnp.float32)
 
 
 def _layer_shapes(hidden_sizes: tuple, num_outputs: int) -> list:
@@ -163,6 +186,40 @@ def features(
     return raw / feature_scale
 
 
+def gate(params: ErrorMlpParams, z: jax.Array) -> jax.Array:
+    """Weight of the network's output at normalized features ``z``: ~1 where the
+    tuning rollouts went, falling to 0 away from them; 1 without a fitted gate."""
+    if params.gate_centers.shape[0] == 0:
+        return jnp.ones((), dtype=jnp.float32)
+    u = (z - params.gate_mean) / params.gate_std
+    distance_sq = jnp.sum((u - params.gate_centers) ** 2, axis=1)
+    responsibility = jnp.sum(jnp.exp(-0.5 * distance_sq / (params.gate_scales**2 + 1e-12)))
+    null = jnp.exp(-0.5 * jnp.asarray(params.gate_ood_sigma, dtype=jnp.float32) ** 2)
+    return responsibility / (responsibility + null)
+
+
+def with_gate(params: ErrorMlpParams, samples, seed: int = 0) -> ErrorMlpParams:
+    """``params`` with the gate fitted on ``samples`` ``(N, NUM_FEATURES)``, the
+    normalized features the tuning rollouts visit (``gate_num_centers``
+    k-means centers in standardized feature space, bandwidths
+    ``gate_bandwidth_scale`` x each cluster's RMS radius)."""
+    import numpy as np
+
+    from wmr_simulator.residual_model.residual import _fit_gate
+
+    samples = np.asarray(samples, dtype=np.float32).reshape(-1, NUM_FEATURES)
+    mean = samples.mean(axis=0)
+    std = np.maximum(samples.std(axis=0), 1e-3)
+    centers, scales = _fit_gate((samples - mean) / std, int(params.gate_num_centers),
+                                float(params.gate_bandwidth_scale), seed)
+    return params._replace(
+        gate_centers=jnp.asarray(centers, dtype=jnp.float32),
+        gate_scales=jnp.asarray(scales, dtype=jnp.float32),
+        gate_mean=jnp.asarray(mean, dtype=jnp.float32),
+        gate_std=jnp.asarray(std, dtype=jnp.float32),
+    )
+
+
 def factors(
     params: ErrorMlpParams,
     ref_state: jax.Array,
@@ -171,7 +228,7 @@ def factors(
 ) -> jax.Array:
     """Bounded multiplicative factors, shape ``(num_scheduled,)``."""
     z = features(ref_state, pose_est, twist_est, params.feature_scale)
-    raw = _forward(effective_layers(params), z)
+    raw = gate(params, z) * _forward(effective_layers(params), z)
     bound = jnp.clip(params.bound, min=1.0)
     return jnp.clip(1.0 + raw, min=0.0, max=bound)
 
@@ -290,6 +347,19 @@ def from_cfg(cfg: dict | None, feature_scale) -> ErrorMlpParams:
             f"gain parametrization feature_scale must have shape {(NUM_FEATURES,)}, got {feature_scale.shape}."
         )
 
+    gate_cfg = cfg.get("gate") or {}
+    gate_num_centers = int(cfg.get("gate_num_centers", 0))
+    if gate_num_centers < 0:
+        raise ValueError(f"gain parametrization gate_num_centers must be >= 0, got {gate_num_centers}.")
+    gate_arrays = {}
+    if gate_cfg:
+        gate_arrays = {
+            "gate_centers": jnp.asarray(gate_cfg["centers"], dtype=jnp.float32).reshape(-1, NUM_FEATURES),
+            "gate_scales": jnp.asarray(gate_cfg["scales"], dtype=jnp.float32).reshape(-1),
+            "gate_mean": jnp.asarray(gate_cfg["mean"], dtype=jnp.float32),
+            "gate_std": jnp.asarray(gate_cfg["std"], dtype=jnp.float32),
+        }
+
     init_layers = _init_layers(hidden, seed, num_outputs=len(scheduled_indices))
     template = ErrorMlpParams(
         layers=init_layers,
@@ -301,6 +371,10 @@ def from_cfg(cfg: dict | None, feature_scale) -> ErrorMlpParams:
         learn_bound=learn_bound,
         seed=seed,
         spectral_norm_cap=spectral_norm_cap,
+        gate_num_centers=gate_num_centers,
+        gate_bandwidth_scale=float(cfg.get("gate_bandwidth_scale", 1.5)),
+        gate_ood_sigma=float(cfg.get("gate_ood_sigma", 3.0)),
+        **gate_arrays,
     )
     theta = jnp.asarray(cfg.get("theta", jnp.zeros(_num_weight_params(template))), dtype=jnp.float32)
     if theta.shape != (_num_weight_params(template),):
@@ -337,4 +411,19 @@ def to_cfg(params: ErrorMlpParams) -> dict:
         "spectral_norm_cap": float(params.spectral_norm_cap),
         "feature_scale": [float(value) for value in np.asarray(params.feature_scale)],
         "theta": theta.tolist(),
+        "gate_num_centers": int(params.gate_num_centers),
+        "gate_bandwidth_scale": float(params.gate_bandwidth_scale),
+        "gate_ood_sigma": float(params.gate_ood_sigma),
+        **(
+            {
+                "gate": {
+                    "centers": np.asarray(params.gate_centers, dtype=float).tolist(),
+                    "scales": np.asarray(params.gate_scales, dtype=float).tolist(),
+                    "mean": np.asarray(params.gate_mean, dtype=float).tolist(),
+                    "std": np.asarray(params.gate_std, dtype=float).tolist(),
+                }
+            }
+            if params.gate_centers.shape[0] > 0
+            else {}
+        ),
     }

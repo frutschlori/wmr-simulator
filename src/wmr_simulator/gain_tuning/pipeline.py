@@ -258,6 +258,44 @@ def start_offsets_for_set(reference_trajectories, designed_offsets, realizations
     ).astype(jnp.float32)
 
 
+def schedule_feature_samples(
+    pipeline, robot_params, controller_gains, schedule_params, realizations, start_offsets
+) -> np.ndarray:
+    """The gain-MLP features ``(N, 7)`` the training rollouts visit under a
+    controller, one per geometry step of every (trajectory, realization) pair,
+    under the objective's own noise keys -- what the gain MLP's gate is fitted on
+    (``error_mlp.with_gate``). The twist is the logged encoder estimate."""
+    from wmr_simulator.gain_parametrization import error_mlp
+    from wmr_simulator.gain_tuning.objectives import split_realization_keys_by_trajectory
+
+    references = jnp.asarray(pipeline.training_reference_trajectories, dtype=jnp.float32)
+    num_trajectories = int(references.shape[0])
+    robot_keys = split_realization_keys_by_trajectory(realizations.robot_keys, num_trajectories, namespace=0)
+    estimator_keys = split_realization_keys_by_trajectory(realizations.estimator_keys, num_trajectories, namespace=0)
+    feature_scale = pipeline.gain_parametrization_params.feature_scale
+    steps = pipeline.inner_steps_per_geometry_step
+
+    def rollout(reference_states, start_offset, robot_key, estimator_key):
+        log = pipeline.run_closed_loop(
+            robot_params, use_hidden_robot=True, controller_gains=controller_gains, schedule_params=schedule_params,
+            robot_key=robot_key, estimator_key=estimator_key, reference_states=reference_states,
+            initial_pose=reference_states[0, :3] + start_offset,
+        )
+        index = jnp.arange(reference_states.shape[0] - 1) * steps
+        wheels = log.wheel.speeds[index]
+        twist = jnp.stack([
+            0.5 * robot_params.wheel_radius * (wheels[:, 0] + wheels[:, 1]),
+            robot_params.wheel_radius / robot_params.base_diameter * (wheels[:, 0] - wheels[:, 1]),
+        ], axis=1)
+        return jax.vmap(lambda ref, pose, tw: error_mlp.features(ref, pose, tw, feature_scale))(
+            reference_states[:-1], log.pose.states[index], twist
+        )
+
+    batched = jax.jit(jax.vmap(jax.vmap(rollout, in_axes=(None, 0, 0, 0)), in_axes=(0, 0, 0, 0)))
+    samples = batched(references, jnp.asarray(start_offsets, dtype=jnp.float32), robot_keys, estimator_keys)
+    return np.asarray(samples, dtype=np.float32).reshape(-1, samples.shape[-1])
+
+
 def resolve_gain_robot_params(problem_path: str, fixed_wheel_radius, fixed_base_diameter) -> PhysicalParams:
     with open(problem_path, "r", encoding="utf-8") as file:
         problem_cfg = yaml.safe_load(file)
@@ -497,6 +535,20 @@ def run_gain_tuning_experiment(
         )
     else:
         print("Parametrization run: independent presearch with the parametrization active.")
+
+    if schedule_enabled and pipeline.gain_parametrization_params.gate_num_centers > 0:
+        from wmr_simulator.gain_parametrization.error_mlp import with_gate
+
+        # Fitted on the controller the run starts from and frozen: the network
+        # is trained, and shipped, behind the same gate.
+        samples = schedule_feature_samples(
+            pipeline, robot_params, pipeline.gains,
+            pipeline.gain_parametrization_params if warm_start_schedule else None,
+            realizations, training_start_offsets,
+        )
+        pipeline.gain_parametrization_params = with_gate(pipeline.gain_parametrization_params, samples, seed=seed)
+        print(f"Gain-MLP gate: {pipeline.gain_parametrization_params.gate_num_centers} centers fitted on "
+              f"{len(samples)} feature samples of the training rollouts.")
 
     optimization = optimize(parametrization_init_gains, run_schedule_enabled=schedule_enabled,
                             run_num_steps=num_steps, run_learning_rate=learning_rate,
