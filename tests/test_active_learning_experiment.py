@@ -12,7 +12,7 @@ PROBLEM = "problems/pololu_gains.yaml"
 
 
 def test_init_creates_iteration_scaffolding(tmp_path):
-    experiment = stage_init(tmp_path / "exp", {"problem": PROBLEM, "use_residual_model": False})
+    experiment = stage_init(tmp_path / "exp", {"problem": PROBLEM, "prior_tuning": False, "use_residual_model": False})
     paths = experiment.paths(1)
 
     assert experiment.config_path.is_file()
@@ -58,7 +58,7 @@ def test_init_creates_iteration_scaffolding(tmp_path):
 
 
 def test_finalize_rolls_results_into_next_iteration(tmp_path):
-    experiment = stage_init(tmp_path / "exp", {"problem": PROBLEM})
+    experiment = stage_init(tmp_path / "exp", {"problem": PROBLEM, "prior_tuning": False})
     paths = experiment.paths(1)
 
     identification = {
@@ -103,7 +103,7 @@ def test_finalize_rolls_results_into_next_iteration(tmp_path):
 
 
 def test_finalize_writes_static_gain_baseline(tmp_path):
-    experiment = stage_init(tmp_path / "exp", {"problem": PROBLEM})
+    experiment = stage_init(tmp_path / "exp", {"problem": PROBLEM, "prior_tuning": False})
     paths = experiment.paths(1)
 
     identification = {"estimated_params": {"max_wheel_speed": 240.0}}
@@ -135,7 +135,7 @@ def test_finalize_writes_static_gain_baseline(tmp_path):
 
 
 def test_finalize_without_static_gains_writes_no_baseline(tmp_path):
-    experiment = stage_init(tmp_path / "exp", {"problem": PROBLEM})
+    experiment = stage_init(tmp_path / "exp", {"problem": PROBLEM, "prior_tuning": False})
     paths = experiment.paths(1)
 
     with paths.identification_result.open("w") as file:
@@ -149,7 +149,7 @@ def test_finalize_without_static_gains_writes_no_baseline(tmp_path):
 
 
 def test_finalize_exports_trained_gain_mlp(tmp_path):
-    experiment = stage_init(tmp_path / "exp", {"problem": PROBLEM})
+    experiment = stage_init(tmp_path / "exp", {"problem": PROBLEM, "prior_tuning": False})
     paths = experiment.paths(1)
 
     tuned = load_yaml("models/tuned_gains.yaml")
@@ -181,7 +181,7 @@ def test_residual_flag_off_disables_training_and_every_residual_rollout(tmp_path
 
     from wmr_simulator.active_learning.stages import _residual_in_design, stage_train_residual
 
-    experiment = stage_init(tmp_path / "exp", {"problem": PROBLEM, "use_residual_model": False})
+    experiment = stage_init(tmp_path / "exp", {"problem": PROBLEM, "prior_tuning": False, "use_residual_model": False})
     assert load_yaml(experiment.config_path)["use_residual_model"] is False
 
     # The stage flags default on for the tuning design and gain tuning; the
@@ -197,8 +197,46 @@ def test_an_enabled_residual_without_a_checkpoint_refuses_to_design_nominal(tmp_
 
     from wmr_simulator.active_learning.stages import _load_design_residual_model, _residual_in_design
 
-    experiment = stage_init(tmp_path / "exp", {"problem": PROBLEM})
+    experiment = stage_init(tmp_path / "exp", {"problem": PROBLEM, "prior_tuning": False})
     assert _residual_in_design(experiment, experiment.config["tuning_trajectories"])
     paths = experiment.paths(1)
     with pytest.raises(FileNotFoundError, match="train-residual"):
         _load_design_residual_model(paths.residual_model, paths.problem)
+
+
+def test_prior_tuning_starts_at_iteration_zero_on_the_prior_model(tmp_path):
+    experiment = stage_init(tmp_path / "exp", {"problem": PROBLEM})
+    assert experiment.iteration_indices() == [0]
+    assert experiment.first_iteration == 0
+    paths = experiment.paths(0)
+    # The tuning half reads the prior model, and there is no residual to load.
+    assert load_yaml(paths.problem_identified) == load_yaml(paths.problem)
+    assert paths.residual_skipped.is_file()
+    status = iteration_status(experiment, 0)
+    assert status["train-residual"] and not status["tune-gains"]
+
+
+def test_finalizing_iteration_zero_hands_its_gains_to_iteration_one(tmp_path):
+    experiment = stage_init(tmp_path / "exp", {"problem": PROBLEM, "use_gain_parametrization": False})
+    paths = experiment.paths(0)
+    tuned = [2.1, 5.9, 7.1, 2.7, 0.0, 0.0]
+    with paths.gains_result.open("w") as file:
+        yaml.safe_dump({"gains": tuned, "static_gains": None, "schedule_enabled": False, "schedule": None}, file)
+
+    next_paths = stage_finalize(experiment, 0)
+    assert next_paths == experiment.paths(1)
+    robot_config = load_yaml(next_paths.robot_config)
+    # Nothing was identified: iteration 1 keeps the prior model.
+    assert robot_config["robot"] == load_yaml(paths.robot_config)["robot"]
+    assert robot_config["controller"]["gains"] == tuned
+    assert load_robot_config_file(next_paths.robotcfg_cfg)["kx_traj"] == 2.1
+    assert Experiment.load(experiment.root).first_iteration == 0
+
+
+def test_an_experiment_from_before_prior_tuning_still_starts_at_one(tmp_path):
+    experiment = stage_init(tmp_path / "exp", {"problem": PROBLEM, "prior_tuning": False})
+    config = load_yaml(experiment.config_path)
+    del config["prior_tuning"]
+    with experiment.config_path.open("w") as file:
+        yaml.safe_dump(config, file)
+    assert Experiment.load(experiment.root).first_iteration == 1

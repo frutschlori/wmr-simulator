@@ -120,6 +120,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     init_parser.add_argument(
+        "--prior-tuning",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Tune on the prior model in an iteration 0 before the first identification run "
+            "(default), or --no-prior-tuning to record iteration 1 under the problem's initial gains."
+        ),
+    )
+    init_parser.add_argument(
         "--optimize-identification",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -280,6 +289,8 @@ def main(argv: list[str] | None = None) -> int:
             overrides["use_residual_model"] = args.residual_model
         if args.gain_parametrization is not None:
             overrides["use_gain_parametrization"] = args.gain_parametrization
+        if args.prior_tuning is not None:
+            overrides["prior_tuning"] = args.prior_tuning
         if args.optimize_identification is not None:
             overrides["optimize_identification_trajectory"] = args.optimize_identification
         if args.optimize_tuning is not None:

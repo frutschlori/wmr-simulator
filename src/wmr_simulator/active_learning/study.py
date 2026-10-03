@@ -125,6 +125,8 @@ def run_overrides(spec: dict, name: str, seed: int) -> dict:
     overrides = merge_config(spec.get("overrides") or {}, configuration.get("overrides") or {})
     # A baseline run never tunes or designs; it only needs the static controller.
     overrides = merge_config(overrides, configuration_overrides(configuration.get("tag", "S-F-N")))
+    if configuration.get("baseline_gains") is not None:
+        overrides = merge_config(overrides, {"prior_tuning": False})
     overrides = merge_config(
         overrides,
         {
@@ -373,7 +375,7 @@ def launch_run(
             # four runs side by side pushed the machine into swap). `run`
             # returns at once for an iteration that is already finalized.
             code = 0
-            for target in range(1, final):
+            for target in range(experiment.first_iteration, final):
                 code = _cli(run_dir, log_file, "run", "--iterations", str(target), processes=processes)
                 session["exit_codes"][f"run_{target}"] = code
                 if code != 0:
@@ -693,7 +695,8 @@ def summarize_run(run_dir: Path) -> tuple[list[dict], list[dict]]:
 
     One row per (controller generation, variant): generation ``g`` is the
     controller tuned in iteration ``g`` and benchmarked in iteration ``g + 1``
-    (generation 0 is the initial controller, benchmarked in iteration 1). Each
+    (generation 0 is the controller tuned on the prior model in iteration 0, or
+    without prior tuning the initial controller, benchmarked in iteration 1). Each
     row carries that controller's benchmark, its gains, the checks of the
     tuning that produced it, the parameters it was tuned on and the stage times
     of iteration ``g``. ``run_rows`` is the per-benchmark-run long format.
@@ -713,7 +716,9 @@ def summarize_run(run_dir: Path) -> tuple[list[dict], list[dict]]:
         if not paths.benchmark_result.is_file():
             continue
         generation = benchmark_iteration - 1
-        tuned = experiment.paths(generation) if generation >= 1 else None
+        # Generation 0 was tuned only with prior tuning (iteration 0); without
+        # it, it is the initial controller.
+        tuned = experiment.paths(generation) if generation >= experiment.first_iteration else None
         gains_result = load_yaml(tuned.gains_result) if tuned is not None and tuned.gains_result.is_file() else {}
         identification = (
             load_yaml(tuned.identification_result)

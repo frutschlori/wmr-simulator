@@ -87,6 +87,7 @@ def experiment(tmp_path):
             tmp_path / f"exp{len(list(tmp_path.iterdir()))}",
             {
                 "problem": PROBLEM,
+                "prior_tuning": False,
                 "use_residual_model": False,
                 "benchmark": {"trajectory": str(trajectory), "num_runs": 2, **benchmark_overrides},
             },

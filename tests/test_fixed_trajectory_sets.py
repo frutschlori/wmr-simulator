@@ -142,6 +142,7 @@ def test_a_fixed_tuning_set_is_copied_and_one_longer_than_the_horizon_is_refused
         tmp_path / "exp",
         {
             "problem": PROBLEM,
+            "prior_tuning": False,
             "use_residual_model": False,
             "optimize_tuning_trajectories": False,
             "baseline_tuning_trajectories_dir": str(fitting),
@@ -177,6 +178,7 @@ def test_the_designed_and_fixed_switches_are_independent(tmp_path):
         tmp_path / "exp",
         {
             "problem": PROBLEM,
+            "prior_tuning": False,
             "use_residual_model": False,
             "optimize_identification_trajectory": False,
             "baseline_identification_trajectory": str(identification / "fixed_identification.pkl"),

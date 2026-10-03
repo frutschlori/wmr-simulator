@@ -58,7 +58,8 @@ from wmr_simulator.active_learning.experiment import (
 
 
 def stage_init(root: str | Path, overrides: dict | None = None) -> Experiment:
-    """Create the experiment directory, experiment.yaml, and iteration_01."""
+    """Create the experiment directory, experiment.yaml, and its first
+    iteration: iteration_00 with prior tuning, else iteration_01."""
     experiment = Experiment.create(root, overrides)
     problem_cfg = load_yaml(experiment.config["problem"])
     robot_config = robot_config_from_problem(problem_cfg)
@@ -66,25 +67,39 @@ def stage_init(root: str | Path, overrides: dict | None = None) -> Experiment:
         parametrization = robot_config["controller"].get("gain_parametrization")
         if parametrization is not None:
             parametrization["enabled"] = False
-    _initialize_iteration(experiment, iteration=1, robot_config=robot_config)
+    first = 0 if experiment.config["prior_tuning"] else 1
+    paths = _initialize_iteration(experiment, iteration=first, robot_config=robot_config)
+    if first == 0:
+        _initialize_prior_iteration(experiment, paths)
     print(f"Initialized experiment at {experiment.root}")
     print(f"  config: {experiment.config_path}")
-    print(f"  first iteration: {experiment.paths(1).root}")
+    print(f"  first iteration: {paths.root}")
     return experiment
+
+
+def _initialize_prior_iteration(experiment: Experiment, paths: IterationPaths) -> None:
+    """Iteration 0 tunes on the prior model with no data: the model the tuning
+    half reads (problem_identified.yaml) is the problem's own, and there is no
+    residual (results/residual_skipped.yaml, the loop's record of an iteration
+    without one)."""
+    shutil.copy2(paths.problem, paths.problem_identified)
+    if experiment.config["use_residual_model"]:
+        save_yaml(paths.residual_skipped, {"reason": "iteration 0 tunes on the prior model; no logs yet"})
 
 
 def stage_finalize(experiment: Experiment, iteration: int) -> IterationPaths:
     """Fold this iteration's results into the next iteration's inputs."""
     paths = experiment.paths(iteration)
-    if not paths.identification_result.is_file():
+    # Iteration 0 identified nothing: the next one keeps the prior model.
+    if iteration > 0 and not paths.identification_result.is_file():
         raise FileNotFoundError(f"Missing {paths.identification_result}; run the identify stage first.")
     if not paths.gains_result.is_file():
         raise FileNotFoundError(f"Missing {paths.gains_result}; run the tune-gains stage first.")
 
-    identification = load_yaml(paths.identification_result)
     gains_result = load_yaml(paths.gains_result)
     robot_config = load_yaml(paths.robot_config)
-    robot_config["robot"].update(identification["estimated_params"])
+    if iteration > 0:
+        robot_config["robot"].update(load_yaml(paths.identification_result)["estimated_params"])
     robot_config["controller"]["gains"] = [float(gain) for gain in gains_result["gains"]]
     if gains_result.get("schedule") is not None:
         robot_config["controller"]["gain_parametrization"] = {
@@ -213,7 +228,8 @@ def _load_design_residual_model(path: Path, problem_path: Path):
     """
     skipped = path.with_name("residual_skipped.yaml")
     if not path.is_file() and skipped.is_file():
-        print(f"No residual for this design ({skipped}: every pooled log diverged); designing nominal.")
+        reason = (load_yaml(skipped) or {}).get("reason", "no residual trained")
+        print(f"No residual for this design ({skipped}: {reason}); designing nominal.")
         return None
     if not path.is_file():
         raise FileNotFoundError(
@@ -379,8 +395,10 @@ def _append_tuning_trajectories(
     """Replace everything after the identified phase of this iteration's
     identification reference by trajectories of the previous iteration's tuning
     set (``trajectory_optimization.reference_extension``), so the residual is
-    trained where the tuner rolls out. Iteration 1 has no tuning set yet and
-    keeps its fast phase. The reference as designed (or copied) is kept in
+    trained where the tuner rolls out. The experiment's first iteration has no
+    tuning set before it and keeps its fast phase; with prior tuning that is
+    iteration 0, which drives nothing, so iteration 1 appends iteration 0's
+    set. The reference as designed (or copied) is kept in
     ``identification_trajectory/designed/``; the pickle the stages read is the
     extended one, with the same ``identified_duration``. Returns the appended
     trajectories' names (empty when nothing was appended)."""
@@ -392,7 +410,7 @@ def _append_tuning_trajectories(
     )
 
     count = int(config.get("append_tuning_trajectories", 0))
-    if count <= 0 or iteration <= 1:
+    if count <= 0 or iteration <= experiment.first_iteration:
         return []
     previous = sorted(experiment.paths(iteration - 1).tuning_trajectories_dir.glob("*.pkl"))
     if not previous:
@@ -777,8 +795,9 @@ def stage_run_benchmark(
     the runs therefore include, into ``data/benchmark/``, and the static-gain
     baseline into ``data/benchmark_static/``. They run on the *same* seeds, so
     the hand placements and the sensor noise are paired and the difference
-    between the two sets is the controller and nothing else. Iteration 1 ships
-    only the stock static controller and records only that set.
+    between the two sets is the controller and nothing else. Without prior
+    tuning, iteration 1 ships only the initial static controller and records
+    only that set.
 
     The runs are consecutive and chained exactly like the identification
     deployment, and like a repeat on the real robot: only the first is placed by
@@ -968,7 +987,7 @@ def _drive_benchmark_chain(job: dict) -> tuple[list[Path], list[dict], list[str]
     reference_start = job["reference_start"]
 
     # Named rather than implied: a static-variant run *with* a network beside it
-    # is iteration 1, where that network is still the identity, and the line
+    # is a first iteration, where that network is still the identity, and the line
     # would otherwise read as a contradiction.
     network = ""
     if (robot_config.parent / GAIN_MLP_FILENAME).is_file():
@@ -1086,14 +1105,16 @@ def _benchmark_variant_specs(
 ) -> list[tuple[str, Path, Path]]:
     """``(variant, robot config, data dir)`` per controller this iteration ships.
 
-    Always a static-gain set, in ``data/benchmark_static/``. **Iteration 1's
-    deployed controller *is* that set**: ``problem.yaml``'s gains are the stock
-    static ones and the exported parametrization is exactly the identity (its
-    output layer is zero, so every factor is ``clip(1 + 0, ...)`` = 1.0), so its
-    runs are driven from ``ROBOTCFG.CFG`` where it lives, network beside it and
-    all. Nothing tuned exists yet to compare them against -- the first tuned
-    parametrization ships in iteration 2 -- so iteration 1 records one set and
-    it belongs on the static side of the comparison.
+    Always a static-gain set, in ``data/benchmark_static/``. **Without prior
+    tuning, iteration 1's deployed controller *is* that set**: ``problem.yaml``'s
+    gains are the initial static ones and the exported parametrization is
+    exactly the identity (its output layer is zero, so every factor is
+    ``clip(1 + 0, ...)`` = 1.0), so its runs are driven from ``ROBOTCFG.CFG``
+    where it lives, network beside it and all. Nothing tuned exists yet to
+    compare them against -- the first tuned parametrization ships in iteration
+    2 -- so iteration 1 records one set and it belongs on the static side of the
+    comparison. With prior tuning, iteration 0 already tuned both, and
+    iteration 1 is like any later one.
 
     From iteration 2 the iteration also carries ``ROBOTCFG_static.CFG``, which
     ``finalize`` writes whenever the previous tuning ran an independent static
@@ -2127,14 +2148,17 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
         static_tune_steps=int(config["static_tune_steps"]),
         static_tune_learning_rate=float(config["static_tune_learning_rate"]),
         static_init_gains=static_init_gains,
-        # Iteration 1 has no trained parametrization to warm-start from, so both
-        # presearches are the same evaluation; hand the parametrized run the
-        # static run's converged gains as extra candidates instead of letting it
-        # start from raw LHS winners. Later iterations keep the two lineages apart.
-        seed_parametrization_from_static=iteration <= 1,
-        # Iteration 1 has no prior result to refine from: search the full
+        # The first tuning (iteration 0 with prior tuning, else 1) has no trained
+        # parametrization to warm-start from, so both presearches are the same
+        # evaluation; hand the parametrized run the static run's converged gains
+        # as extra candidates instead of letting it start from raw LHS winners.
+        # Later iterations keep the two lineages apart.
+        seed_parametrization_from_static=iteration <= experiment.first_iteration,
+        # The first tuning has no prior result to refine from: search the full
         # presearch range instead of a band around the base gains.
-        presearch_relative_range=0.0 if iteration <= 1 else float(refine["presearch_relative_range"]),
+        presearch_relative_range=(
+            0.0 if iteration <= experiment.first_iteration else float(refine["presearch_relative_range"])
+        ),
         warm_start_schedule=bool(refine["warm_start_schedule"]),
         init_offset_radius=float(config["init_offset_radius"]),
         init_offset_angle=float(config["init_offset_angle"]),
@@ -2407,6 +2431,10 @@ OPTIONAL_STAGE_OUTPUTS: tuple[tuple[str, str], ...] = (
     ("benchmark", "data/benchmark[_static]/TRxx"),
 )
 
+# Iteration 0 (prior tuning) tunes on the prior model: no data, so no
+# identification, residual or benchmark.
+PRIOR_STAGES = ("plan-tuning-trajectories", "tune-gains")
+
 
 def iteration_status(experiment: Experiment, iteration: int) -> dict[str, bool]:
     paths = experiment.paths(iteration)
@@ -2471,6 +2499,8 @@ def stage_status(experiment: Experiment) -> None:
         print(f"iteration_{iteration:02d}:")
         status = iteration_status(experiment, iteration)
         for stage, description in REQUIRED_STAGE_OUTPUTS + OPTIONAL_STAGE_OUTPUTS:
+            if iteration == 0 and stage not in PRIOR_STAGES:
+                continue
             marker = "x" if status[stage] else " "
             print(f"  [{marker}] {stage:<26} {description}")
 
@@ -2569,6 +2599,8 @@ def _run_iteration(
     """
     paths = experiment.paths(iteration)
     status = iteration_status(experiment, iteration)
+    if iteration == 0:
+        return _run_prior_iteration(experiment, status)
 
     # Benchmark recordings turn up in *earlier* iterations' data/ long after
     # those iterations were finalized (a person copies them off the SD card),
@@ -2624,6 +2656,21 @@ def _run_iteration(
             stage_tune_gains(experiment, iteration)
     with logged_stage(paths, "finalize"):
         stage_finalize(experiment, iteration)
+    return True
+
+
+def _run_prior_iteration(experiment: Experiment, status: dict[str, bool]) -> bool:
+    """Iteration 0: design a tuning set and tune on the prior model, then hand
+    the gains to iteration 1 (experiment.yaml prior_tuning)."""
+    paths = experiment.paths(0)
+    if not status["plan-tuning-trajectories"]:
+        with logged_stage(paths, "plan-tuning-trajectories"):
+            stage_plan_tuning_trajectories(experiment, 0)
+    if not iteration_status(experiment, 0)["tune-gains"]:
+        with logged_stage(paths, "tune-gains"):
+            stage_tune_gains(experiment, 0)
+    with logged_stage(paths, "finalize"):
+        stage_finalize(experiment, 0)
     return True
 
 

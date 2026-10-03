@@ -92,7 +92,7 @@ def test_static_design_gains_prefer_the_static_baseline(tmp_path):
     """The active-learning designers read their design point out of
     robot_config_static_gains.yaml -- the same file the tune-gains stage warm
     starts its static run from -- not out of the iteration's problem yaml."""
-    experiment = stage_init(tmp_path / "exp", {"problem": PROBLEM})
+    experiment = stage_init(tmp_path / "exp", {"problem": PROBLEM, "prior_tuning": False})
     paths = experiment.paths(1)
 
     # Iteration 1 has no separate static controller: its own gains are static.
