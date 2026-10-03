@@ -1,0 +1,39 @@
+# Phase 1c (2026-10-03): sweep of the linear-velocity tracking weight between
+# Phase 1b's 0 (-8.9 mm median, but circle_fast +7.5 and lemniscate_big_fast +8.9)
+# and 1 (the frozen unit weights). 3 iterations to save time; compared at
+# generation 3 with Phase 1b's arms on the same seeds (static runs: same code but
+# the gain-MLP gate, which S runs do not use). Decision rule, fixed beforehand:
+# the weight with the lowest median-over-seeds generation-3 RMSE median, unless a
+# lower weight is within 0.5 mm of it and better on the fast shapes; any weight
+# with divergences in generations 2-3 is out.
+phase: phase1c_linear_velocity_weight
+iterations: 3
+seeds: [0, 1, 2, 3, 4]
+overrides:
+  benchmark: {max_workers: 4}
+  gain_tuning: &frozen_tuner
+    optimizer: bfgs
+    steps: 160
+    num_lhs_points: 0
+    k_max_stab: 20.0
+    position_tracking_weight: 1.0
+    heading_tracking_weight: 1.0
+    linear_velocity_tracking_weight: 1.0
+    angular_velocity_tracking_weight: 1.0
+    input_weight: 0.0
+    input_delta_weight: 1.0
+    omega_delta_weight: 0.0
+    gain_delta_weight: 0.0
+configurations:
+  S-A-R_vlin0.1:
+    tag: S-A-R
+    overrides:
+      gain_tuning: {linear_velocity_tracking_weight: 0.1}
+  S-A-R_vlin0.25:
+    tag: S-A-R
+    overrides:
+      gain_tuning: {linear_velocity_tracking_weight: 0.25}
+  S-A-R_vlin0.5:
+    tag: S-A-R
+    overrides:
+      gain_tuning: {linear_velocity_tracking_weight: 0.5}

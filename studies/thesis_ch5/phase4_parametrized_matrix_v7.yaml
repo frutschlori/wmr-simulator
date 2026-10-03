@@ -1,0 +1,16 @@
+# Phase 4 v7 (2026-10-03): the state-dependent (D) matrix post hoc on the Phase 2
+# v7 static runs, on the same paired benchmark seeds. h3_gate is the thesis
+# method (static base gains x learned schedule behind the out-of-distribution
+# gate, Phase 4b); h3 is the same without the gate (ablation).
+phase: phase4_parametrized_matrix_v7
+source_phase: phase2_static_v7
+iterations: 5
+seeds: [0, 1, 2, 3, 4]
+variants: &variants
+  h3_gate: {base_from_static: true, gain_parametrization: {gate_num_centers: 8}}
+  h3: {base_from_static: true}
+configurations:
+  D-F-N: {source: S-F-N, variants: *variants}
+  D-A-N: {source: S-A-N, variants: *variants}
+  D-F-R: {source: S-F-R, variants: *variants}
+  D-A-R: {source: S-A-R, variants: *variants}
