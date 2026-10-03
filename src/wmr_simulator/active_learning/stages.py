@@ -350,42 +350,58 @@ def stage_plan_identification_trajectory(experiment: Experiment, iteration: int)
         )
         print(f"Saved identification trajectory pickle: {pickle_path}")
 
-    appended = _append_tuning_trajectories(experiment, iteration, pickle_path, config)
-
-    from wmr_simulator.pololu.reference_exporter import export_reference_trajectory, load_reference_trajectory
-
-    jsn_path = export_reference_trajectory(
-        load_reference_trajectory(pickle_path),
-        paths.identification_trajectory_dir,
-    )
-    print(f"Exported Pololu reference JSN: {jsn_path}")
-
     from wmr_simulator.pololu.bridge_exporter import ArcReturn, append_bridge_reference
+    from wmr_simulator.pololu.reference_exporter import (
+        check_firmware_limits,
+        export_reference_trajectory,
+        load_reference_trajectory,
+    )
+    from wmr_simulator.pololu.reference_importer import load_pololu_reference
 
-    # The appended tuning trajectories take the place of the fast phase and of
-    # most of the slow return: the budget is the bridged JSN's 48 KiB.
-    if appended:
-        environment = load_yaml(_identification_problem(paths, config))["environment"]
-        bridged_path = append_bridge_reference(
-            jsn_path,
-            wait_time=float(config["appended_bridge_wait_time"]),
-            plot_path=identification_plot_dir / "identification_trajectory_bridge.pdf",
-            arc_return=ArcReturn(
-                radius=float(config["appended_turn_radius"]),
-                lateral_acceleration=float(config["appended_turn_lateral_acceleration"]),
-                min_piece_duration=float(config["appended_min_piece_duration"]),
-                box_min=tuple(environment["min"]),
-                box_max=tuple(environment["max"]),
-                margin=float(config["appended_box_margin"]),
-            ),
+    # Up to append_tuning_trajectories of the previous tuning set, the last one
+    # dropped while the bridged reference is over the firmware's limits.
+    count = int(config.get("append_tuning_trajectories", 0))
+    while True:
+        appended = _append_tuning_trajectories(experiment, iteration, pickle_path, config, count)
+        jsn_path = export_reference_trajectory(
+            load_reference_trajectory(pickle_path),
+            paths.identification_trajectory_dir,
         )
-    else:
-        bridged_path = append_bridge_reference(
-            jsn_path,
-            wait_time=float(config["bridge_wait_time"]),
-            bridge_time=float(config["bridge_time"]),
-            plot_path=identification_plot_dir / "identification_trajectory_bridge.pdf",
+        print(f"Exported Pololu reference JSN: {jsn_path}")
+
+        # The appended tuning trajectories take the place of the fast phase and
+        # of most of the slow return.
+        if appended:
+            environment = load_yaml(_identification_problem(paths, config))["environment"]
+            bridged_path = append_bridge_reference(
+                jsn_path,
+                wait_time=float(config["appended_bridge_wait_time"]),
+                plot_path=identification_plot_dir / "identification_trajectory_bridge.pdf",
+                arc_return=ArcReturn(
+                    radius=float(config["appended_turn_radius"]),
+                    lateral_acceleration=float(config["appended_turn_lateral_acceleration"]),
+                    min_piece_duration=float(config["appended_min_piece_duration"]),
+                    box_min=tuple(environment["min"]),
+                    box_max=tuple(environment["max"]),
+                    margin=float(config["appended_box_margin"]),
+                ),
+            )
+        else:
+            bridged_path = append_bridge_reference(
+                jsn_path,
+                wait_time=float(config["bridge_wait_time"]),
+                bridge_time=float(config["bridge_time"]),
+                plot_path=identification_plot_dir / "identification_trajectory_bridge.pdf",
+            )
+        over_limits = check_firmware_limits(
+            num_states=len(load_pololu_reference(bridged_path).states),
+            file_bytes=bridged_path.stat().st_size,
         )
+        if len(appended) <= 1 or not over_limits:
+            break
+        count = len(appended) - 1
+        print(f"Bridged reference with {len(appended)} appended trajectories is over the firmware limits; "
+              f"trying {count}.")
     print(f"Exported bridged repeat variant: {bridged_path}")
     print(f"Copy {jsn_path.name} and {paths.robotcfg_cfg.name} to the robot SD card, run the")
     print(f"experiment, then place the logs in {paths.data_dir} and run decode-logs.")
@@ -393,7 +409,7 @@ def stage_plan_identification_trajectory(experiment: Experiment, iteration: int)
 
 
 def _append_tuning_trajectories(
-    experiment: Experiment, iteration: int, pickle_path: Path, config: dict
+    experiment: Experiment, iteration: int, pickle_path: Path, config: dict, count: int
 ) -> list[str]:
     """Replace everything after the identified phase of this iteration's
     identification reference by trajectories of the previous iteration's tuning
@@ -403,7 +419,8 @@ def _append_tuning_trajectories(
     iteration 0, which drives nothing, so iteration 1 appends iteration 0's
     set. The reference as designed (or copied) is kept in
     ``identification_trajectory/designed/``; the pickle the stages read is the
-    extended one, with the same ``identified_duration``. Returns the appended
+    extended one, with the same ``identified_duration``; a second call (fewer
+    trajectories) extends that kept copy again. Returns the appended
     trajectories' names (empty when nothing was appended)."""
     import pickle
 
@@ -412,7 +429,6 @@ def _append_tuning_trajectories(
         representative_trajectories,
     )
 
-    count = int(config.get("append_tuning_trajectories", 0))
     if count <= 0 or iteration <= experiment.first_iteration:
         return []
     previous = sorted(experiment.paths(iteration - 1).tuning_trajectories_dir.glob("*.pkl"))
@@ -422,7 +438,9 @@ def _append_tuning_trajectories(
     chosen = representative_trajectories(previous, count)
     designed_dir = pickle_path.parent / "designed"
     designed_dir.mkdir(exist_ok=True)
-    designed = Path(shutil.move(str(pickle_path), designed_dir / pickle_path.name))
+    designed = designed_dir / pickle_path.name
+    if not designed.exists():
+        shutil.move(str(pickle_path), designed)
     environment = load_yaml(_identification_problem(experiment.paths(iteration), config))["environment"]
     payload = extended_payload(
         designed, chosen, box_min=environment["min"], box_max=environment["max"],
