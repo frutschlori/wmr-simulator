@@ -39,6 +39,12 @@ controller:
     bound: 5.0             # upper factor bound, clipped to >= 1 when applied
     learn_bound: false     # true adds the bound to the trainable vector
     spectral_norm_cap: 2.0 # per-matrix spectral norm cap, 0 disables
+    # Out-of-distribution gate: factor = clip(1 + g(z) mlp(z), 0, bound), g ~1 on the
+    # features the tuning rollouts visit (k-means centers fitted before training)
+    # and -> 0 off them, where the controller is the static one. 0 disables.
+    gate_num_centers: 0
+    gate_bandwidth_scale: 1.5
+    gate_ood_sigma: 3.0
 robot:
   type: differential_drive
   wheel_radius: 0.016   # m

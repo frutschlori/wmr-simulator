@@ -22,6 +22,12 @@ power iteration on the MCU). Factors are multiplicative, so they apply
 unchanged to the firmware gains even though the inner motor gains use
 different units (duty/(rad/s) instead of the simulator's wheel-speed units).
 
+A fitted out-of-distribution gate (``error_mlp.gate``) is exported as an
+optional ``"gate"`` block (``centers`` row-major K x 7, ``scales``, ``mean``,
+``std``, ``ood_sigma``) and evaluated by :func:`reference_forward`, i.e. by the
+MuJoCo firmware port. The Rust crate does not read it yet (2026-10-03), so a
+gated network must not go onto the robot before it does.
+
 A golden file with input/output pairs computed by JAX can be exported next to
 the network; the firmware crate's host test (``cargo test``) checks its
 implementation against it.
@@ -70,7 +76,7 @@ def gain_mlp_payload(params: ErrorMlpParams) -> dict:
     if sizes[-1] != len(scheduled):
         raise ValueError(f"Output size {sizes[-1]} does not match scheduled_indices {scheduled}.")
 
-    return {
+    payload = {
         "kind": error_mlp.KIND,
         "sizes": sizes,
         "scheduled_indices": scheduled,
@@ -78,6 +84,15 @@ def gain_mlp_payload(params: ErrorMlpParams) -> dict:
         "feature_scale": np.asarray(params.feature_scale, dtype=np.float32).tolist(),
         "weights": weights,
     }
+    if params.gate_centers.shape[0] > 0:
+        payload["gate"] = {
+            "centers": np.asarray(params.gate_centers, dtype=np.float32).reshape(-1).tolist(),
+            "scales": np.asarray(params.gate_scales, dtype=np.float32).tolist(),
+            "mean": np.asarray(params.gate_mean, dtype=np.float32).tolist(),
+            "std": np.asarray(params.gate_std, dtype=np.float32).tolist(),
+            "ood_sigma": float(params.gate_ood_sigma),
+        }
+    return payload
 
 
 def firmware_base_gains(controller_gains, max_wheel_speed: float) -> list:
@@ -121,6 +136,15 @@ def reference_forward(payload: dict, ref: list, pose: list, twist: list) -> np.n
         dtype=np.float32,
     )
     h = raw / np.asarray(payload["feature_scale"], dtype=np.float32)
+    gate = np.float32(1.0)
+    if payload.get("gate"):
+        block = payload["gate"]
+        u = (h - np.asarray(block["mean"], dtype=np.float32)) / np.asarray(block["std"], dtype=np.float32)
+        centers = np.asarray(block["centers"], dtype=np.float32).reshape(-1, NUM_FEATURES)
+        scales = np.asarray(block["scales"], dtype=np.float32)
+        responsibility = np.sum(np.exp(np.float32(-0.5) * np.sum((u - centers) ** 2, axis=1) / (scales**2 + np.float32(1e-12))))
+        null = np.exp(np.float32(-0.5) * np.float32(block["ood_sigma"]) ** 2)
+        gate = responsibility / (responsibility + null)
 
     sizes = payload["sizes"]
     weights = np.asarray(payload["weights"], dtype=np.float32)
@@ -138,7 +162,7 @@ def reference_forward(payload: dict, ref: list, pose: list, twist: list) -> np.n
 
     factors = np.ones(NUM_SCHEDULABLE_GAINS, dtype=np.float32)
     factors[payload["scheduled_indices"]] = np.clip(
-        np.float32(1.0) + h, np.float32(0.0), np.float32(payload["bound"])
+        np.float32(1.0) + gate * h, np.float32(0.0), np.float32(payload["bound"])
     )
     return factors
 
