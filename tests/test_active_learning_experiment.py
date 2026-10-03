@@ -26,20 +26,22 @@ def test_init_creates_iteration_scaffolding(tmp_path):
         assert directory.is_dir()
 
     problem_cfg = load_yaml(PROBLEM)
+    initial = experiment.config["initial_robot_params"]
     robot_config = load_yaml(paths.robot_config)
-    assert robot_config["robot"]["wheel_radius"] == problem_cfg["robot"]["wheel_radius"]
+    # The loop starts from the configured initial model, not the problem's robot.
+    assert robot_config["robot"] == {**{k: float(problem_cfg["robot"][k]) for k in initial}, **initial}
     assert robot_config["controller"]["gains"] == problem_cfg["controller"]["gains"]
 
     # Generated problem carries the current robot params and estimator geometry.
     iteration_problem = load_yaml(paths.problem)
-    assert iteration_problem["robot"]["wheel_radius"] == problem_cfg["robot"]["wheel_radius"]
-    assert iteration_problem["estimator"]["wheel_radius"] == problem_cfg["robot"]["wheel_radius"]
+    assert iteration_problem["robot"]["wheel_radius"] == initial["wheel_radius"]
+    assert iteration_problem["estimator"]["wheel_radius"] == initial["wheel_radius"]
 
     # Firmware export reflects params and gain conversion.
     firmware = load_robot_config_file(paths.robotcfg_cfg)
-    assert firmware["wheel_radius"] == problem_cfg["robot"]["wheel_radius"]
+    assert firmware["wheel_radius"] == initial["wheel_radius"]
     assert firmware["kx_traj"] == problem_cfg["controller"]["gains"][0]
-    expected_kp_inner = problem_cfg["controller"]["gains"][3] / problem_cfg["robot"]["max_wheel_speed"]
+    expected_kp_inner = problem_cfg["controller"]["gains"][3] / initial["max_wheel_speed"]
     assert abs(firmware["kp_inner"] - expected_kp_inner) < 1e-9
 
     # The firmware network is exported next to ROBOTCFG.CFG (identity network
@@ -240,3 +242,10 @@ def test_an_experiment_from_before_prior_tuning_still_starts_at_one(tmp_path):
     with experiment.config_path.open("w") as file:
         yaml.safe_dump(config, file)
     assert Experiment.load(experiment.root).first_iteration == 1
+
+
+def test_without_an_initial_model_the_loop_starts_from_the_problem_robot(tmp_path):
+    experiment = stage_init(tmp_path / "exp", {"problem": PROBLEM, "prior_tuning": False, "initial_robot_params": None})
+    problem_robot = load_yaml(PROBLEM)["robot"]
+    robot = load_yaml(experiment.paths(1).robot_config)["robot"]
+    assert robot == {key: float(problem_robot[key]) for key in robot}

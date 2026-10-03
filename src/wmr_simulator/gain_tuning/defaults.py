@@ -59,7 +59,8 @@ GAIN_TUNING_DEFAULTS: dict = {
     # outliers) and frozen at the initial gains, so the objective stays smooth.
     # 0 disables.
     "outlier_loss_factor": 10.0,
-    # Loss weights: every term is 1 or 0, nothing in between (thesis Ch. 5).
+    # Loss weights: every term is 1 or 0 except the linear-velocity term
+    # (below), nothing else in between (thesis Ch. 5).
     # Each term is in its natural unit -- position m^2, heading 2 - 2cos, both
     # velocity channels normalized by their limits (v_max, omega_max), input
     # delta duty^2 per step -- and at the tuned gains the five active terms sit
@@ -73,7 +74,14 @@ GAIN_TUNING_DEFAULTS: dict = {
     # high-kth controllers relative to the robot, so watch ringing there.
     "position_tracking_weight": 1.0,
     "heading_tracking_weight": 1.0,
-    "linear_velocity_tracking_weight": 1.0,
+    # 0.25, not 1 (2026-10-03): the tuning rollouts start up to 20 cm off the
+    # reference (designed offsets average 17 cm), and driving that out at a
+    # stiff kx means leaving the reference speed, which the full weight
+    # charges -- it held kx at ~2.2 although the plant prefers ~4.5 on every
+    # benchmark shape. MuJoCo, S-A-R x 5 seeds (Phase 1b/1c): weight 0 -8.9 mm
+    # median but fast turns +8 mm and divergences, 0.1 diverged once, 0.25
+    # -6.9 mm against 1 with the fast shapes unchanged, 0.5 -3.8 mm.
+    "linear_velocity_tracking_weight": 0.25,
     "angular_velocity_tracking_weight": 1.0,
     "input_weight": 0.0,
     "input_delta_weight": 1.0,

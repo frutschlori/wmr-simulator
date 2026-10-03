@@ -63,6 +63,9 @@ def stage_init(root: str | Path, overrides: dict | None = None) -> Experiment:
     experiment = Experiment.create(root, overrides)
     problem_cfg = load_yaml(experiment.config["problem"])
     robot_config = robot_config_from_problem(problem_cfg)
+    robot_config["robot"].update(
+        {name: float(value) for name, value in (experiment.config["initial_robot_params"] or {}).items()}
+    )
     if not experiment.config["use_gain_parametrization"]:
         parametrization = robot_config["controller"].get("gain_parametrization")
         if parametrization is not None:

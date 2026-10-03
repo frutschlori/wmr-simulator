@@ -61,6 +61,7 @@ def test_a_baseline_run_skips_the_prior_tuning():
         "configurations": {"stock": {"baseline_gains": [4.5, 6.0, 12.0, 2.5, 5.0, 0.0]}, "a": {"tag": "S-A-N"}},
     }
     assert run_overrides(spec, "stock", 0)["prior_tuning"] is False
+    assert run_overrides(spec, "stock", 0)["initial_robot_params"] is None
     assert "prior_tuning" not in run_overrides(spec, "a", 0)
 
 
