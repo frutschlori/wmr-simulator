@@ -286,8 +286,9 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         # start, so the experiment can be repeated without repositioning the robot.
         "bridge_wait_time": 1.5,
         "bridge_time": 8.5,
-        # From iteration 2 the reference after the identified phase is this many
-        # trajectories of the previous iteration's tuning set (the most
+        # From iteration 2 the reference after the identified phase is up to this
+        # many trajectories of the previous iteration's tuning set (the last one
+        # dropped while the bridged JSN is over the firmware's 500 points / 48 KiB) (the most
         # demanding one, then the medoid; trajectory_optimization.
         # reference_extension), so the residual learns where the tuner rolls
         # out; iteration 1 keeps the fast phase. The segments are mirrored,
@@ -307,7 +308,11 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         # S-A-R v4 seeds 0-4, post hoc at iteration 5, closed-loop residual):
         # held-out fidelity -2.4 % (5/5) and retuned tracking -1.1 mm (5/5);
         # one trajectory was inconsistent, the fast phase made the residual
-        # 16 % worse. 0 keeps the designed phases.
+        # 16 % worse. In the full loop (2026-10-04, 10 seeds, Phase 6) the
+        # designed representatives vs nothing appended were within noise (-0.26
+        # mm), random ones instead 0.8 mm worse; up to 4 instead of 2 (3 fit)
+        # was ~1 mm worse at generations 4-5 (Phase 5b). 0 keeps the designed
+        # phases.
         "append_tuning_trajectories": 2,
         # Ablation only: take the appended trajectories from this directory of
         # tuning references instead of the previous iteration's tuning set, so
