@@ -503,6 +503,12 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         # conditions, where a short run is just less data (_tuning_problem in
         # stages.py carries the measurement behind 4.0).
         "sim_time": 4.0,
+        # Smallest distance between the random start and goal of each design's
+        # initial line [m]. Closer draws were redrawn from 2026-10-04 on: one
+        # drawn 0.09 m apart stayed a near-stationary design (phase2_static_v9
+        # S-A-N seed 0); 52 of that study's 132 designed sets held a design
+        # below 0.3 m/s. Runs before this date used no minimum.
+        "min_start_goal_distance": 1.0,
         "min_speed": 1.1,
         "min_speed_fraction": 0.5,
         # Lower bound on a designed trajectory's *mean* lateral acceleration
