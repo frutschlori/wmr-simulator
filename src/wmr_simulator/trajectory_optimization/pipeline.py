@@ -140,6 +140,9 @@ OBJECTIVE_MODE_GAIN_TUNING = "gain-tuning"
 # own. The count is the parametrization's stiffness knob (see bspline.py); the
 # scripts pass their own.
 DEFAULT_NUM_CONTROL_POINTS = 4
+# Smallest distance between the random start and goal of a gain-tuning design's
+# initial line [m]; see _random_gain_tuning_control_points.
+DEFAULT_MIN_START_GOAL_DISTANCE = 1.0
 # The gain-tuning FIM is an expectation over the same realizations the gain
 # tuner scores its objective on -- noise keys and start-pose offsets alike --
 # so their count and distribution come from the gain-tuning defaults rather
@@ -323,8 +326,12 @@ class TrajectoryOptimizationPipeline:
         motion_phases: list[dict] | None = None,
         controller_gains=None,
         residual_model=None,
+        min_start_goal_distance: float = DEFAULT_MIN_START_GOAL_DISTANCE,
     ):
         self.problem = ProblemDefinition(problem_path)
+        # Gain-tuning designs start from a random line between a start and a
+        # goal; see _random_gain_tuning_control_points.
+        self.min_start_goal_distance = float(min_start_goal_distance)
         # Motion limits the *constraint term* is written against, as a partial
         # robot-config block (v_max, a_max, a_max_lateral, omega_max,
         # alpha_max) overriding the problem yaml's. The plant is untouched --
@@ -1321,8 +1328,23 @@ class TrajectoryOptimizationPipeline:
         env_max = np.asarray(self.problem.environment_max, dtype=float)
         if not np.all(np.isfinite(env_min)) or not np.all(np.isfinite(env_max)):
             raise ValueError("Random gain-tuning trajectories require finite environment bounds.")
+        # A start and goal drawn close together leave a near-stationary initial
+        # curve that the design never grows out of: S-A-N seed 0, iteration 1
+        # of phase2_static_v9 drew them 0.09 m apart, and the design ended at a
+        # mean speed of 0.09 m/s. Measured 2026-10-04 on seeds 0/5/8: requiring
+        # 1 m raised the slowest design of the batch from 0.08-0.25 to
+        # 0.65-0.76 m/s, which switching the criterion from A to a smooth E did
+        # not (the designs stay close to their initialization). Redrawing the
+        # goal shifts every later draw of the generator, so every batch changes.
+        if self.min_start_goal_distance >= float(np.linalg.norm(env_max - env_min)):
+            raise ValueError(
+                f"min_start_goal_distance {self.min_start_goal_distance} m does not fit in the "
+                f"environment ({env_min} to {env_max})."
+            )
         start = rng.uniform(env_min, env_max)
         goal = rng.uniform(env_min, env_max)
+        while float(np.linalg.norm(goal - start)) < self.min_start_goal_distance:
+            goal = rng.uniform(env_min, env_max)
         line_samples = np.linspace(0.0, 1.0, num_control_points)[:, None]
         positions = start[None, :] + line_samples * (goal[None, :] - start[None, :])
         if float(min_speed) > 0.0:

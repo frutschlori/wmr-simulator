@@ -133,3 +133,19 @@ def test_a_trained_parametrization_without_explicit_gains_is_flagged(tmp_path, c
         problem_path=str(_trained_problem(tmp_path)), controller_gains=STATIC_GAINS
     )
     assert "WARNING" not in capsys.readouterr().out
+
+
+def test_random_tuning_initializations_keep_start_and_goal_apart(default_pipeline):
+    """A start drawn next to its goal left a near-stationary design (2026-10-04)."""
+    rng = np.random.default_rng(0)
+    for _ in range(200):
+        points = np.asarray(default_pipeline._random_gain_tuning_control_points(rng, 7))
+        assert np.linalg.norm(points[-1] - points[0]) >= default_pipeline.min_start_goal_distance - 1e-6
+
+
+def test_a_start_goal_distance_beyond_the_workspace_is_refused():
+    pipeline = TrajectoryOptimizationPipeline(
+        problem_path=PROBLEM, objective_mode="gain-tuning", min_start_goal_distance=100.0
+    )
+    with pytest.raises(ValueError, match="min_start_goal_distance"):
+        pipeline._random_gain_tuning_control_points(np.random.default_rng(0), 7)

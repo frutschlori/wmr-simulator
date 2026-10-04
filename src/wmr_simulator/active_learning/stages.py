@@ -552,6 +552,7 @@ def stage_plan_tuning_trajectories(experiment: Experiment, iteration: int) -> li
         residual_model=residual_model,
         motion_limits=motion_limits or None,
         time_scaling=config["time_scaling"],
+        min_start_goal_distance=float(config["min_start_goal_distance"]),
     )
     constraint_component_weights = {
         name: float(value) for name, value in config["constraint_component_weights"].items()
