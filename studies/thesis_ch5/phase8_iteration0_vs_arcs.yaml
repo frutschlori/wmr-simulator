@@ -4,7 +4,7 @@
 # size, iteration 0 caused the shrink; if not, the arc turns did. Compare with phase2_static_v6.
 phase: phase8_iteration0_vs_arcs
 iterations: 5
-seeds: [0, 1, 2, 3, 4]
+seeds: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
 overrides:
   benchmark: {max_workers: 4}
   prior_tuning: false
