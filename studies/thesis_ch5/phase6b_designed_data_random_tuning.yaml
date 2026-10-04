@@ -1,0 +1,30 @@
+# Phase 6b (2026-10-04 night): completes Phase 6's factorial. Random-15 tuning
+# set, but the residual trained on two representatives of a *designed* tuning
+# set (fixed for all seeds: S-A-R seed 0, iteration 3 of phase2_static_v8).
+# Paired with phase2_static_v9 S-AF-R_random15 (own random trajectories
+# appended) and phase6 S-AF-R_random15_append0 (nothing appended).
+phase: phase6b_designed_data_random_tuning
+iterations: 5
+seeds: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+overrides:
+  benchmark: {max_workers: 4}
+  gain_tuning: &frozen_tuner
+    optimizer: bfgs
+    steps: 160
+    num_lhs_points: 0
+    k_max_stab: 20.0
+    position_tracking_weight: 1.0
+    heading_tracking_weight: 1.0
+    linear_velocity_tracking_weight: 0.25
+    angular_velocity_tracking_weight: 1.0
+    input_weight: 0.0
+    input_delta_weight: 1.0
+    omega_delta_weight: 0.0
+    gain_delta_weight: 0.0
+configurations:
+  S-AF-R_random15_appenddesigned:
+    tag: S-AF-R
+    overrides:
+      baseline_tuning_trajectories_dir: trajectory_exports/fixed_sets/random_bspline_N15
+      identification_trajectory:
+        append_tuning_trajectories_from: "/home/florian/Desktop/Uni/MA/Code/wmr-simulator/Pololu Data/thesis_ch5/phase2_static_v8/S-A-R_seed0/iteration_03/tuning_trajectories"
