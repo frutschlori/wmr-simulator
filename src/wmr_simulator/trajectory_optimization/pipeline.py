@@ -30,6 +30,7 @@ from wmr_simulator.trajectory_optimization.fim import (
     fim_from_factor,
 )
 from wmr_simulator.trajectory_optimization.start_offsets import (
+    START_OFFSET_MODE_NONE,
     START_OFFSET_MODE_RANDOM,
     START_OFFSET_MODE_STATIC,
     START_OFFSET_MODES,
@@ -478,6 +479,10 @@ class TrajectoryOptimizationPipeline:
                 start_offsets=static_start_offsets(
                     int(self.realizations.robot_keys.shape[0]), self.offset_radius, self.offset_angle
                 )
+            )
+        elif self.start_offset_mode == START_OFFSET_MODE_NONE:
+            self.realizations = self.realizations._replace(
+                start_offsets=jnp.zeros_like(self.realizations.start_offsets)
             )
         self.optimize_start_offsets = bool(np.any(np.asarray(self.start_offset_mask)))
         if self.optimize_start_offsets and self.objective_mode != OBJECTIVE_MODE_GAIN_TUNING:

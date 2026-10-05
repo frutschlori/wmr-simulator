@@ -1,0 +1,29 @@
+# Phase 9 (2026-10-04, thesis Section 4 promise): optimized vs random vs no start
+# offsets in the tuning design, end to end. S-A-R with
+# tuning_trajectories.start_offset_mode random (each trajectory designed and tuned
+# under its own frozen uniform draw within 0.2 m / 0.3 rad) and none (every rollout
+# of design and tuner starts on the reference). Paired with phase2_static_v9 S-A-R
+# (optimize, the default). Code 1f32934 + the `none` mode patch (a clean clone);
+# phase9_start_offsets_repro reruns v9 S-A-R seed 0 on that clone as the
+# bit-identity check. The controlled side study (one design context, FIM, loss
+# profiles) is tools/offset_controlled.py -> phase9_offsets_controlled/.
+phase: phase9_start_offsets_repro
+iterations: 5
+seeds: [0]
+overrides:
+  benchmark: {max_workers: 4}
+  gain_tuning: &frozen_tuner
+    optimizer: bfgs
+    steps: 160
+    num_lhs_points: 0
+    k_max_stab: 20.0
+    position_tracking_weight: 1.0
+    heading_tracking_weight: 1.0
+    linear_velocity_tracking_weight: 0.25
+    angular_velocity_tracking_weight: 1.0
+    input_weight: 0.0
+    input_delta_weight: 1.0
+    omega_delta_weight: 0.0
+    gain_delta_weight: 0.0
+configurations:
+  S-A-R: {tag: S-A-R}
