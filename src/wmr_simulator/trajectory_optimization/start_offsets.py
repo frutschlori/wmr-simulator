@@ -1,9 +1,11 @@
 """Where a rollout starts: every way a start-pose offset comes into being.
 
 Sampled at random (:func:`sample_initial_pose_offsets`), spread
-deterministically (:func:`static_start_offsets`), or made a decision variable
-of the design (:func:`squash_start_offsets` and the ``optimize*`` modes) --
-one enum, one code path, a 3-element boolean mask over ``[dx, dy, dtheta]``.
+deterministically (:func:`static_start_offsets`), left out (``none``: every
+rollout starts on the reference, the ablation that shows what the offsets buy),
+or made a decision variable of the design (:func:`squash_start_offsets` and
+the ``optimize*`` modes) -- one enum, one code path, a 3-element boolean mask
+over ``[dx, dy, dtheta]``.
 
 This is a trajectory-design concern, which is why it lives here: the offsets
 are part of the *experiment* being designed, alongside the curve, and both
@@ -25,6 +27,7 @@ import jax.numpy as jnp
 
 START_OFFSET_MODE_RANDOM = "random"
 START_OFFSET_MODE_STATIC = "static"
+START_OFFSET_MODE_NONE = "none"
 START_OFFSET_MODE_OPTIMIZE = "optimize"
 START_OFFSET_MODE_OPTIMIZE_HEADING = "optimize-heading"
 START_OFFSET_MODE_OPTIMIZE_DISPLACEMENT = "optimize-displacement"
@@ -35,6 +38,7 @@ START_OFFSET_MODE_OPTIMIZE_DISPLACEMENT = "optimize-displacement"
 START_OFFSET_MODE_MASKS = {
     START_OFFSET_MODE_RANDOM: (False, False, False),
     START_OFFSET_MODE_STATIC: (False, False, False),
+    START_OFFSET_MODE_NONE: (False, False, False),
     START_OFFSET_MODE_OPTIMIZE: (True, True, True),
     START_OFFSET_MODE_OPTIMIZE_HEADING: (False, False, True),
     START_OFFSET_MODE_OPTIMIZE_DISPLACEMENT: (True, True, False),

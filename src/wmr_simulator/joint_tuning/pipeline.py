@@ -119,6 +119,7 @@ from wmr_simulator.joint_tuning.gain_solvers import (
 from wmr_simulator.joint_tuning.validation import load_validation_trajectories
 from wmr_simulator.trajectory_optimization.start_offsets import (
     START_OFFSET_MODE_OPTIMIZE,
+    START_OFFSET_MODE_NONE,
     START_OFFSET_MODE_RANDOM,
     START_OFFSET_MODE_STATIC,
     inverse_squash_start_offsets,
@@ -515,6 +516,8 @@ def run_joint_tuning(
         frozen_offsets = jnp.broadcast_to(
             static_start_offsets(num_realizations, init_offset_radius, init_offset_angle)
             if start_offset_mode == START_OFFSET_MODE_STATIC
+            else jnp.zeros_like(realizations.start_offsets)
+            if start_offset_mode == START_OFFSET_MODE_NONE
             else realizations.start_offsets,
             (num_trajectories, num_realizations, 3),
         )

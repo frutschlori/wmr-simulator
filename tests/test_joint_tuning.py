@@ -796,3 +796,16 @@ def test_warm_start_rounds_cannot_swallow_the_whole_budget():
             num_trajectories=NUM_TRAJECTORIES, num_control_points=NUM_CONTROL_POINTS,
             num_realizations=NUM_REALIZATIONS, verbose=False,
         )
+
+
+def test_none_offset_mode_starts_every_rollout_on_the_reference():
+    """``none`` is the no-offset ablation: the designer's bundle, the batch
+    starts it exports and the offsets a decision vector stands for are all
+    exactly zero."""
+    pipeline = TrajectoryOptimizationPipeline(
+        PROBLEM, objective_mode="gain-tuning", start_offset_mode="none"
+    )
+    assert np.all(np.asarray(pipeline.realizations.start_offsets) == 0.0)
+    assert np.all(np.asarray(pipeline.batch_frozen_start_offsets(3, seed=0)) == 0.0)
+    decision_variables = jnp.ones(pipeline.control_points.size, dtype=jnp.float32)
+    assert np.all(np.asarray(pipeline.start_offsets_from_decision_variables(decision_variables)) == 0.0)
