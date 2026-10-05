@@ -179,8 +179,8 @@ friction:
   # close the whole gap: on `lemniscate_fast` the real robot gives 0.540 / 0.255
   # where the plant at 0.70 gives a median 0.096 with 0/8 diverging, i.e. still
   # ~4x too good on the high-yaw-rate trajectory. The likely remainder is the
-  # missing wheel-loop phase lag (see CLAUDE.md, "Open modeling question"): the
-  # sim's PT1+PI inner loop cannot oscillate, and an oscillation is what the
+  # missing wheel-loop phase lag: the sim's PT1+PI inner loop cannot
+  # oscillate, and an oscillation is what the
   # real robot is observed to lose traction *after*. Do not chase that residual
   # with more mu - 0.65 already breaks circle_slow's siblings and 0.60 breaks
   # everything.

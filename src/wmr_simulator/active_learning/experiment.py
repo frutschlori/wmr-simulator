@@ -487,8 +487,7 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         # bound), so the set still covers the slow regime.
         # Measured 2026-09-09 over 4-trajectory designs at 250 steps, mean |v|
         # per trajectory against max |alpha| as a fraction of alpha_max (designs
-        # over ~1.03x alpha_max do not track -- see the divergence entry in
-        # CLAUDE.md):
+        # over ~1.03x alpha_max do not track):
         #   7 CPs, no minimum   0.38-0.78 m/s, alpha up to 1.41x   <- today
         #   7 CPs, min_speed 0.9  0.59-0.83, alpha up to 1.14x
         #   5 CPs, min_speed 1.1  0.62-0.87, alpha 0.69-0.80x      <- this
