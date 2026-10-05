@@ -1,0 +1,56 @@
+# Phase 2 v9, fixed-identification random arms (2026-10-04): the random tuning sets
+# (random_bspline_N15/45/150) with the random-draw identification reference
+# (S-F-*), the fully undesigned arm missing from v9, which ran them only with a
+# designed identification reference (S-AF-*). Same code (1f32934) and seeds as
+# phase2_static_v9; overrides copied verbatim. Runs go to their own phase
+# directory and are symlinked into phase2_static_v9. Seeds 0-9 primary, 10 the
+# sensitivity check. queue_priority: random 15 first, then 45, then 150.
+phase: phase2_static_v9_frandom
+iterations: 5
+seeds: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+overrides:
+  benchmark: {max_workers: 4}
+  gain_tuning: &frozen_tuner
+    optimizer: bfgs
+    steps: 160
+    num_lhs_points: 0
+    k_max_stab: 20.0
+    position_tracking_weight: 1.0
+    heading_tracking_weight: 1.0
+    linear_velocity_tracking_weight: 0.25
+    angular_velocity_tracking_weight: 1.0
+    input_weight: 0.0
+    input_delta_weight: 1.0
+    omega_delta_weight: 0.0
+    gain_delta_weight: 0.0
+configurations:
+  S-F-N_random15:
+    tag: S-F-N
+    queue_priority: 0
+    overrides:
+      baseline_tuning_trajectories_dir: trajectory_exports/fixed_sets/random_bspline_N15
+  S-F-R_random15:
+    tag: S-F-R
+    queue_priority: 0
+    overrides:
+      baseline_tuning_trajectories_dir: trajectory_exports/fixed_sets/random_bspline_N15
+  S-F-N_random45:
+    tag: S-F-N
+    queue_priority: 1
+    overrides:
+      baseline_tuning_trajectories_dir: trajectory_exports/fixed_sets/random_bspline_N45
+  S-F-R_random45:
+    tag: S-F-R
+    queue_priority: 1
+    overrides:
+      baseline_tuning_trajectories_dir: trajectory_exports/fixed_sets/random_bspline_N45
+  S-F-N_random150:
+    tag: S-F-N
+    queue_priority: 2
+    overrides:
+      baseline_tuning_trajectories_dir: trajectory_exports/fixed_sets/random_bspline_N150
+  S-F-R_random150:
+    tag: S-F-R
+    queue_priority: 2
+    overrides:
+      baseline_tuning_trajectories_dir: trajectory_exports/fixed_sets/random_bspline_N150
