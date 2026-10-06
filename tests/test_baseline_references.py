@@ -138,7 +138,10 @@ def test_check_firmware_limits_flags_oversized_references():
         check_firmware_limits,
     )
 
-    assert check_firmware_limits(num_states=500, file_bytes=1000) == []
+    # MAX_POINTS in pololu-rs firmware/src/trajectory_reading.rs.
+    assert FIRMWARE_MAX_TRAJECTORY_POINTS == 350
+    assert check_firmware_limits(num_states=350, file_bytes=1000) == []
+    assert len(check_firmware_limits(num_states=351, file_bytes=1000)) == 1
     warnings = check_firmware_limits(num_states=601, file_bytes=85044)
     assert len(warnings) == 2
     assert str(FIRMWARE_MAX_TRAJECTORY_POINTS) in warnings[0]

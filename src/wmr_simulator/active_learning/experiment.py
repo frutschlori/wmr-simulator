@@ -288,7 +288,7 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         "bridge_time": 8.5,
         # From iteration 2 the reference after the identified phase is up to this
         # many trajectories of the previous iteration's tuning set (the last one
-        # dropped while the bridged JSN is over the firmware's 500 points / 48 KiB) (the most
+        # dropped while the bridged JSN is over the firmware's 350 points / 48 KiB) (the most
         # demanding one, then the medoid; trajectory_optimization.
         # reference_extension), so the residual learns where the tuner rolls
         # out; iteration 1 keeps the fast phase. The segments are mirrored,
@@ -297,13 +297,14 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         # arc - straight line - arc (pololu.bridge_exporter.arc_line_arc_states,
         # the fastest tangent route inside the box). Every piece rests at its
         # ends; arcs have appended_turn_radius and peak at
-        # appended_turn_lateral_acceleration, the line at 1.5 m/s, and no piece
+        # appended_turn_lateral_acceleration, the line at 1.5 m/s (faster when
+        # needed, appended_return_max_line_speed), and no piece
         # is shorter than appended_min_piece_duration. Nothing turns on the
         # spot: the Kanayama law has no heading feedback at v_ref = 0, and with
         # turns in place (until 2026-10-03) 119 of 159 iteration-2 repeats in
         # Phase 2 v6 started > 0.5 rad off heading. The bridged JSN is written
         # compactly, so the 48 KiB limit is no longer what binds (16 of v6's
-        # 160 indented ones were over it); the firmware's 500 points (25 s) is.
+        # 160 indented ones were over it); the firmware's 350 points (17.5 s) is.
         # One SD-card swap per iteration as before. Measured 2026-10-02 (MuJoCo,
         # S-A-R v4 seeds 0-4, post hoc at iteration 5, closed-loop residual):
         # held-out fidelity -2.4 % (5/5) and retuned tracking -1.1 mm (5/5);
@@ -324,6 +325,12 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         "appended_turn_lateral_acceleration": 3.0,
         "appended_min_piece_duration": 0.75,
         "appended_box_margin": 0.15,
+        # The return's straight line peaks at 1.5 m/s; while the bridged JSN is
+        # over the firmware's points, it is driven faster, in 0.25 m/s steps up
+        # to this, before an appended trajectory is dropped (the arcs never
+        # change). Added 2026-10-06: the random identification references of
+        # S-F-* came to 358 points against the firmware's 350.
+        "appended_return_max_line_speed": 2.5,
     },
     "identification": {
         # 150 steps at 1e-4 (2026-09-09 to 09-13) does not converge: every

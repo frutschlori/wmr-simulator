@@ -379,20 +379,32 @@ def stage_plan_identification_trajectory(experiment: Experiment, iteration: int)
             environment = load_yaml(_identification_problem(paths, config))["environment"]
             with pickle_path.open("rb") as file:
                 pieces = pickle.load(file)["pieces"]
-            bridged_path = append_bridge_reference(
-                jsn_path,
-                wait_time=float(config["appended_bridge_wait_time"]),
-                plot_path=identification_plot_dir / "identification_trajectory_bridge.pdf",
-                pieces=pieces,
-                arc_return=ArcReturn(
-                    radius=float(config["appended_turn_radius"]),
-                    lateral_acceleration=float(config["appended_turn_lateral_acceleration"]),
-                    min_piece_duration=float(config["appended_min_piece_duration"]),
-                    box_min=tuple(environment["min"]),
-                    box_max=tuple(environment["max"]),
-                    margin=float(config["appended_box_margin"]),
-                ),
+            arc_return = ArcReturn(
+                radius=float(config["appended_turn_radius"]),
+                lateral_acceleration=float(config["appended_turn_lateral_acceleration"]),
+                min_piece_duration=float(config["appended_min_piece_duration"]),
+                box_min=tuple(environment["min"]),
+                box_max=tuple(environment["max"]),
+                margin=float(config["appended_box_margin"]),
             )
+            # Over the firmware's limits, the return's line is driven faster
+            # first (the arcs stay), and only then is an appended trajectory dropped.
+            line_speeds = np.arange(arc_return.peak_speed, float(config["appended_return_max_line_speed"]) + 1e-9, 0.25)
+            for line_speed in line_speeds:
+                bridged_path = append_bridge_reference(
+                    jsn_path,
+                    wait_time=float(config["appended_bridge_wait_time"]),
+                    plot_path=identification_plot_dir / "identification_trajectory_bridge.pdf",
+                    pieces=pieces,
+                    arc_return=arc_return._replace(peak_speed=float(line_speed)),
+                )
+                if not check_firmware_limits(
+                    num_states=len(load_pololu_reference(bridged_path).states), file_bytes=bridged_path.stat().st_size,
+                ):
+                    break
+            if line_speed > arc_return.peak_speed:
+                print(f"Bridged reference over the firmware limits at a {arc_return.peak_speed} m/s return line; "
+                      f"drove the line at up to {line_speed:.2f} m/s.")
         else:
             bridged_path = append_bridge_reference(
                 jsn_path,
