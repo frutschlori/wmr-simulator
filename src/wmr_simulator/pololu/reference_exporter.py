@@ -18,13 +18,13 @@ class ReferenceTrajectory:
 
 
 # Hard limits of the pololu-rs firmware trajectory loader: states/actions are
-# parsed into heapless vectors of MAX_POINTS (trajectory_reading.rs; capacity
-# 1000, but ~500 is the safe bound for stack limits) and the raw JSN is read
-# into a scratch buffer (sdlog.rs, 48 KiB). Exceeding either makes the firmware
-# report that no trajectory is loaded. NB: at ~140 bytes per state the 48 KiB
-# buffer caps out near ~345 states, so it binds before the point limit unless
-# the firmware scratch buffer is enlarged as well.
-FIRMWARE_MAX_TRAJECTORY_POINTS = 500
+# parsed into heapless vectors of MAX_POINTS (trajectory_reading.rs, 350 on
+# branch experimental_gain_mlp; this said 500 until 2026-10-06, and the robot
+# silently refused a 352-point reference) and the raw JSN is read into a
+# scratch buffer (sdlog.rs, 48 KiB). Exceeding either makes the firmware report
+# that no trajectory is loaded. Compact JSNs take ~45 bytes per state, so the
+# point limit is the one that binds.
+FIRMWARE_MAX_TRAJECTORY_POINTS = 350
 FIRMWARE_MAX_FILE_BYTES = 48 * 1024
 
 
