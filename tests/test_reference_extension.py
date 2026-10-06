@@ -79,6 +79,11 @@ def test_extended_payload_records_what_was_appended(tmp_path):
     assert payload["identified_duration"] == 3.0
     assert payload["appended_tuning_trajectories"] == ["a.pkl", "b.pkl"]
     assert len(payload["reference_states"]) == 61 + 80
+    assert payload["pieces"] == [
+        {"kind": "identified", "end": 60},
+        {"kind": "appended", "end": 100, "name": "a"},
+        {"kind": "appended", "end": 140, "name": "b"},
+    ]
 
 
 def test_extended_payload_needs_an_identified_duration(tmp_path):
@@ -136,6 +141,15 @@ def test_placement_keeps_the_reference_inside_the_box():
     assert chosen["box_violation"] == 0.0
     assert placed[:, 0].min() >= -1.15 - 1e-9 and placed[:, 0].max() <= 1.15 + 1e-9
     assert placed[:, 1].min() >= -2.15 - 1e-9 and placed[:, 1].max() <= 2.15 + 1e-9
+    # The pieces tile the reference in driving order: identified part, then a
+    # turn before every turned segment, every segment once.
+    pieces = chosen["pieces"]
+    ends = [piece["end"] for piece in pieces]
+    assert pieces[0] == {"kind": "identified", "end": 60}
+    assert ends == sorted(ends) and len(set(ends)) == len(ends) and ends[-1] == len(placed) - 1
+    assert [piece["segment"] for piece in pieces if piece["kind"] == "appended"] == chosen["order"]
+    assert sum(piece["kind"] == "turn" for piece in pieces) == sum(angle != 0.0 for angle in chosen["turns_deg"])
+    assert sum(angle != 0.0 for angle in chosen["turns_deg"]) > 0  # the box forces at least one turn here
 
 
 def test_pruned_placement_search_matches_full_enumeration():

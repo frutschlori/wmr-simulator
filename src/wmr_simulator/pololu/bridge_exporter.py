@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 from pathlib import Path
 from typing import NamedTuple
 
@@ -159,12 +160,15 @@ def append_bridge_reference(
     decimals: int = 6,
     plot_path: str | Path | None = None,
     arc_return: ArcReturn | None = None,
+    pieces: list[dict] | None = None,
 ) -> Path:
     """Write ``<name>_bridge.JSN`` (default: next to the input) and return its path.
 
     With ``arc_return`` the return is arc - straight line - arc
     (``arc_line_arc_states``) instead of the free-form bridge, and
-    ``bridge_time`` is unused."""
+    ``bridge_time`` is unused. ``pieces`` (an extended identification
+    reference's, ``reference_extension.extended_payload``) only changes the
+    plot: each piece is drawn on its own and its end is marked."""
     if output_path is None:
         output_path = bridged_output_path(input_path)
     reference = load_pololu_reference(input_path, result_index=result_index)
@@ -200,6 +204,7 @@ def append_bridge_reference(
             bridge_states=bridge_states,
             dt=reference.dt,
             output_path=plot_path,
+            pieces=pieces,
         )
     formatted = format_pololu_reference(
         ReferenceTrajectory(
@@ -268,12 +273,30 @@ def append_bridge_references_in_directory(
     return outputs
 
 
+def _piece_label(piece: dict) -> str:
+    if piece["kind"] == "identified":
+        return "Identified phase"
+    if piece["kind"] == "turn":
+        return "Arc turn"
+    # Designed tuning pickles carry a _YYYYMMDD_HHMMSS stamp; the index names them.
+    name = re.sub(r"_\d{8}_\d{6}$", "", piece["name"])
+    return f"Appended: {name}"
+
+
+def _mark_piece_end(ax, pose: np.ndarray, half_length: float) -> None:
+    """A short stroke across the path at ``pose`` [x, y, theta]: where a piece ends."""
+    normal = np.array([-math.sin(pose[2]), math.cos(pose[2])])
+    ends = pose[:2] + np.outer([-half_length, half_length], normal)
+    ax.plot(ends[:, 0], ends[:, 1], color="black", linewidth=1.5, solid_capstyle="butt", zorder=4)
+
+
 def plot_bridged_reference(
     reference_states: np.ndarray,
     wait_states: np.ndarray,
     bridge_states: np.ndarray,
     dt: float,
     output_path: str | Path,
+    pieces: list[dict] | None = None,
 ) -> Path:
     import matplotlib.pyplot as plt
 
@@ -285,10 +308,31 @@ def plot_bridged_reference(
     fig, axes = plt.subplots(2, 1, figsize=(8.0, 7.0), gridspec_kw={"height_ratios": [1.3, 1.0]})
     ax_xy, ax_state = axes
 
-    ax_xy.plot(reference_states[:, 0], reference_states[:, 1], linewidth=1.4, label="Reference")
+    if pieces:
+        # The identified phase, the wait and the bridge keep the colours of the
+        # plain plot (C0-C2); appended trajectories take the next ones in order,
+        # arc turns are neutral.
+        extent = np.ptp(full_reference_states[:, :2], axis=0).max()
+        start, appended = 0, 0
+        for piece in pieces:
+            end = int(piece["end"])
+            if piece["kind"] == "turn":
+                style = {"color": "0.55", "linestyle": "--"}
+            elif piece["kind"] == "identified":
+                style = {"color": "C0"}
+            else:
+                style = {"color": f"C{3 + appended}"}
+                appended += 1
+            ax_xy.plot(reference_states[start:end + 1, 0], reference_states[start:end + 1, 1], linewidth=1.4,
+                       label=_piece_label(piece), **style)
+            _mark_piece_end(ax_xy, reference_states[end, :3], 0.025 * extent)
+            ax_state.axvline(end * dt, color="0.6", linestyle=":", linewidth=1.0)
+            start = end
+    else:
+        ax_xy.plot(reference_states[:, 0], reference_states[:, 1], linewidth=1.4, label="Reference")
     if len(wait_states):
-        ax_xy.scatter(wait_states[:, 0], wait_states[:, 1], s=12, label="Wait")
-    ax_xy.plot(bridge_states[:, 0], bridge_states[:, 1], linewidth=1.4, label="Bridge")
+        ax_xy.scatter(wait_states[:, 0], wait_states[:, 1], s=12, color="C1", label="Wait")
+    ax_xy.plot(bridge_states[:, 0], bridge_states[:, 1], linewidth=1.4, color="C2", label="Bridge")
     ax_xy.scatter(reference_states[0, 0], reference_states[0, 1], marker="o", s=35, color="black", label="Start")
     ax_xy.scatter(reference_states[-1, 0], reference_states[-1, 1], marker="x", s=45, color="black", label="Original goal")
     ax_xy.set_xlabel("x [m]")
@@ -296,7 +340,11 @@ def plot_bridged_reference(
     ax_xy.set_title("Bridged Pololu Reference")
     ax_xy.set_aspect("equal", adjustable="box")
     ax_xy.grid(True)
-    ax_xy.legend(loc="best")
+    # One entry per label: every arc turn shares one.
+    legend = dict(zip(*reversed(ax_xy.get_legend_handles_labels())))
+    # Beside the axes: the equal-aspect path panel leaves room there, and inside
+    # it the legend covers the path.
+    ax_xy.legend(legend.values(), legend.keys(), loc="center left", bbox_to_anchor=(1.02, 0.5))
 
     ax_state.plot(time, full_reference_states[:, 0], label="x")
     ax_state.plot(time, full_reference_states[:, 1], label="y")

@@ -235,6 +235,38 @@ def test_finalizing_iteration_zero_hands_its_gains_to_iteration_one(tmp_path):
     assert Experiment.load(experiment.root).first_iteration == 0
 
 
+def test_finalize_on_the_robot_creates_the_benchmark_directories(tmp_path):
+    """Hand-recorded benchmark runs go where the MuJoCo benchmark stage would
+    write them: one empty directory per shape, under benchmark_static for a
+    static experiment, and none of it counts as recorded yet."""
+    benchmark_set = tmp_path / "set"
+    benchmark_set.mkdir()
+    for shape in ("circle_fast", "turbo_drift"):
+        (benchmark_set / f"{shape}.JSN").write_text("{}")
+    (benchmark_set / "turbo_drift_bridge.JSN").write_text("{}")
+    experiment = stage_init(tmp_path / "exp", {
+        "problem": PROBLEM, "use_gain_parametrization": False, "benchmark": {"trajectory": str(benchmark_set)},
+    })
+    with experiment.paths(0).gains_result.open("w") as file:
+        yaml.safe_dump({"gains": [2.1, 5.9, 7.1, 2.7, 0.0, 0.0], "static_gains": None,
+                        "schedule_enabled": False, "schedule": None}, file)
+
+    next_paths = stage_finalize(experiment, 0)
+    benchmark_dir = next_paths.data_dir / "benchmark_static"
+    assert sorted(path.name for path in benchmark_dir.iterdir()) == ["circle_fast", "turbo_drift"]
+    assert not iteration_status(experiment, 1)["benchmark"]
+
+    # In MuJoCo the benchmark stage records them; finalize leaves data/ alone.
+    mujoco = stage_init(tmp_path / "mujoco", {
+        "problem": PROBLEM, "use_gain_parametrization": False, "benchmark": {"trajectory": str(benchmark_set)},
+        "mujoco_deployment": {"enabled": True},
+    })
+    with mujoco.paths(0).gains_result.open("w") as file:
+        yaml.safe_dump({"gains": [2.1, 5.9, 7.1, 2.7, 0.0, 0.0], "static_gains": None,
+                        "schedule_enabled": False, "schedule": None}, file)
+    assert not (stage_finalize(mujoco, 0).data_dir / "benchmark_static").exists()
+
+
 def test_an_experiment_from_before_prior_tuning_still_starts_at_one(tmp_path):
     experiment = stage_init(tmp_path / "exp", {"problem": PROBLEM, "prior_tuning": False})
     config = load_yaml(experiment.config_path)

@@ -215,19 +215,25 @@ def extend_identification_reference(
     the segments are attached end to end as they come; with one, the order,
     mirrors and arc turns (``arc_turn``) that keep the reference inside it (by
     ``margin``) are searched, preferring fewer and smaller turns, then an end
-    near the start. Returns the states and the placement chosen."""
+    near the start. Returns the states and the placement chosen; its
+    ``pieces`` list where each piece of the reference ends (sample index):
+    the identified part, every arc turn and every appended segment (by its
+    index in ``segments``), in driving order."""
     keep = int(round(float(identified_duration) / float(dt))) + 1
     if keep > len(states):
         raise ValueError(f"identified_duration {identified_duration} s exceeds the reference ({len(states)} samples).")
     base = np.asarray(states[:keep], dtype=float)
     width = base.shape[1]
+    identified_piece = {"kind": "identified", "end": keep - 1}
     if box_min is None or box_max is None:
         extended = base
-        for segment in segments:
+        pieces = [identified_piece]
+        for index, segment in enumerate(segments):
             extended = np.vstack([extended, attach(extended[-1, :3], segment)[1:]])
+            pieces.append({"kind": "appended", "segment": index, "end": len(extended) - 1})
         return extended, {"order": list(range(len(segments))), "mirrored": [False] * len(segments),
                           "turns_deg": [0.0] * len(segments), "turn_radii": [0.0] * len(segments),
-                          "box_violation": None}
+                          "box_violation": None, "pieces": pieces}
 
     variants = [(segment, mirror(segment)) for segment in segments]
     # (angle, radius) per joint; a turn may also use half the radius, which the
@@ -243,7 +249,7 @@ def extend_identification_reference(
     # enumeration grows as 6 x 8 x 15^3 = 162000 placements for three segments.
     best = None
 
-    def visit(extended, violation, order, flips, turns, turn_indices):
+    def visit(extended, violation, order, flips, turns, turn_indices, pieces):
         nonlocal best
         num_turns = sum(angle != 0.0 for angle, _ in turns)
         total_angle = round(sum(abs(angle) for angle, _ in turns), 3)
@@ -259,7 +265,7 @@ def extend_identification_reference(
             )
             key = (tuple(order), tuple(flips), tuple(turn_indices))
             if best is None or (score, key) < (best[0], best[1]):
-                best = (score, key, extended, tuple(order), tuple(flips), tuple(turns))
+                best = (score, key, extended, tuple(order), tuple(flips), tuple(turns), pieces)
             return
         for index in range(len(segments)):
             if index in order:
@@ -267,20 +273,24 @@ def extend_identification_reference(
             for flip in (False, True):
                 for turn_index, (angle, radius) in enumerate(turn_options):
                     grown = extended
+                    added_pieces = []
                     if angle != 0.0:
                         grown = np.vstack([grown, arc_turn(
                             grown[-1], angle, radius, dt, width,
                             lateral_acceleration=turn_lateral_acceleration, min_duration=turn_min_duration,
                         )])
+                        added_pieces.append({"kind": "turn", "end": len(grown) - 1})
                     grown = np.vstack([grown, attach(grown[-1, :3], variants[index][flip])[1:]])
+                    added_pieces.append({"kind": "appended", "segment": index, "end": len(grown) - 1})
                     added = grown[len(extended):]
                     visit(
                         grown, max(violation, _box_violation(added, box_min, box_max, margin)),
                         order + [index], flips + [flip], turns + [(angle, radius)], turn_indices + [turn_index],
+                        pieces + added_pieces,
                     )
 
-    visit(base, _box_violation(base, box_min, box_max, margin), [], [], [], [])
-    score, _, extended, order, flips, turns = best
+    visit(base, _box_violation(base, box_min, box_max, margin), [], [], [], [], [identified_piece])
+    score, _, extended, order, flips, turns, pieces = best
     return extended, {
         "order": list(order),
         "mirrored": [bool(flip) for flip in flips],
@@ -288,6 +298,7 @@ def extend_identification_reference(
         "turn_radii": [round(radius, 3) for _, radius in turns],
         "box_violation": score[0],
         "end_to_start": round(score[-1], 3),
+        "pieces": pieces,
     }
 
 
@@ -296,7 +307,9 @@ def extended_payload(
 ) -> dict:
     """The identification pickle's payload with the tuning trajectories appended
     after its identified phase (``identified_duration`` unchanged, so the fit
-    still uses the identified part only), placed inside the box if given."""
+    still uses the identified part only), placed inside the box if given.
+    ``pieces`` records where each piece ends (``extend_identification_reference``),
+    appended ones by their tuning pickle's stem, for the plots."""
     with Path(identification_pickle).open("rb") as file:
         payload = pickle.load(file)
     if not isinstance(payload, dict) or payload.get("identified_duration") is None:
@@ -313,11 +326,17 @@ def extended_payload(
         payload["reference_states"], dt, payload["identified_duration"], segments,
         box_min=box_min, box_max=box_max, **placement,
     )
+    pieces = [
+        {"kind": piece["kind"], "end": piece["end"],
+         **({"name": Path(tuning_pickles[piece["segment"]]).stem} if piece["kind"] == "appended" else {})}
+        for piece in chosen.pop("pieces")
+    ]
     return {
         "reference_states": states,
         "dt": dt,
         "identified_duration": float(payload["identified_duration"]),
         "appended_tuning_trajectories": [Path(path).name for path in tuning_pickles],
         "placement": chosen,
+        "pieces": pieces,
         "extends": Path(identification_pickle).name,
     }
