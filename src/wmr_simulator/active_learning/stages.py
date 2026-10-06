@@ -118,6 +118,10 @@ def stage_finalize(experiment: Experiment, iteration: int) -> IterationPaths:
     )
     print(f"Created {next_paths.root} from iteration {iteration:02d} results.")
     print(f"  firmware config for the robot: {next_paths.robotcfg_cfg}")
+    # Also for the iteration past the target, which `run` creates and then
+    # stops: its controller is the last one, and it is benchmarked there.
+    if not experiment.config["mujoco_deployment"]["enabled"]:
+        _create_benchmark_directories(next_paths, experiment.config["benchmark"])
     return next_paths
 
 
@@ -373,10 +377,13 @@ def stage_plan_identification_trajectory(experiment: Experiment, iteration: int)
         # of most of the slow return.
         if appended:
             environment = load_yaml(_identification_problem(paths, config))["environment"]
+            with pickle_path.open("rb") as file:
+                pieces = pickle.load(file)["pieces"]
             bridged_path = append_bridge_reference(
                 jsn_path,
                 wait_time=float(config["appended_bridge_wait_time"]),
                 plot_path=identification_plot_dir / "identification_trajectory_bridge.pdf",
+                pieces=pieces,
                 arc_return=ArcReturn(
                     radius=float(config["appended_turn_radius"]),
                     lateral_acceleration=float(config["appended_turn_lateral_acceleration"]),
@@ -1322,6 +1329,30 @@ def _run_log_paths(directory: Path) -> list[Path]:
     if not directory.is_dir():
         return []
     return sorted(path for path in directory.glob("TR*") if path.is_file())
+
+
+def _create_benchmark_directories(paths: IterationPaths, config: dict) -> list[Path]:
+    """The ``data/`` subdirectories the benchmark stage would record into, empty.
+
+    On the robot the benchmark runs are recorded by hand; creating their
+    directories up front (one per controller variant and shape, named as in
+    MuJoCo, so ``data/benchmark_static/<shape>/`` for a static experiment)
+    shows where each shape's SD-card logs go. Empty directories count as not
+    recorded (``_benchmark_recorded``), and the run-log plots skip them. Empty
+    when the benchmark set is not found (the benchmark stage reports that).
+    """
+    try:
+        sources = _benchmark_sources(config)
+    except FileNotFoundError:
+        return []
+    directories = [
+        data_dir
+        for source in sources
+        for _, _, data_dir in _benchmark_variant_specs(paths, source.stem, len(sources))
+    ]
+    for directory in directories:
+        directory.mkdir(parents=True, exist_ok=True)
+    return directories
 
 
 def _benchmark_recorded(paths: IterationPaths, config: dict) -> bool:
@@ -2642,6 +2673,9 @@ def _run_iteration(
     # data. Independent of the identification logs: rerunning an iteration
     # whose data/ is already filled still records the benchmark it is missing.
     deploys_in_simulation = simulate_deployment or experiment.config["mujoco_deployment"]["enabled"]
+    benchmark_directories = (
+        [] if deploys_in_simulation else _create_benchmark_directories(paths, experiment.config["benchmark"])
+    )
     if deploys_in_simulation and not status["benchmark"]:
         with logged_stage(paths, "benchmark"):
             stage_run_benchmark(experiment, iteration)
@@ -2663,6 +2697,10 @@ def _run_iteration(
         print("  2. Run the experiment(s) on the robot.")
         print(f"  3. Copy the SD-card logs into {paths.data_dir}.")
         print("  4. Re-run this command.")
+        if benchmark_directories:
+            print("  Benchmark runs of this iteration's controller (any time, also after it is finalized):")
+            for directory in benchmark_directories:
+                print(f"     {directory}")
         print("  (or run it with --simulate-deployment to have MuJoCo stand in for the robot.)")
         return False
 
@@ -2709,12 +2747,13 @@ def _problem_at_sim_time(source: Path, sim_time: float, name: str, label: str) -
     if sim_time <= 0.0:
         return source
     problem = load_yaml(source)
-    if float(problem.get("sim_time", 0.0)) == sim_time:
+    own_sim_time = problem.get("sim_time")
+    if float(own_sim_time or 0.0) == sim_time:
         return source
     problem["sim_time"] = sim_time
     target = source.with_name(name)
     save_yaml(target, problem)
-    print(f"{label} runs at sim_time {sim_time} s (the problem yaml's own is {problem.get('sim_time')}).")
+    print(f"{label} runs at sim_time {sim_time} s (the problem yaml's own is {own_sim_time}).")
     return target
 
 
