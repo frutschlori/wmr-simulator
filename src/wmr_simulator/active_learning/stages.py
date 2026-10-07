@@ -141,6 +141,10 @@ def _initialize_iteration(
         base_diameter=robot_config["robot"]["base_diameter"],
         max_wheel_speed=robot_config["robot"]["max_wheel_speed"],
     )
+    calibration = mocap_calibration(experiment)
+    robot_config.pop("mocap_calibration", None)
+    if calibration is not None:
+        robot_config["mocap_calibration"] = calibration.to_mapping()
     save_yaml(paths.robot_config, robot_config)
     write_iteration_problem(experiment.config["problem"], robot_config, paths.problem)
     export_robot_config(
@@ -148,6 +152,7 @@ def _initialize_iteration(
         physical_params=physical_params,
         controller_gains=robot_config["controller"]["gains"],
         template_path=experiment.config.get("robotcfg_template"),
+        overrides=mocap_calibration_config_values(experiment),
     )
     gainmlp_path = _export_gain_mlp_if_configured(paths.problem, paths.gainmlp_jsn)
     if gainmlp_path is not None:
@@ -156,6 +161,23 @@ def _initialize_iteration(
         _write_static_gain_config(experiment, paths, robot_config, physical_params, static_gains)
         print(f"  static-gain baseline for the robot: {paths.robotcfg_static_cfg}")
     return paths
+
+
+def mocap_calibration(experiment: Experiment):
+    """The robot's mocap calibration (experiment.yaml ``mocap_calibration``,
+    pololu.mocap_calibration), or None."""
+    path = experiment.config.get("mocap_calibration")
+    if not path:
+        return None
+    from wmr_simulator.pololu.mocap_calibration import MocapCalibration
+
+    return MocapCalibration.load(path)
+
+
+def mocap_calibration_config_values(experiment: Experiment) -> dict[str, float] | None:
+    """The ROBOTCFG.CFG ``mocap_*`` keys of the robot's calibration, or None."""
+    calibration = mocap_calibration(experiment)
+    return None if calibration is None else calibration.config_values()
 
 
 def _write_static_gain_config(
@@ -183,6 +205,7 @@ def _write_static_gain_config(
         physical_params=physical_params,
         controller_gains=static_config["controller"]["gains"],
         template_path=experiment.config.get("robotcfg_template"),
+        overrides=mocap_calibration_config_values(experiment),
     )
 
 

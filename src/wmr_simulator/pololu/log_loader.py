@@ -49,7 +49,16 @@ POLOLU_TRAJ_CONTROL_COLUMNS = (
     "gyro_x",
     "gyro_y",
     "gyro_z",
+    "ekf_z",
+    "ekf_roll",
+    "ekf_pitch",
+    "z_raw",
+    "roll_raw",
+    "pitch_raw",
 )
+# Decoded before 2026-10-07, when the decoder dropped the EKF and mocap z, roll
+# and pitch; still read as they are.
+LEGACY_POLOLU_TRAJ_CONTROL_COLUMNS = POLOLU_TRAJ_CONTROL_COLUMNS[:29]
 
 
 def load_pololu_traj_control_log(
@@ -235,7 +244,7 @@ def load_imu_gyro_z(
 def _read_time_normalized(path: Path, clip_after_first_trajectory: bool) -> tuple[list[str], np.ndarray]:
     """Read a traj-control csv with the ts column sorted and in seconds from the trajectory start."""
     columns, data = _read_csv(path)
-    if tuple(columns) != POLOLU_TRAJ_CONTROL_COLUMNS:
+    if tuple(columns) not in (POLOLU_TRAJ_CONTROL_COLUMNS, LEGACY_POLOLU_TRAJ_CONTROL_COLUMNS):
         raise ValueError(f"Unexpected columns in {path}: {tuple(columns)}")
 
     ts_index = columns.index("ts")
@@ -453,7 +462,7 @@ def _looks_like_pololu_log(path: Path) -> bool:
     if len(lines) < 2 or not lines[1].strip():
         return False
     columns = tuple(name.strip() for name in lines[0].split(","))
-    return columns == POLOLU_TRAJ_CONTROL_COLUMNS
+    return columns in (POLOLU_TRAJ_CONTROL_COLUMNS, LEGACY_POLOLU_TRAJ_CONTROL_COLUMNS)
 
 
 def print_log_summary(log_path: Path, log: SimulationLog):

@@ -4,7 +4,9 @@ import sys
 import os
 import math
 
-CSV_HEADER = "ts,x,y,yaw,x_des,y_des,yaw_des,v_ff,w_ff,v_actual,w_actual,omega_l_cmd,omega_r_cmd,omega_l_meas,omega_r_meas,duty_l,duty_r,x_err,y_err,yaw_err,x_raw,y_raw,yaw_raw,acc_x,acc_y,acc_z,gyro_x,gyro_y,gyro_z\n"
+# Every field the records carry. The last six columns (the rest of the EKF and
+# mocap attitude) were added 2026-10-07; csvs decoded before have the first 29.
+CSV_HEADER = "ts,x,y,yaw,x_des,y_des,yaw_des,v_ff,w_ff,v_actual,w_actual,omega_l_cmd,omega_r_cmd,omega_l_meas,omega_r_meas,duty_l,duty_r,x_err,y_err,yaw_err,x_raw,y_raw,yaw_raw,acc_x,acc_y,acc_z,gyro_x,gyro_y,gyro_z,ekf_z,ekf_roll,ekf_pitch,z_raw,roll_raw,pitch_raw\n"
 MAGIC_HEADER = b"\xaa\xbb\xcc\xdd"
 FLOAT_COUNTS = {1: 6, 2: 5, 3: 2, 4: 3, 5: 2, 6: 2, 7: 6, 8: 2, 9: 6}
 
@@ -21,6 +23,9 @@ def map_tag_to_row(tag, unpacked, row):
         row[1] = format_value(unpacked[0])  # x
         row[2] = format_value(unpacked[1])  # y
         row[3] = format_value(unpacked[5])  # yaw
+        row[29] = format_value(unpacked[2])  # ekf_z
+        row[30] = format_value(unpacked[3])  # ekf_roll
+        row[31] = format_value(unpacked[4])  # ekf_pitch
     elif tag == 2:  # Setpoint (x_des, y_des, yaw_des, v_ff, w_ff)
         row[4] = format_value(unpacked[0])  # x_des
         row[5] = format_value(unpacked[1])  # y_des
@@ -44,6 +49,9 @@ def map_tag_to_row(tag, unpacked, row):
         row[20] = format_value(unpacked[0])  # x_raw
         row[21] = format_value(unpacked[1])  # y_raw
         row[22] = format_value(unpacked[5])  # yaw_raw
+        row[32] = format_value(unpacked[2])  # z_raw
+        row[33] = format_value(unpacked[3])  # roll_raw
+        row[34] = format_value(unpacked[4])  # pitch_raw
     elif tag == 8:  # Odom (v, w)
         row[9] = format_value(unpacked[0])  # v_actual
         row[10] = format_value(unpacked[1])  # w_actual
@@ -57,7 +65,7 @@ def map_tag_to_row(tag, unpacked, row):
 
 
 def new_csv_row(t_ms):
-    row = [""] * 29
+    row = [""] * CSV_HEADER.count(",") + [""]
     row[0] = str(t_ms)
     return row
 

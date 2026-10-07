@@ -227,7 +227,8 @@ imu:
   gyro_bias_dps: [0.0, 0.0, 0.0]
 
 mocap:
-  offset_xyz: [0.0, 0.0, 0.0]     # marker frame vs. the wheel-axle midpoint
+  offset_xyz: [0.0, 0.0, 0.0]     # marker frame vs. the wheel-axle midpoint (robot frame)
+  yaw_offset: 0.0                 # rad, mocap body yaw - robot yaw (pololu.mocap_calibration)
   position_noise_std: 0.0001      # m,   measured off the exp04/exp05 tracks
   angle_noise_std: 0.001          # rad, likewise
 

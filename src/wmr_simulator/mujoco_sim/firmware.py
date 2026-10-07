@@ -120,6 +120,11 @@ class FirmwareConfig:
     # The parsed GAINMLP.JSN, when one sat next to the config on the card.
     # Not a scalar like the rest, so it is excluded from the mapping parsing.
     gain_mlp: dict | None = None
+    # Mocap calibration (pololu.mocap_calibration; trajectory_uart.rs applies it
+    # to every frame). Optional keys: absent means no correction.
+    mocap_yaw_offset: float = 0.0
+    mocap_offset_x: float = 0.0
+    mocap_offset_y: float = 0.0
 
     @property
     def base_gains(self) -> np.ndarray:
@@ -132,11 +137,19 @@ class FirmwareConfig:
     @classmethod
     def from_mapping(cls, values: Mapping[str, float], gain_mlp: dict | None = None) -> "FirmwareConfig":
         """Build from a firmware ``key=value`` mapping, ignoring keys we do not model."""
+        from wmr_simulator.pololu.mocap_calibration import CONFIG_KEYS
+
         scalars = {field for field in cls.__dataclass_fields__} - {"gain_mlp"}
-        missing = sorted(scalars - set(values))
+        missing = sorted(scalars - set(values) - set(CONFIG_KEYS))
         if missing:
             raise ValueError(f"Robot config is missing keys: {missing}")
-        return cls(gain_mlp=gain_mlp, **{field: float(values[field]) for field in scalars})
+        return cls(gain_mlp=gain_mlp, **{field: float(values[field]) for field in scalars if field in values})
+
+    @property
+    def mocap_calibration(self):
+        from wmr_simulator.pololu.mocap_calibration import MocapCalibration
+
+        return MocapCalibration(self.mocap_yaw_offset, (self.mocap_offset_x, self.mocap_offset_y))
 
     @classmethod
     def from_file(cls, path: str | Path) -> "FirmwareConfig":
@@ -479,6 +492,12 @@ class Firmware:
     def clock(self, timestep: float, boot_time_ms: int = 0) -> FirmwareClock:
         return FirmwareClock(timestep, self.config.traj_following_dt_s, boot_time_ms)
 
+    def correct_mocap(self, mocap: Sequence[float]) -> np.ndarray:
+        """``trajectory_uart.rs``: the configured mocap calibration applied to a
+        6-DoF frame ``(x, y, z, roll, pitch, yaw)``, before anything else sees
+        it (the EKF, the controller, the SD log)."""
+        return self.config.mocap_calibration.correct(np.asarray(mocap, dtype=float))
+
     def receive_mocap(self, pose: Sequence[float]) -> None:
         """``mocap_update_task``: store the pose ``(x, y, yaw)`` and raise the fresh flag."""
         pose = np.asarray(pose, dtype=float)
@@ -563,7 +582,11 @@ def _firmware_values_from_robot_config_yaml(path: Path, has_gain_mlp: bool = Fal
         base_diameter=robot["base_diameter"],
         max_wheel_speed=robot["max_wheel_speed"],
     )
+    from wmr_simulator.pololu.mocap_calibration import MocapCalibration
+
+    calibration = config.get("mocap_calibration")
     return robot_config_values(
         physical_params=physical_params,
         controller_gains=config["controller"]["gains"],
+        overrides=None if calibration is None else MocapCalibration.from_mapping(calibration).config_values(),
     )

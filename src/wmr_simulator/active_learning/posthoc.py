@@ -199,6 +199,7 @@ def stage_tune_parametrized(experiment: Experiment, iteration: int, variant: str
         ),
         controller_gains=payload["gains"],
         template_path=experiment.config.get("robotcfg_template"),
+        overrides=stages.mocap_calibration_config_values(experiment),
     )
     if stages._export_gain_mlp_if_configured(target / "problem.yaml", target / "GAINMLP.JSN") is None:
         raise RuntimeError(f"No gain network exported for variant {variant!r} into {target}.")

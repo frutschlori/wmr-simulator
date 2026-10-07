@@ -140,6 +140,14 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
     "baseline_tuning_trajectories_dir": "trajectory_exports/fixed_sets/matched",
     # Firmware export template (None -> built-in defaults from robot_config.py).
     "robotcfg_template": None,
+    # Mocap rigid-body calibration of the robot (a yaml written by
+    # scripts/mocap_calibration.py, once per robot and rigid body): every
+    # exported ROBOTCFG.CFG carries it as mocap_* keys and the firmware corrects
+    # each mocap frame to the wheel-axle pose before the EKF, the controller and
+    # the SD log; robot_config.yaml carries it for the MuJoCo firmware port.
+    # None: frames go uncorrected (MuJoCo's mocap sits on the axle unless the
+    # hidden plant says otherwise).
+    "mocap_calibration": None,
     "log_loading": {
         "clip_after_first_trajectory": True,
     },
