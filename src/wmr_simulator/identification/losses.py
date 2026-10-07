@@ -3,25 +3,40 @@ import jax.numpy as jnp
 from wmr_simulator.types import PhysicalParams, SimulationLog
 
 
-def pose_mse(predicted_poses, target_poses):
+# The position residual is scored along the measured heading only. The nominal
+# model cannot move sideways, so the lateral residual holds whatever moves the
+# tracked point sideways besides turning: a mocap rigid-body origin off the axle
+# (lateral speed d * omega) and sideslip in turns. Fitted against it, the
+# wheelbase absorbed both (2026-10-07, real robot: 98-103 mm against 87-89 from
+# the heading alone and from encoder vs gyro yaw rate; in MuJoCo, with the mocap
+# point on the axle, both fits give 85 mm against a true 84.9 on the identified
+# phase). The longitudinal residual pins the wheel radius, the heading one the
+# wheelbase.
+
+
+def _longitudinal_error(predicted_poses, target_poses):
+    """Position error along the measured heading."""
     pos_error = predicted_poses[:, :2] - target_poses[:, :2]
+    heading = target_poses[:, 2]
+    return jnp.cos(heading) * pos_error[:, 0] + jnp.sin(heading) * pos_error[:, 1]
+
+
+def pose_mse(predicted_poses, target_poses):
+    longitudinal = _longitudinal_error(predicted_poses, target_poses)
     angle_error = predicted_poses[:, 2] - target_poses[:, 2]
-    return jnp.mean(jnp.sum(pos_error**2, axis=1) + 2.0 - 2.0 * jnp.cos(angle_error))
+    return jnp.mean(longitudinal**2 + 2.0 - 2.0 * jnp.cos(angle_error))
 
 
 def weighted_pose_mse(pipeline, predicted_poses, target_log: SimulationLog):
     target_poses = target_log.pose.states[1:]
     variances = pose_loss_variances(pipeline, target_log)
-    pos_error = predicted_poses[:, :2] - target_poses[:, :2]
+    heading = target_poses[:, 2]
+    # Variance of the position error projected onto the heading (x and y are
+    # independent in pose_loss_variances).
+    longitudinal_variance = jnp.cos(heading) ** 2 * variances[:, 0] + jnp.sin(heading) ** 2 * variances[:, 1]
+    longitudinal = _longitudinal_error(predicted_poses, target_poses)
     angle_error = predicted_poses[:, 2] - target_poses[:, 2]
-    residual_terms = jnp.column_stack(
-        [
-            pos_error[:, 0] ** 2,
-            pos_error[:, 1] ** 2,
-            2.0 - 2.0 * jnp.cos(angle_error),
-        ]
-    )
-    return jnp.mean(jnp.sum(residual_terms / variances, axis=1))
+    return jnp.mean(longitudinal**2 / longitudinal_variance + (2.0 - 2.0 * jnp.cos(angle_error)) / variances[:, 2])
 
 
 def pose_loss_variances(pipeline, target_log: SimulationLog):
