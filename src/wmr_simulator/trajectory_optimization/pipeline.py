@@ -917,10 +917,21 @@ class TrajectoryOptimizationPipeline:
             )
         else:
             target_log = self.closed_loop_log if closed_loop_log is None else closed_loop_log
-            measurements = self.replay_measurement_sequence(
+            poses = self.replay_measurement_sequence(
                 params,
                 window_length,
                 closed_loop_log=closed_loop_log,
+            )
+            # The identification fit scores the position along the measured
+            # heading only (identification.losses): the lateral residual holds
+            # mocap rigid-body offsets and sideslip the nominal model cannot
+            # produce. The design scores the same measurement, so the lateral
+            # channel is a constant (no information) and the column layout, and
+            # with it the (pos, pos, angle) variance weighting, stays.
+            heading = target_log.pose.states[1:, 2]
+            longitudinal = jnp.cos(heading) * poses[:, 0] + jnp.sin(heading) * poses[:, 1]
+            measurements = jnp.column_stack(
+                [longitudinal, jnp.zeros_like(longitudinal), poses[:, 2]]
             ) * self.identification_measurement_mask(target_log.pose.time_s[1:])[:, None]
         return measurements.reshape(-1)
 
