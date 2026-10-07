@@ -137,7 +137,8 @@ def run_deployment(
 
     # The firmware waits for the first mocap frame before starting the outer
     # loop, and initializes the EKF from it (`wait_for_ekf_init`).
-    first_mocap = plant.read_mocap()
+    # Every frame passes the configured mocap calibration first, as on the robot.
+    first_mocap = config.mocap_calibration.correct(plant.read_mocap())
     firmware = Firmware(config, reference.states, reference.actions, _pose_of(first_mocap))
     firmware.reset_encoders(plant.encoder_counts())
 
@@ -150,7 +151,7 @@ def run_deployment(
     with BinaryLogWriter(log_path) as writer:
         for tick in firmware.clock(plant.timestep, boot_time_ms).ticks(firmware.duration):
             if tick.mocap:
-                mocap = plant.read_mocap()
+                mocap = firmware.correct_mocap(plant.read_mocap())
                 firmware.receive_mocap(_pose_of(mocap))
                 writer.mocap(tick.t_ms, mocap)
             if tick.imu:

@@ -98,7 +98,11 @@ class ImuSpec:
 
 @dataclass(frozen=True)
 class MocapSpec:
+    # Rigid-body origin relative to the wheel-axle midpoint, in the robot frame.
     offset_xyz: tuple[float, float, float]
+    # Mocap body yaw minus robot yaw [rad]: the robot's heading when the rigid
+    # body was created (pololu.mocap_calibration).
+    yaw_offset: float
     position_noise_std: float
     angle_noise_std: float
 
@@ -379,7 +383,13 @@ class MujocoPlant:
         rotation = np.zeros(9)
         self._mujoco.mju_quat2Mat(rotation, quat)
         position = position + rotation.reshape(3, 3) @ np.asarray(self.config.mocap.offset_xyz)
-        return np.concatenate((position, _quat_to_euler(quat)))
+        # The mocap body frame is the robot frame turned by yaw_offset about its
+        # own vertical axis.
+        yaw_offset = float(self.config.mocap.yaw_offset)
+        turn = np.array([math.cos(0.5 * yaw_offset), 0.0, 0.0, math.sin(0.5 * yaw_offset)])
+        marker_quat = np.zeros(4)
+        self._mujoco.mju_mulQuat(marker_quat, quat, turn)
+        return np.concatenate((position, _quat_to_euler(marker_quat)))
 
     def twist(self) -> tuple[float, float]:
         """True body-frame ``(v, w)``."""
