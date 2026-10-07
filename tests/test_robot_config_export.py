@@ -25,10 +25,10 @@ def test_robot_id_is_fixed_int_directly_above_joystick_control():
     text = format_robot_config({**DEFAULT_ROBOT_CONFIG, "robot_id": 12.5})
     lines = text.splitlines()
 
-    robot_id_line = lines.index("robot_id=9")
+    robot_id_line = lines.index("robot_id=10")
     joystick_line = lines.index("joystick_control_dt_ms=20.0")
     assert robot_id_line + 1 == joystick_line
-    assert "robot_id=9.0" not in lines
+    assert "robot_id=10.0" not in lines
 
 
 def test_gain_conversion_divides_inner_gains_by_motor_gain():
@@ -91,8 +91,8 @@ def test_export_with_template_and_overrides(tmp_path):
     )
     lines = output.read_text(encoding="utf-8").splitlines()
     values = load_robot_config_file(output)
-    assert lines[3:5] == ["robot_id=9", "joystick_control_dt_ms=20.0"]
-    assert values["robot_id"] == pytest.approx(9.0)
+    assert lines[3:5] == ["robot_id=10", "joystick_control_dt_ms=20.0"]
+    assert values["robot_id"] == pytest.approx(10.0)
     # wheel_max is derived from physical_params, so it wins over the template.
     assert values["wheel_max"] == pytest.approx(250.0)
     assert values["gear_ratio"] == pytest.approx(DEFAULT_ROBOT_CONFIG["gear_ratio"])

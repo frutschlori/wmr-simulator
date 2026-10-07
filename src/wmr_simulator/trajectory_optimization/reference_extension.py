@@ -62,21 +62,38 @@ def _motion_statistics(states: np.ndarray) -> np.ndarray:
     return np.asarray([speed.mean(), omega.mean(), (speed * omega).mean()])
 
 
-def representative_trajectories(pickles: list[Path], count: int) -> list[Path]:
+def representative_trajectories(pickles: list[Path], count: int, exclude=()) -> list[Path]:
     """``count`` trajectories of a tuning set: the most demanding one (largest
     mean lateral acceleration |v * omega|, the fast-turning regime), then the
     medoid (closest to the set's mean motion in units of its spread), then the
-    remaining ones in decreasing demand."""
+    remaining ones in decreasing demand. Trajectories in ``exclude`` (e.g. ones
+    that do not fit the workspace) are skipped; the ranking is still the whole
+    set's, so the medoid falls back to the next closest to the set's mean."""
     pickles = sorted(Path(p) for p in pickles)
     if count <= 0 or not pickles:
         return []
+    excluded = {Path(path) for path in exclude}
     stats = np.stack([_motion_statistics(_states(path)) for path in pickles])
-    by_demand = list(np.argsort(-stats[:, 2]))
+    by_demand = [int(index) for index in np.argsort(-stats[:, 2]) if pickles[index] not in excluded]
+    if not by_demand:
+        return []
     z = (stats - stats.mean(axis=0)) / (stats.std(axis=0) + 1e-9)
-    medoid = int(np.argmin(np.sum(z**2, axis=1)))
-    order = [by_demand[0]] + ([medoid] if medoid != by_demand[0] else [])
+    by_centrality = [int(index) for index in np.argsort(np.sum(z**2, axis=1)) if pickles[index] not in excluded]
+    order = [by_demand[0]] + ([by_centrality[0]] if by_centrality[0] != by_demand[0] else [])
     order += [index for index in by_demand if index not in order]
     return [pickles[index] for index in order[:count]]
+
+
+def outside_box(states: np.ndarray, pieces: list[dict], box_min, box_max) -> tuple[float, int | None]:
+    """How far [m] an extended reference leaves the box (no margin), and the
+    index of the piece that leaves it furthest (None when inside)."""
+    worst, culprit, start = 0.0, None, 0
+    for index, piece in enumerate(pieces):
+        violation = _box_violation(states[start:piece["end"] + 1], box_min, box_max, 0.0)
+        if violation > worst:
+            worst, culprit = violation, index
+        start = piece["end"]
+    return worst, culprit
 
 
 def attach(end_pose: np.ndarray, segment: np.ndarray) -> np.ndarray:
