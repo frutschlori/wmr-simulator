@@ -33,6 +33,13 @@ law's heading feedback is ``v_ref * kth * sin(theta_e)``, so a turn in place
 wheelbase belief puts it. With turns in place, 119 of 159 iteration-2
 identification repeats (Phase 2 v6) started more than 0.5 rad off heading,
 because iteration 1 identified the wheelbase 10-50 % too large.
+
+Only trajectories the robot can follow are worth appending (``traction_usage``):
+on the real robot (2026-10-06, thesis_ch5/real_robot) 9 of 16 designed tuning
+trajectories appended in iterations 2-3 lost grip (sideslip up to 1.6 m/s),
+at the reference instant where one wheel has to accelerate or brake at 3-4
+m/s^2 while the robot turns. The whole-log residual screen then dropped those
+logs, and with them every clean piece.
 """
 
 from __future__ import annotations
@@ -43,6 +50,15 @@ import pickle
 from pathlib import Path
 
 import numpy as np
+
+# Semi-axes [m/s^2] of the friction ellipse ``traction_usage`` normalizes by:
+# longitudinal at a wheel, lateral of the body. Fitted to the real robot's
+# identification logs (2026-10-07): slip followed the per-wheel longitudinal
+# demand, while 4.3 m/s^2 of steady lateral acceleration (circle_r050) never
+# slipped; a lateral semi-axis about three times the longitudinal one ranked the
+# pieces best, the lateral term only breaking near-ties.
+TRACTION_LONGITUDINAL_LIMIT = 3.0
+TRACTION_LATERAL_LIMIT = 9.0
 
 # Turn angles tried at a joint (multiples of 45 degrees; 0 means no turn).
 TURN_ANGLES = tuple(math.radians(degrees) for degrees in (0, 45, -45, 90, -90, 135, -135, 180))
@@ -55,6 +71,14 @@ def _states(path: Path) -> np.ndarray:
     return np.asarray(states, dtype=float)
 
 
+def _dt(path: Path) -> float:
+    with Path(path).open("rb") as file:
+        payload = pickle.load(file)
+    if not isinstance(payload, dict) or "dt" not in payload:
+        raise ValueError(f"{path} records no dt.")
+    return float(payload["dt"])
+
+
 def _motion_statistics(states: np.ndarray) -> np.ndarray:
     """(mean speed, mean |omega|, mean |v * omega|) of a reference."""
     speed = np.hypot(states[:, 3], states[:, 4])
@@ -62,17 +86,56 @@ def _motion_statistics(states: np.ndarray) -> np.ndarray:
     return np.asarray([speed.mean(), omega.mean(), (speed * omega).mean()])
 
 
-def representative_trajectories(pickles: list[Path], count: int, exclude=()) -> list[Path]:
+def traction_usage(states: np.ndarray, dt: float, base_diameter: float) -> float:
+    """Peak friction-ellipse usage of a reference: the largest, over time and
+    both wheels, of sqrt((a_long / TRACTION_LONGITUDINAL_LIMIT)^2 +
+    (a_lat / TRACTION_LATERAL_LIMIT)^2), with a_long = |a_tan +- (L / 2) alpha|
+    the longitudinal acceleration at a wheel and a_lat = |v * omega|.
+
+    Measured on the real robot (2026-10-07): designed appended trajectories at
+    usage <= 1.1 lost grip in 1 of 4, at 1.2-1.4 in 7 of 11; the fixed curves
+    (0.45-0.48) never did. On the benchmark set, lemniscate_big_fast (1.36)
+    slipped in 54 % of runs, designed_fast (0.88) in 8 %."""
+    speed = np.hypot(states[:, 3], states[:, 4])
+    omega = states[:, 5]
+    tangential = np.gradient(speed, dt)
+    angular = 0.5 * float(base_diameter) * np.gradient(omega, dt)
+    longitudinal = np.maximum(np.abs(tangential + angular), np.abs(tangential - angular))
+    lateral = np.abs(speed * omega)
+    usage = np.hypot(longitudinal / TRACTION_LONGITUDINAL_LIMIT, lateral / TRACTION_LATERAL_LIMIT)
+    return float(usage.max())
+
+
+def representative_trajectories(
+    pickles: list[Path],
+    count: int,
+    exclude=(),
+    max_traction_usage: float = 0.0,
+    base_diameter: float | None = None,
+) -> list[Path]:
     """``count`` trajectories of a tuning set: the most demanding one (largest
     mean lateral acceleration |v * omega|, the fast-turning regime), then the
     medoid (closest to the set's mean motion in units of its spread), then the
     remaining ones in decreasing demand. Trajectories in ``exclude`` (e.g. ones
     that do not fit the workspace) are skipped; the ranking is still the whole
-    set's, so the medoid falls back to the next closest to the set's mean."""
+    set's, so the medoid falls back to the next closest to the set's mean.
+
+    ``max_traction_usage`` > 0 also skips trajectories whose ``traction_usage``
+    (at ``base_diameter``) exceeds it. When fewer than ``count`` of the rest stay
+    below it, the ones over it are admitted in increasing usage until there are
+    ``count``, so the residual keeps as much data as without the limit."""
     pickles = sorted(Path(p) for p in pickles)
     if count <= 0 or not pickles:
         return []
     excluded = {Path(path) for path in exclude}
+    if max_traction_usage > 0.0:
+        if base_diameter is None:
+            raise ValueError("max_traction_usage needs the base_diameter the usage is computed at.")
+        usage = {path: traction_usage(_states(path), _dt(path), base_diameter) for path in pickles}
+        over = sorted((path for path in pickles if path not in excluded and usage[path] > max_traction_usage),
+                      key=lambda path: usage[path])
+        admissible = sum(1 for path in pickles if path not in excluded) - len(over)
+        excluded |= set(over[max(0, count - admissible):])
     stats = np.stack([_motion_statistics(_states(path)) for path in pickles])
     by_demand = [int(index) for index in np.argsort(-stats[:, 2]) if pickles[index] not in excluded]
     if not by_demand:

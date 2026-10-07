@@ -320,6 +320,13 @@ DEFAULT_EXPERIMENT_CONFIG: dict = {
         # the residual's data and the tuner's references can differ. null: the
         # tuning set (the method).
         "append_tuning_trajectories_from": None,
+        # Skip tuning trajectories whose friction-ellipse usage
+        # (reference_extension.traction_usage, at the controller's wheelbase)
+        # exceeds this; the ones over it are admitted in increasing usage only
+        # when fewer than append_tuning_trajectories stay below. Added
+        # 2026-10-07: on the real robot 9 of 16 designed appended trajectories
+        # lost grip (usage 1.2-1.4: 7 of 11, <= 1.1: 1 of 4). 0 disables.
+        "appended_max_traction_usage": 1.1,
         "appended_bridge_wait_time": 0.25,
         "appended_turn_radius": 0.25,
         "appended_turn_lateral_acceleration": 3.0,

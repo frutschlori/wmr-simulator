@@ -11,6 +11,7 @@ from wmr_simulator.trajectory_optimization.reference_extension import (
     arc_turn,
     representative_trajectories,
     straight_line,
+    traction_usage,
 )
 
 DT = 0.05
@@ -203,6 +204,52 @@ def test_representatives_skip_excluded_trajectories_but_keep_the_set_ranking(tmp
     # The next most demanding, and the same medoid (ranked on the whole set).
     assert without[0] == fast and without[1] == full[1]
     assert representative_trajectories([fast], 2, exclude=[fast]) == []
+
+
+def twist_states(speed, omega):
+    """Reference states of given speed and yaw-rate profiles (heading integrated)."""
+    theta = np.concatenate([[0.0], np.cumsum(omega[:-1]) * DT])
+    states = np.zeros((len(speed), 8))
+    states[:, 2] = theta
+    states[:, 3] = speed * np.cos(theta)
+    states[:, 4] = speed * np.sin(theta)
+    states[:, 5] = omega
+    return states
+
+
+def test_traction_usage_reads_the_friction_ellipse():
+    from wmr_simulator.trajectory_optimization.reference_extension import (
+        TRACTION_LATERAL_LIMIT,
+        TRACTION_LONGITUDINAL_LIMIT,
+    )
+
+    steps = 41
+    # Straight constant acceleration: only the longitudinal semi-axis.
+    ramp = twist_states(1.5 * DT * np.arange(steps), np.zeros(steps))
+    assert traction_usage(ramp, DT, 0.09) == pytest.approx(1.5 / TRACTION_LONGITUDINAL_LIMIT)
+    # Steady circle: only the lateral one.
+    circle = twist_states(np.full(steps, 2.0), np.full(steps, 2.0))
+    assert traction_usage(circle, DT, 0.09) == pytest.approx(4.0 / TRACTION_LATERAL_LIMIT)
+    # A yaw-rate ramp at rest loads the wheels in opposite directions by (L / 2) alpha.
+    spin = twist_states(np.zeros(steps), 10.0 * DT * np.arange(steps))
+    assert traction_usage(spin, DT, 0.1) == pytest.approx(0.5 / TRACTION_LONGITUDINAL_LIMIT)
+
+
+def test_representatives_skip_trajectories_over_the_traction_limit(tmp_path):
+    steps = 41
+    gentle = [save(tmp_path / f"g{k}.pkl", twist_states(np.full(steps, 1.0 + 0.1 * k), np.full(steps, 1.0)))
+              for k in range(4)]
+    # Braking hard while turning: most demanding by |v omega|, but over the limit.
+    harsh = save(tmp_path / "h.pkl", twist_states(np.linspace(2.5, 0.5, steps) ** 2, np.full(steps, 2.0)))
+    assert traction_usage(pickle.load(open(harsh, "rb"))["reference_states"], DT, 0.09) > 1.1
+    assert representative_trajectories(gentle + [harsh], 2)[0] == harsh
+    chosen = representative_trajectories(gentle + [harsh], 2, max_traction_usage=1.1, base_diameter=0.09)
+    assert harsh not in chosen and len(chosen) == 2
+    # Too few below the limit: the least-used ones over it fill up the count.
+    assert representative_trajectories([gentle[0], harsh], 2, max_traction_usage=1.1, base_diameter=0.09) \
+        == representative_trajectories([gentle[0], harsh], 2)
+    with pytest.raises(ValueError):
+        representative_trajectories(gentle, 2, max_traction_usage=1.1)
 
 
 def test_outside_box_names_the_piece_that_leaves_it():
