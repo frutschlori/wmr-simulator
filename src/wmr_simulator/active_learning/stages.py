@@ -467,6 +467,7 @@ def _append_tuning_trajectories(
         extended_payload,
         outside_box,
         representative_trajectories,
+        traction_usage,
     )
 
     if count <= 0 or iteration <= experiment.first_iteration:
@@ -482,10 +483,17 @@ def _append_tuning_trajectories(
     designed = designed_dir / pickle_path.name
     if not designed.exists():
         shutil.move(str(pickle_path), designed)
-    environment = load_yaml(_identification_problem(experiment.paths(iteration), config))["environment"]
+    identification_problem = load_yaml(_identification_problem(experiment.paths(iteration), config))
+    environment = identification_problem["environment"]
+    # Traction usage at the wheelbase of the controller that drives the
+    # reference (reference_extension.traction_usage).
+    max_usage = float(config.get("appended_max_traction_usage", 0.0))
+    base_diameter = float(identification_problem["robot"]["base_diameter"])
     excluded: list[Path] = []
     while True:
-        chosen = representative_trajectories(previous, count, exclude=excluded)
+        chosen = representative_trajectories(
+            previous, count, exclude=excluded, max_traction_usage=max_usage, base_diameter=base_diameter
+        )
         if not chosen:
             print(f"No trajectory of {source_dir} fits the environment box after the identified phase; "
                   f"the identification reference keeps its own phases.")
@@ -514,11 +522,17 @@ def _append_tuning_trajectories(
     with pickle_path.open("wb") as file:
         pickle.dump(payload, file)
     duration = (len(payload["reference_states"]) - 1) * payload["dt"]
+    usages = []
+    for path in chosen:
+        with path.open("rb") as file:
+            states = np.asarray(pickle.load(file)["reference_states"], dtype=float)
+        usages.append(f"{path.stem} {traction_usage(states, payload['dt'], base_diameter):.2f}")
+    usages = ", ".join(usages)
     print(
         f"Identification reference: identified phase ({payload['identified_duration']:.1f} s) + "
         f"{len(chosen)} trajectories of {source_dir} "
         f"({', '.join(path.stem for path in chosen)}), {duration:.1f} s in all, placed {payload['placement']}; "
-        f"as designed: {designed}"
+        f"traction usage {usages} (limit {max_usage or 'off'}); as designed: {designed}"
     )
     return [path.name for path in chosen]
 
