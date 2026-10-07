@@ -412,19 +412,36 @@ def stage_plan_identification_trajectory(experiment: Experiment, iteration: int)
                 bridge_time=float(config["bridge_time"]),
                 plot_path=identification_plot_dir / "identification_trajectory_bridge.pdf",
             )
-        over_limits = check_firmware_limits(
-            num_states=len(load_pololu_reference(bridged_path).states),
-            file_bytes=bridged_path.stat().st_size,
-        )
-        if len(appended) <= 1 or not over_limits:
+        problems = _reference_problems(bridged_path, load_yaml(_identification_problem(paths, config))["environment"])
+        if len(appended) <= 1 or not problems:
             break
         count = len(appended) - 1
-        print(f"Bridged reference with {len(appended)} appended trajectories is over the firmware limits; "
+        print(f"Bridged reference with {len(appended)} appended trajectories: {'; '.join(problems)}; "
               f"trying {count}.")
+    if problems:
+        raise RuntimeError(
+            f"{bridged_path} cannot be driven: {'; '.join(problems)}. Nothing left to drop; "
+            f"fix the reference before copying it to the robot."
+        )
     print(f"Exported bridged repeat variant: {bridged_path}")
     print(f"Copy {jsn_path.name} and {paths.robotcfg_cfg.name} to the robot SD card, run the")
     print(f"experiment, then place the logs in {paths.data_dir} and run decode-logs.")
     return jsn_path
+
+
+def _reference_problems(jsn_path: Path, environment: dict) -> list[str]:
+    """Why the robot cannot drive ``jsn_path``: over the firmware's limits, or
+    leaving the environment box (the workspace; no margin). Empty when fine."""
+    from wmr_simulator.pololu.reference_exporter import check_firmware_limits
+    from wmr_simulator.pololu.reference_importer import load_pololu_reference
+
+    states = np.asarray(load_pololu_reference(jsn_path).states, dtype=float)
+    problems = check_firmware_limits(num_states=len(states), file_bytes=jsn_path.stat().st_size, label=jsn_path.name)
+    low, high = np.asarray(environment["min"], dtype=float), np.asarray(environment["max"], dtype=float)
+    outside = float(max(np.max(low - states[:, :2]), np.max(states[:, :2] - high), 0.0))
+    if outside > 1e-6:
+        problems.append(f"leaves the environment box [{low[0]}, {high[0]}] x [{low[1]}, {high[1]}] m by {outside:.2f} m")
+    return problems
 
 
 def _append_tuning_trajectories(
@@ -439,12 +456,16 @@ def _append_tuning_trajectories(
     set. The reference as designed (or copied) is kept in
     ``identification_trajectory/designed/``; the pickle the stages read is the
     extended one, with the same ``identified_duration``; a second call (fewer
-    trajectories) extends that kept copy again. Returns the appended
-    trajectories' names (empty when nothing was appended)."""
-    import pickle
-
+    trajectories) extends that kept copy again. The extended reference has to
+    stay inside the problem's environment box: when no placement of the chosen
+    trajectories does (2026-10-06, real S-A-R seed 1: the tuning set's most
+    demanding curve spans 2.7 x 3.5 m and the placed reference reached y 3.06),
+    the trajectory that leaves it furthest is excluded and the representatives
+    are chosen again from the rest of the set. Returns the appended
+    trajectories' names (empty when nothing was appended, or nothing fits)."""
     from wmr_simulator.trajectory_optimization.reference_extension import (
         extended_payload,
+        outside_box,
         representative_trajectories,
     )
 
@@ -456,20 +477,40 @@ def _append_tuning_trajectories(
     if not previous:
         print(f"No tuning references in {source_dir}; the identification reference keeps its own phases.")
         return []
-    chosen = representative_trajectories(previous, count)
     designed_dir = pickle_path.parent / "designed"
     designed_dir.mkdir(exist_ok=True)
     designed = designed_dir / pickle_path.name
     if not designed.exists():
         shutil.move(str(pickle_path), designed)
     environment = load_yaml(_identification_problem(experiment.paths(iteration), config))["environment"]
-    payload = extended_payload(
-        designed, chosen, box_min=environment["min"], box_max=environment["max"],
-        margin=float(config["appended_box_margin"]),
-        turn_radius=float(config["appended_turn_radius"]),
-        turn_lateral_acceleration=float(config["appended_turn_lateral_acceleration"]),
-        turn_min_duration=float(config["appended_min_piece_duration"]),
-    )
+    excluded: list[Path] = []
+    while True:
+        chosen = representative_trajectories(previous, count, exclude=excluded)
+        if not chosen:
+            print(f"No trajectory of {source_dir} fits the environment box after the identified phase; "
+                  f"the identification reference keeps its own phases.")
+            shutil.copy2(designed, pickle_path)
+            return []
+        payload = extended_payload(
+            designed, chosen, box_min=environment["min"], box_max=environment["max"],
+            margin=float(config["appended_box_margin"]),
+            turn_radius=float(config["appended_turn_radius"]),
+            turn_lateral_acceleration=float(config["appended_turn_lateral_acceleration"]),
+            turn_min_duration=float(config["appended_min_piece_duration"]),
+        )
+        violation, culprit = outside_box(
+            payload["reference_states"], payload["pieces"], environment["min"], environment["max"]
+        )
+        if violation == 0.0:
+            break
+        # A turn leaves the box on the way into the trajectory after it.
+        names = [piece.get("name") for piece in payload["pieces"]]
+        name = next((name for name in names[culprit:] if name), None)
+        if name is None:
+            break  # the identified phase itself: nothing to exclude (the stage refuses the reference)
+        excluded.append(next(path for path in chosen if path.stem == name))
+        print(f"Appended {', '.join(path.stem for path in chosen)} leave the environment box by {violation:.2f} m "
+              f"in every placement; excluding {name} and choosing again.")
     with pickle_path.open("wb") as file:
         pickle.dump(payload, file)
     duration = (len(payload["reference_states"]) - 1) * payload["dt"]

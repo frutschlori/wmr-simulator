@@ -35,7 +35,7 @@ from typing import Mapping
 from wmr_simulator.controller import controller_gains_list
 
 HEADER_COMMENT = "# Robot configuration (key=value)\n# Polulu Configuration File\n"
-ROBOT_ID = 9
+ROBOT_ID = 10
 
 # Key groups in file order; groups are separated by blank lines like the
 # firmware examples.

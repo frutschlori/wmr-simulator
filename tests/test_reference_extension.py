@@ -191,3 +191,28 @@ def test_pruned_placement_search_matches_full_enumeration():
     assert chosen["order"] == list(best[2])
     assert chosen["mirrored"] == list(best[3])
     assert chosen["turns_deg"] == [round(math.degrees(a), 1) for a, _ in best[4]]
+
+
+def test_representatives_skip_excluded_trajectories_but_keep_the_set_ranking(tmp_path):
+    slow = [save(tmp_path / f"t{k}.pkl", arc(0.3 + 0.05 * k, 0.5)) for k in range(5)]
+    fast = save(tmp_path / "t9.pkl", arc(1.5, 2.5))
+    faster = save(tmp_path / "t8.pkl", arc(1.6, 2.6))
+    full = representative_trajectories(slow + [fast, faster], 2)
+    assert full[0] == faster
+    without = representative_trajectories(slow + [fast, faster], 2, exclude=[faster])
+    # The next most demanding, and the same medoid (ranked on the whole set).
+    assert without[0] == fast and without[1] == full[1]
+    assert representative_trajectories([fast], 2, exclude=[fast]) == []
+
+
+def test_outside_box_names_the_piece_that_leaves_it():
+    from wmr_simulator.trajectory_optimization.reference_extension import outside_box
+
+    ident = arc(0.8, 0.0, steps=60, start=(-0.5, -1.0, np.pi / 2))
+    inside, outside = arc(0.5, 0.0, steps=20), arc(1.0, 0.0, steps=80)  # 0.5 m and 4 m straight
+    states, chosen = extend_identification_reference(ident, DT, 3.0, [inside, outside])
+    violation, culprit = outside_box(states, chosen["pieces"], [-1.3, -2.3], [1.3, 2.3])
+    assert violation > 0.5
+    assert chosen["pieces"][culprit] == {"kind": "appended", "segment": 1, "end": len(states) - 1}
+    violation, culprit = outside_box(states[:82], chosen["pieces"][:2], [-1.3, -2.3], [1.3, 2.3])
+    assert violation == 0.0 and culprit is None
