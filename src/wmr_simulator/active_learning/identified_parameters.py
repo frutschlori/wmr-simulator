@@ -1,16 +1,6 @@
-"""Cross-iteration history of the identified robot parameters.
-
-Every iteration's ``identify`` stage writes one joint parameter fit into
-``results/identification.yaml``, together with the per-log fits behind it and
-which of those the outlier screen dropped. This module gathers that history
-across a whole experiment so the plot can show how each physical parameter
-settles (or fails to) as the loop feeds it more informative data;
-``visualization.identified_parameters`` only renders what is returned here, the
-same split ``progress.py`` / ``baseline_runs.py`` use.
-
-Nothing here reads the hidden MuJoCo ground truth: the pipeline never gets to
-see the true parameters, so neither does its own progress plot.
-"""
+"""Cross-iteration history of the identified robot parameters, read from
+every iteration's ``results/identification.yaml``
+(rendered by ``visualization.identified_parameters``)."""
 
 from pathlib import Path
 
@@ -29,11 +19,7 @@ PARAMETER_NAMES: tuple[str, ...] = tuple(name for name, _, _ in PARAMETER_SPECS)
 
 
 def _plotted_params(estimated: dict) -> dict | None:
-    """The four plotted parameters of one stored ``estimated_params`` block.
-
-    A fit missing any of the four is skipped rather than plotted with holes in
-    it.
-    """
+    """The four plotted parameters of one ``estimated_params`` block (None if incomplete)."""
     if not estimated:
         return None
     values = {name: estimated.get(name) for name in PARAMETER_NAMES}
@@ -46,11 +32,8 @@ def collect_identified_parameters(experiment) -> list[dict]:
     """Identified parameters of every iteration that has run ``identify``.
 
     Returns a list (sorted by iteration) of dicts with keys ``index``,
-    ``params`` (the joint fit downstream stages actually use) and ``per_log``
-    (one ``{"log", "params", "excluded"}`` entry per identification log, the
-    spread behind the joint fit). Iterations without a readable
-    ``results/identification.yaml`` are left out entirely, so an experiment
-    whose last iteration is still waiting for data still plots.
+    ``params`` (the joint fit) and ``per_log`` (one ``{"log", "params",
+    "excluded"}`` entry per identification log).
     """
     records = []
     for index in experiment.iteration_indices():

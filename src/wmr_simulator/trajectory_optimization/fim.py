@@ -1,33 +1,14 @@
 """Fisher information for the trajectory design criteria.
 
-Everything downstream of :func:`compute_fim_factor` works on the *factor*
-``J~`` (the noise-weighted, relatively-scaled measurement sensitivity) rather
-than on ``FIM = J~^T J~`` itself, because forming the FIM squares its condition
-number and this pipeline cannot afford that in float32.
+Everything works on the factor ``J~`` (the noise-weighted, relatively scaled
+measurement sensitivity) rather than on ``FIM = J~^T J~``, because forming the
+FIM squares its condition number, which float32 cannot resolve. ``J~ = Q R``
+gives ``FIM = R^T R`` with a small triangular ``R``; Tikhonov regularization is
+applied by appending ``sqrt(reg) I`` rows to the factor.
 
-Measured on the gain-tuning objective: a constraint-violating reference
-destabilizes the closed loop and the 5-gain FIM eigenvalues spread to
-``[1.5e4 ... 2.9e13]``, i.e. cond ~2e9. Accumulating ``J^T (J w)`` in float32
-then loses positive-definiteness outright (an eigenvalue of ``-1.4e5`` was
-observed, a relative error of 3e-9 ~ float32 eps), the smallest eigenvalue ends
-up *below* the float32 noise floor of the product, and the old explicit
-``jnp.linalg.inv`` returned NaN where float64 gives a perfectly ordinary
-1.07e-4. A single NaN then poisons Adam's moment estimates permanently, which
-is what made the loss history choppy.
-
-Working from ``J~`` halves the exponent: an f32 QR of ``J~`` is backward stable
-relative to ``||J~|| = sqrt(lambda_max)``, so cond(FIM) ~ 1e12 is still
-comfortably resolvable. ``J~ = Q R`` gives ``FIM = R^T R`` with ``R`` a tiny
-``[P, P]`` triangle, and the eigenvalue criteria are closed forms in ``R`` -- no
-inverse of an ill-conditioned matrix is ever formed. Tikhonov regularization is
-applied by *appending* ``sqrt(reg) I`` rows to the factor, which is exactly
-equivalent to ``FIM + reg I`` and keeps that path in factored form.
-
-The exception is :func:`trace_inverse_criterion`, the one criterion in the
-optimizer's inner loop, which assembles the small Gram and takes its Cholesky
-instead: the QR is cheap forward but its *backward* pass dominated the whole
-optimizer step. See its docstring for the measurements and the accuracy it
-costs.
+:func:`trace_inverse_criterion` (A-optimality, in the optimizer's inner loop)
+uses the Cholesky of the small Gram matrix instead, whose backward pass is
+much cheaper than the QR's.
 """
 
 import numpy as np
@@ -35,12 +16,8 @@ import jax
 import jax.numpy as jnp
 
 
-# Relative component of the Tikhonov shift, on top of the caller's absolute one.
-# Sized to sit an order of magnitude above float32's rounding error in the Gram
-# (~eps * lambda_max, and trace >= lambda_max): below that the computed Gram can
-# come out indefinite and the Cholesky returns NaN. Measured: at 1e-9 two of six
-# trajectories NaN'd mid-run; at 1e-6 none do, and the shift is still ~0.01% of
-# a healthy lambda_min, so the criterion is unchanged where it matters.
+# Relative component of the Tikhonov shift (times the trace), on top of the
+# absolute one; keeps the float32 Gram positive definite.
 _RELATIVE_REGULARIZATION = 1e-6
 
 
@@ -59,17 +36,12 @@ def compute_fim_factor(
     measurement_variances,
     parameter_scaling: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
-    """Noise-weighted relative measurement sensitivity ``J~``, ``FIM = J~^T J~``.
-
-    Shape ``[3N, P]``. This, not the FIM, is the quantity to pass around: see the
-    module docstring on why squaring it in float32 destroys the criteria.
-    """
+    """Noise-weighted relative measurement sensitivity ``J~`` ``[3N, P]``,
+    ``FIM = J~^T J~``."""
     measurement_variances = np.asarray(measurement_variances, dtype=float)
     inverse_variances = jnp.asarray(1.0 / measurement_variances, dtype=jnp.float32)
 
     params = jnp.asarray(params, dtype=jnp.float32)
-    # jacfwd evaluates the primal internally; a separate measurement_vector_fn(params)
-    # call would be a second, redundant rollout whose only use was its (static) shape.
     measurement_sensitivity = jax.jacfwd(measurement_vector_fn)(params)
     if parameter_scaling is None:
         parameter_scaling = params
@@ -81,33 +53,8 @@ def compute_fim_factor(
     return relative_measurement_sensitivity * jnp.sqrt(stacked_inverse_variances)[:, None]
 
 
-def compute_fim_matrix(
-    measurement_vector_fn,
-    params: jnp.ndarray,
-    measurement_variances,
-    parameter_scaling: jnp.ndarray | None = None,
-) -> jnp.ndarray:
-    """The FIM itself. For *reporting* -- the criteria take the factor instead."""
-    return fim_from_factor(
-        compute_fim_factor(
-            measurement_vector_fn,
-            params=params,
-            measurement_variances=measurement_variances,
-            parameter_scaling=parameter_scaling,
-        )
-    )
-
-
-def fim_from_factor(fim_factor: jnp.ndarray) -> jnp.ndarray:
-    return fim_factor.T @ fim_factor
-
-
 def _triangular_factor(fim_factor: jnp.ndarray, regularization: float = 1e-6) -> jnp.ndarray:
-    """Upper triangular ``R`` with ``R^T R = FIM + regularization * I``.
-
-    Appending ``sqrt(reg) I`` rows to the factor is the factored form of the
-    Tikhonov shift, so the regularization never requires forming the FIM.
-    """
+    """Upper triangular ``R`` with ``R^T R = FIM + regularization * I``."""
     num_parameters = fim_factor.shape[1]
     regularization_rows = jnp.sqrt(
         jnp.asarray(regularization, dtype=fim_factor.dtype)
@@ -130,18 +77,13 @@ def max_inverse_eigenvalue(fim_factor: jnp.ndarray, regularization: float = 1e-6
 
 def logdet_criterion(fim_factor: jnp.ndarray, regularization: float = 1e-6) -> jnp.ndarray:
     triangular_factor = _triangular_factor(fim_factor, regularization=regularization)
-    # det(FIM) = det(R)^2 and R is triangular, so this is exact and always finite
-    # for a full-rank R -- no sign check needed, unlike slogdet on the FIM.
+    # det(FIM) = det(R)^2 with R triangular.
     return -2.0 * jnp.sum(jnp.log(jnp.abs(jnp.diag(triangular_factor))))
 
 
 def _regularized_gram(fim_factor: jnp.ndarray, regularization: float) -> jnp.ndarray:
-    """``FIM + shift I`` as a ``[P, P]`` matrix, symmetrized.
-
-    The shift carries a relative term as well as the caller's absolute one, so it
-    scales with the problem and keeps the matrix positive definite (and the
-    Cholesky below real) however badly conditioned the design gets.
-    """
+    """``FIM + shift I`` as a symmetrized ``[P, P]`` matrix (absolute plus
+    relative shift)."""
     gram = fim_factor.T @ fim_factor
     gram = 0.5 * (gram + gram.T)
     num_parameters = gram.shape[0]
@@ -150,52 +92,10 @@ def _regularized_gram(fim_factor: jnp.ndarray, regularization: float) -> jnp.nda
 
 
 def trace_inverse_criterion(fim_factor: jnp.ndarray, regularization: float = 1e-6) -> jnp.ndarray:
-    """A-optimality. This one is in the optimizer's inner loop, so it takes the
-    Cholesky of the small Gram rather than the QR of the tall factor.
-
-    Both are the same identity -- ``FIM = L L^T`` gives
-    ``trace(FIM^-1) = ||L^-1||_F^2`` -- but the QR's *backward* pass on a
-    ``[3NK, P]`` matrix cost ~54 ms against a 0.007 ms forward, 63% of an entire
-    optimizer step, while a 5x5 Cholesky is free in both directions. Measured
-    agreement with the QR path is 4-6 significant figures in value and gradient
-    out to cond(FIM) ~ 1e5, which the motion constraints keep it well inside; the
-    eigenvalue criteria below stay on the factor, where accuracy matters more
-    than speed.
-    """
+    """A-optimality, ``trace(FIM^-1) = ||L^-1||_F^2`` with ``FIM = L L^T``
+    (Cholesky of the small Gram matrix)."""
     lower = jnp.linalg.cholesky(_regularized_gram(fim_factor, regularization))
     inverse_lower = jax.scipy.linalg.solve_triangular(
         lower, jnp.eye(lower.shape[0], dtype=lower.dtype), lower=True
     )
     return jnp.sum(inverse_lower**2)
-
-
-def fim_eigenvalues(fim_factor: jnp.ndarray, regularization: float = 1e-6) -> jnp.ndarray:
-    """FIM eigenvalues, descending, without ever assembling the FIM.
-
-    They are the squared singular values of the triangular factor, so the
-    condition number reported from these is the FIM's, computed at the factor's
-    (half) exponent range -- which is the whole reason the criteria work on the
-    factor (see the module docstring).
-    """
-    return _fim_singular_values(fim_factor, regularization=regularization) ** 2
-
-
-def marginal_information(fim_factor: jnp.ndarray, regularization: float = 1e-6) -> jnp.ndarray:
-    """``1 / diag(FIM^-1)`` per parameter: the information about one parameter
-    with all the others free, i.e. the inverse of its marginal variance.
-
-    ``FIM^-1 = R^-1 R^-T`` for the triangular factor ``R``, so the diagonal is
-    the squared row norms of ``R^-1`` and no inverse of the FIM is formed.
-    """
-    triangular_factor = _triangular_factor(fim_factor, regularization=regularization)
-    inverse_triangular = jax.scipy.linalg.solve_triangular(
-        triangular_factor,
-        jnp.eye(triangular_factor.shape[0], dtype=triangular_factor.dtype),
-        lower=False,
-    )
-    return 1.0 / jnp.sum(inverse_triangular**2, axis=1)
-
-
-def condition_number_criterion(fim_factor: jnp.ndarray, regularization: float = 1e-6) -> jnp.ndarray:
-    singular_values = _fim_singular_values(fim_factor, regularization=regularization)
-    return (singular_values[0] / jnp.maximum(singular_values[-1], 1e-12)) ** 2

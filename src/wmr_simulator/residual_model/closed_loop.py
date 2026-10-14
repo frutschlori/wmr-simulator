@@ -1,23 +1,10 @@
 """Closed-loop training of the residual on recorded runs.
 
-The one-step fit (``residual.train_residual_ensemble``) predicts each step's
-twist error from that step's nominal twist. It lowers the one-step error but,
-measured on held-out MuJoCo runs (2026-10-02, 5 seeds), makes the *closed loop*
-predict worse (+20 % sim-vs-MuJoCo position error at gate 1.0), and a
-teacher-forced multi-step pose loss is worse still. What the tuner needs is the
-closed loop, so this module trains the residual on it directly: short windows
-cut from the recorded runs are re-simulated in closed loop -- from the measured
-pose and wheel speeds at the window start, under the controller that recorded
-the run (its gains and its parameter belief) -- and the residual's expert
-weights are fitted to the mocap track by backpropagating through the rollouts.
-One-second windows from a zero residual cut the held-out closed-loop error by
-about 20 % where the data covers the regime; 0.5 s windows are too short to
-see the error build up, 2 s ones get harder to fit.
-
-Time alignment: a log's reference starts later than its pose stream (40 ms on
-the MuJoCo logs), and the controller takes reference sample k at the log time
-of that sample. Windows therefore start at reference samples and are scored
-against the mocap track on that clock.
+Short windows cut from the recorded runs are re-simulated in closed loop from
+the measured pose and wheel speeds at the window start, under the controller
+that recorded the run. The residual's expert weights are fitted to the mocap
+track by backpropagating through these rollouts. Windows start at reference
+samples and are scored against the mocap track on the log's clock.
 """
 
 from __future__ import annotations

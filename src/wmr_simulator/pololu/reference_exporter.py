@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import json
 import pickle
 from dataclasses import dataclass
@@ -17,14 +16,10 @@ class ReferenceTrajectory:
     dt: float
 
 
-# Hard limits of the pololu-rs firmware trajectory loader: states/actions are
-# parsed into heapless vectors of MAX_POINTS (trajectory_reading.rs, 350 on
-# branch experimental_gain_mlp; this said 500 until 2026-10-06, and the robot
-# silently refused a 352-point reference) and the raw JSN is read into a
-# scratch buffer (sdlog.rs, 48 KiB). Exceeding either makes the firmware report
-# that no trajectory is loaded. Compact JSNs take ~45 bytes per state, so the
-# point limit is the one that binds.
-FIRMWARE_MAX_TRAJECTORY_POINTS = 350
+# Limits of the firmware's trajectory loader: MAX_POINTS states
+# (trajectory_reading.rs) and a 48 KiB file buffer (sdlog.rs). Beyond either,
+# the firmware loads no trajectory.
+FIRMWARE_MAX_TRAJECTORY_POINTS = 400
 FIRMWARE_MAX_FILE_BYTES = 48 * 1024
 
 
@@ -137,30 +132,6 @@ def export_latest_reference(
     )
 
 
-def export_all_references(
-    input_dir: str | Path,
-    output_dir: str | Path,
-    *,
-    recursive: bool = False,
-    cost: float = 100.0,
-    time_stamp: float = 0.0,
-    decimals: int = 6,
-) -> list[Path]:
-    paths = list_reference_trajectory_pickles(input_dir, recursive=recursive)
-    if not paths:
-        raise ValueError(f"No pickle trajectories found in {input_dir}")
-    return [
-        export_reference_trajectory(
-            load_reference_trajectory(path),
-            output_dir,
-            cost=cost,
-            time_stamp=time_stamp,
-            decimals=decimals,
-        )
-        for path in paths
-    ]
-
-
 def export_reference_trajectory(
     trajectory: ReferenceTrajectory,
     output_dir: str | Path,
@@ -227,70 +198,3 @@ def _round_float(value: float, decimals: int) -> float:
 
 def _round_nested(values: np.ndarray, decimals: int):
     return np.round(np.asarray(values, dtype=float), decimals).tolist()
-
-
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="Format the latest synthesized trajectory pickle as a Pololu reference JSN."
-    )
-    parser.add_argument("--input_dir", type=str, default="trajectory_exports/baselines/")
-    parser.add_argument("--output_dir", type=str, default="Pololu Data/References/baselines")
-    parser.add_argument("--output-name", default=None)
-
-    parser.add_argument("--recursive", action="store_true", help="Search for pickle files recursively.")
-    parser.add_argument("--all", action="store_true", default=True)
-    parser.add_argument("--cost", type=float, default=100.0)
-    parser.add_argument("--time-stamp", type=float, default=0.0)
-    parser.add_argument("--decimals", type=int, default=6)
-    # Every exported JSN also gets a repeatable variant (<name>_bridge.JSN, same
-    # directory) that waits at the goal and bridges back to the start pose; see
-    # pololu.bridge_exporter.
-    parser.add_argument("--bridge-wait-time", type=float, default=2.0)
-    parser.add_argument("--bridge-time", type=float, default=10.0)
-    args = parser.parse_args(argv)
-
-    if args.all and args.output_name is not None:
-        parser.error("--output-name can only be used when exporting a single latest reference.")
-
-    if args.all:
-        output_paths = export_all_references(
-            args.input_dir,
-            args.output_dir,
-            recursive=args.recursive,
-            cost=args.cost,
-            time_stamp=args.time_stamp,
-            decimals=args.decimals,
-        )
-    else:
-        output_paths = [
-            export_latest_reference(
-                args.input_dir,
-                args.output_dir,
-                output_name=args.output_name,
-                recursive=args.recursive,
-                cost=args.cost,
-                time_stamp=args.time_stamp,
-                decimals=args.decimals,
-            )
-        ]
-    for output_path in output_paths:
-        print(output_path)
-
-    from wmr_simulator.pololu.bridge_exporter import append_bridge_reference, bridged_output_path
-
-    for output_path in output_paths:
-        bridged_path = append_bridge_reference(
-            output_path,
-            wait_time=args.bridge_wait_time,
-            bridge_time=args.bridge_time,
-            cost=args.cost,
-            time_stamp=args.time_stamp,
-            decimals=args.decimals,
-            plot_path=bridged_output_path(output_path).with_suffix(".pdf"),
-        )
-        print(bridged_path)
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

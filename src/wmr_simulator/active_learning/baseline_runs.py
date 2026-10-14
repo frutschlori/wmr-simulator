@@ -1,34 +1,11 @@
-"""Cross-iteration collection of an experiment's baseline comparison runs.
+"""Cross-iteration collection of an experiment's benchmark runs.
 
-A baseline run is a recording of a *held-out* reference -- one the iteration
-neither identified on nor tuned against -- so it is the only thing in the loop
-that stays fixed while the controller moves. Overlaying every iteration's runs
-of one such reference in a single figure is what shows whether the loop is
-actually improving the controller.
-
-Two layouts produce them, and both are read here:
-
-- the ``benchmark`` stage, which drives ``benchmark.trajectory`` in the MuJoCo
-  plant under each controller the iteration ships, on paired seeds: the
-  static-gain baseline into ``data/benchmark_static/`` and the deployed
-  parametrized controller into ``data/benchmark/``. Iteration 1 records only the
-  static set, because its deployed controller *is* the stock static one (its
-  parametrization is still the identity) and nothing tuned exists to compare it
-  against yet;
-- hand-recorded real-robot runs, where a shape sits directly in ``data/<shape>/``
-  when it was driven on static gains and in ``data/with gain MLP/<shape>/`` when
-  it was driven with the exported network (both spellings of that directory are
-  accepted, as the recorded experiments carry both).
-
-Runs are grouped by *shape* -- the reference that was driven -- because two
-shapes are not comparable, and within a shape by controller *variant*, which is
-what the comparison is about. At most ``MAX_RUNS_PER_ITERATION`` runs of a group
-are kept: the recordings are repeats of one reference, so beyond a handful more
-lines only thicken the same band.
-
-The heavy lifting (decoding, loading, the tracking error) lives here;
-``visualization.baseline_runs`` only renders what this returns, the same split
-``progress`` and ``visualization.pipeline_progress`` use.
+The benchmark stage records each held-out reference under every controller
+variant an iteration ships: the static controller into
+``data/benchmark_static/`` and the parametrized one into ``data/benchmark/``,
+one subdirectory per reference (shape). Runs are grouped by shape, then by
+variant; at most ``MAX_RUNS_PER_ITERATION`` runs per group are kept.
+``visualization.baseline_runs`` renders the result.
 """
 
 from __future__ import annotations
@@ -42,49 +19,25 @@ from typing import NamedTuple
 
 import numpy as np
 
-# Repeats of one reference under one controller; past a handful the extra lines
-# land on top of each other.
 MAX_RUNS_PER_ITERATION = 5
 
-# Controller variants a baseline run can have been recorded under. The static
-# one is the gain-parametrization-free baseline (ROBOTCFG_static.CFG on the
-# robot), the parametrized one the controller the iteration actually deployed.
+# Controller variants a benchmark run can have been recorded under.
 STATIC_VARIANT = "static"
 PARAMETRIZED_VARIANT = "parametrized"
 VARIANT_TITLES = {STATIC_VARIANT: "Static gains", PARAMETRIZED_VARIANT: "Gain parametrization"}
 VARIANT_ORDER = (STATIC_VARIANT, PARAMETRIZED_VARIANT)
 
-# data/ subdirectories the benchmark stage writes, one per variant. Their shape
-# is benchmark.trajectory, which the directory name does not carry.
+# data/ subdirectories the benchmark stage writes, one per variant; a single
+# reference (no shape subdirectories) is named BENCHMARK_SHAPE.
 BENCHMARK_DIRECTORY_NAMES = {PARAMETRIZED_VARIANT: "benchmark", STATIC_VARIANT: "benchmark_static"}
 BENCHMARK_SHAPE = "benchmark"
 
-# Where the hand-recorded robot runs of a shape live when the gain network was
-# on the card. Anything else directly under data/ is a static-gain recording.
-GAIN_MLP_DIRECTORY_NAMES = ("with gain MLP", "with_gain_MLP")
-
-# Yaw ringing: the RMS of the IMU yaw-rate tracking error (gyro minus the
-# reference yaw rate) inside this band, filtered forward and backward with a
-# 2nd-order Butterworth so the response is flat and phase-free. The ringing that
-# precedes duty saturation on the fast shapes sits at 1.9-3.6 Hz on the robot
-# (median 3.0) and 2.2-3.9 Hz in MuJoCo (median 3.8), so the band holds both
-# with margin. The reference is subtracted first because a perfectly tracked
-# lemniscate or designed curve carries 0.08-0.22 rad/s of its own yaw-rate
-# changes in the band, as much as a quiet controller scores. Until 2026-10-01
-# the metric was the gyro minus its 0.3 s centered moving average, whose gain
-# runs from 0.52 at 2 Hz to 1.2 at 5 Hz and so read MuJoCo's ringing about 1.25x
-# high against the robot's.
+# Yaw ringing: RMS of the gyro yaw rate minus the reference yaw rate,
+# band-passed (zero-phase 2nd-order Butterworth) to this band.
 YAW_RINGING_BAND_HZ = (1.5, 8.0)
-
-# A run is scored only up to the first reference instant its mocap position is
-# further than this from the reference (the default ``benchmark.
-# divergence_radius``). A spin-out past that point is broadband and scored
-# 1.1-1.9 rad/s, more than most genuine ringing, while a run that rang itself
-# off the track keeps the ringing that took it there.
+# A run is scored up to the first instant it is this far [m] off the reference.
 YAW_RINGING_DEPARTURE_RADIUS_M = 0.25
-
-# Less tracked time than this before the departure leaves no score: a second
-# holds three ringing periods.
+# Runs with less tracked time [s] than this get no score.
 YAW_RINGING_MIN_DURATION_S = 1.0
 
 
@@ -111,12 +64,8 @@ class BaselineIterationRuns:
 def collect_baseline_runs(
     experiment, max_runs: int = MAX_RUNS_PER_ITERATION
 ) -> dict[str, list[BaselineIterationRuns]]:
-    """Every iteration's baseline runs, keyed by shape then ordered by iteration.
-
-    Shapes with no runs at all are absent, and so are iterations that recorded
-    none of a shape -- an experiment that only started benchmarking halfway
-    through plots the iterations it has.
-    """
+    """Every iteration's benchmark runs, keyed by shape then ordered by
+    iteration (iterations without runs of a shape are left out)."""
     clip = bool(experiment.config["log_loading"]["clip_after_first_trajectory"])
     collected: dict[str, list[BaselineIterationRuns]] = {}
     for index in experiment.iteration_indices():
@@ -139,12 +88,7 @@ def collect_baseline_runs(
 
 
 def baseline_run_directories(paths) -> dict[str, dict[str, Path]]:
-    """``{shape: {variant: directory}}`` of one iteration's baseline recordings.
-
-    Only ``data/`` subdirectories are considered: everything directly in
-    ``data/`` is identification data, which the iteration was fitted on and so
-    is not held out.
-    """
+    """``{shape: {variant: directory}}`` of one iteration's benchmark recordings."""
     directories: dict[str, dict[str, Path]] = {}
     if not paths.data_dir.is_dir():
         return directories
@@ -152,32 +96,16 @@ def baseline_run_directories(paths) -> dict[str, dict[str, Path]]:
     for variant, name in BENCHMARK_DIRECTORY_NAMES.items():
         directory = paths.data_dir / name
         if _holds_runs(directory):
-            # One reference: the runs sit straight in the variant directory and
-            # the shape is not recoverable from the path, so it is just
-            # "benchmark".
             directories.setdefault(BENCHMARK_SHAPE, {})[variant] = directory
             continue
-        # A benchmark *set*: one subdirectory per reference, named after it, so
-        # the shape is the directory name and each gets its own figure.
         for shape_dir in sorted(path for path in directory.glob("*") if path.is_dir()):
             if _holds_runs(shape_dir):
                 directories.setdefault(shape_dir.name, {})[variant] = shape_dir
-
-    for child in sorted(path for path in paths.data_dir.iterdir() if path.is_dir()):
-        if child.name in BENCHMARK_DIRECTORY_NAMES.values():
-            continue
-        if child.name in GAIN_MLP_DIRECTORY_NAMES:
-            for shape_dir in sorted(path for path in child.iterdir() if path.is_dir()):
-                if _holds_runs(shape_dir):
-                    directories.setdefault(shape_dir.name, {})[PARAMETRIZED_VARIANT] = shape_dir
-        elif _holds_runs(child):
-            directories.setdefault(child.name, {})[STATIC_VARIANT] = child
     return directories
 
 
 def _holds_runs(directory: Path) -> bool:
-    """Whether ``directory`` holds recordings directly (nested ones belong to a
-    separate set, e.g. the gain-MLP tree beside a static shape)."""
+    """Whether ``directory`` holds recordings directly."""
     return directory.is_dir() and any(path.is_file() for path in directory.glob("TR*"))
 
 
@@ -250,12 +178,8 @@ def _baseline_run(run: RunLog) -> BaselineRun:
 
 
 def run_tracking_rmse(log) -> float | None:
-    """Position RMSE of a recorded run against the reference it tracked.
-
-    Aligned on the reference timestamps, the same way ``progress`` scores a
-    benchmark run: the reference is what the controller was asked for at those
-    instants, and the mocap track is sampled on its own clock.
-    """
+    """Position RMSE of a recorded run against its reference, at the
+    reference timestamps."""
     errors = _position_errors(log)
     if errors is None:
         return None
@@ -284,23 +208,12 @@ def run_yaw_ringing(
     band_hz: tuple[float, float] = YAW_RINGING_BAND_HZ,
     departure_radius: float = YAW_RINGING_DEPARTURE_RADIUS_M,
 ) -> float | None:
-    """RMS of the band-passed IMU yaw-rate tracking error [rad/s].
+    """Yaw ringing [rad/s]: RMS of the gyro yaw rate minus the reference yaw
+    rate, band-passed to ``YAW_RINGING_BAND_HZ``, up to the first instant the
+    robot is ``departure_radius`` off the reference.
 
-    The smoothness counterpart to ``run_tracking_rmse``: position RMSE cannot
-    tell a controller that tracks through a 3-4 Hz yaw oscillation from one that
-    does not, and that oscillation is what drives the wheels into duty
-    saturation and the robot off the fast circle. Read off the gyro rather than
-    the mocap twist, which the Savitzky-Golay smoothing attenuates, or the
-    encoders, which stop measuring the body once the wheels slip. The reference
-    yaw rate is subtracted and the error band-passed (``YAW_RINGING_BAND_HZ``)
-    over the reference's time span, cut at the first instant the robot is
-    ``departure_radius`` off the reference (``YAW_RINGING_DEPARTURE_RADIUS_M``).
-    The stream is resampled onto its median sample period first. None when the
-    log carries no IMU samples, or less than ``YAW_RINGING_MIN_DURATION_S`` of
-    them before the departure.
-
-    Ringing only appears on fast references, so compare it per shape (or on the
-    worst shape), never pooled over a set of slow and fast ones.
+    The gyro stream is resampled onto its median sample period first. None
+    without IMU samples or with less than ``YAW_RINGING_MIN_DURATION_S`` of them.
     """
     from scipy import signal
 
@@ -333,12 +246,7 @@ def run_yaw_ringing(
 
 
 def variant_panels(records: list[BaselineIterationRuns]) -> tuple[tuple[str, str], ...]:
-    """``(variant, panel title)`` for the variants any iteration recorded.
-
-    An experiment with no static-gain baseline (iteration 1, or one with the
-    parametrization off) has one variant and gets one panel rather than an empty
-    second one.
-    """
+    """``(variant, panel title)`` for the variants any iteration recorded."""
     present = {variant for record in records for variant in record.runs}
     return tuple(
         (variant, VARIANT_TITLES[variant]) for variant in VARIANT_ORDER if variant in present

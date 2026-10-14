@@ -1,20 +1,7 @@
-"""Identified robot parameters across an active-learning experiment.
-
-One 2x2 figure, a panel per physical parameter (wheel radius, wheelbase, max
-wheel speed, motor time constant), each plotting that
-parameter's joint fit against the iteration index. The per-log fits that went
-into each joint fit are drawn as faint dots behind it, so an iteration whose
-logs disagreed cannot pass for one whose logs agreed.
-
-Logs the outlier screen *dropped* are deliberately not drawn: they did not
-enter any joint fit, and a single rejected log is far enough out to compress
-the panel by an order of magnitude and hide the trend the figure exists to
-show. They are in the iteration's own
-``visualization.identification.plot_identification_log_parameters`` figure,
-which is where the screening decision belongs.
-
-The records come from ``active_learning.identified_parameters`` and are only
-rendered here.
+"""Identified robot parameters across an active-learning experiment: one panel
+per parameter, the joint fit per iteration with the per-log fits behind it
+(logs excluded by the outlier screen are not drawn). The records come from
+``active_learning.identified_parameters``.
 """
 
 import os
@@ -79,8 +66,7 @@ def plot_identified_parameters(records, experiment_root, out_path=None, out_pref
         if panel >= 2:
             ax.set_xlabel("iteration")
 
-    # One x tick per iteration; a long experiment would otherwise get
-    # fractional iteration numbers from the default locator.
+    # Integer iteration ticks.
     axes.flat[0].set_xticks(indices)
 
     handles = [plt.Line2D([], [], color="tab:green", marker="o", linewidth=1.8, label="joint fit")]

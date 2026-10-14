@@ -1,51 +1,19 @@
-"""Render a MuJoCo deployment to an mp4: the run itself, not a re-simulation.
+"""Render a MuJoCo deployment to an mp4.
 
-The rollout is exactly the one ``deploy.run_deployment`` drives -- hidden plant
-plus the firmware port, the same thing the ``simulate-deployment`` and
-``benchmark`` stages put on the (simulated) SD card. This module only watches
-it: the recorders here are ``run_deployment`` observers, so there is one copy
-of the control loop and the video cannot drift from what the pipeline records.
+The recorders are observers of ``deploy.run_deployment``, so the video shows
+exactly the run the pipeline would record (hidden plant plus firmware port).
+The reference and the robot's true trace are drawn into the MuJoCo scene as
+decor geoms; the legend is composited onto the frames with Pillow.
 
-The overlay is drawn straight into MuJoCo's scene as decor geoms, which is why
-the reference is visible in full from the first frame while the robot's trace
-grows behind it: the reference is a fixed polyline, the trace is appended one
-point per frame from the plant's *true* pose. The trace is ground truth and is
-therefore only ever a picture -- nothing here feeds the pipeline.
+``render_deployment_comparison`` drives an iteration's static and parametrized
+controllers on the same seed: the parametrized run is rendered, the static run
+(driven first by ``record_pose_track``) is drawn as a marker from its recorded
+true pose. ``views`` renders several cameras of the same run into one
+split-screen frame (``pane_rects``).
 
-**Comparing two controllers in one video** (``render_deployment_comparison``)
-drives the iteration's two controller options on the **same seed**, so the hand
-placement and the sensor noise are common random numbers and the difference
-between the two traces is the controller and nothing else -- the same pairing
-the benchmark stage records under. Each variant is its own full
-``run_deployment``: its own plant, its own firmware and EKF, its own closed
-loop. Nothing here replays anybody's trajectory into a robot.
-
-There is one plant and one robot in a MuJoCo scene, so only one of the two can
-be the *rendered chassis*: the parametrized run is driven while the frames are
-being written, and the static run -- driven first, by ``record_pose_track``, in
-exactly the same way -- is drawn beside it from its own recorded true pose as a
-marker in its trace's colour. That is a drawing order, not a difference in how
-the two were simulated.
-
-**Split screen** (``views``) puts several cameras on the same run. MuJoCo has
-no notion of a multi-pane video, but it does not need one: a ``Renderer`` draws
-whatever ``mjData`` it is handed, so one pane per view means one renderer per
-view all rendering the *same* physics step, tiled into a single frame with
-numpy. There is still exactly one deployment behind it, and no second library
-stitching videos together afterwards -- the panes are frames of one video from
-the moment they are written.
-
-``pane_rects`` sizes the panes so they tile the frame exactly, which is why a
-1920x1080 split screen is a 960x1080 overview beside two 960x540 chase views:
-nothing is scaled and nothing is letterboxed.
-
-A MuJoCo scene has no text, so the legend is composited onto the rendered
-frames with Pillow. It is built once and blended in per frame, since nothing
-about it changes during a run.
-
-Offscreen rendering needs an OpenGL backend, chosen through MUJOCO_GL *before*
-mujoco is imported: ``egl`` (headless GPU, the default here), ``osmesa`` (CPU
-software, slow but works anywhere), ``glfw`` (needs a display).
+Offscreen rendering needs an OpenGL backend, chosen through MUJOCO_GL before
+mujoco is imported: ``egl`` (headless GPU, the default), ``osmesa`` (CPU) or
+``glfw`` (needs a display).
 """
 
 from __future__ import annotations
@@ -60,12 +28,9 @@ import numpy as np
 from wmr_simulator.mujoco_sim.deploy import DeploymentResult
 from wmr_simulator.mujoco_sim.plant import MujocoPlant
 
-# Straight down reads as a floor plan and loses the robot's body entirely, so
-# the default leans the camera just off vertical: enough to see the chassis and
-# which way it is pointing, flat enough that the path geometry is undistorted.
+# Overview camera: just off vertical.
 DEFAULT_ELEVATION = 80.0
-# Azimuth 90 puts world +x to the right and +y up the frame, i.e. the same
-# orientation as every trajectory plot in visualize/.
+# Azimuth 90: world +x to the right, +y up the frame.
 DEFAULT_AZIMUTH = 90.0
 DEFAULT_FPS = 30
 DEFAULT_WIDTH = 1280
@@ -78,66 +43,35 @@ STATIC_CAMERA = "static"
 FOLLOW_CAMERA = "follow"
 CAMERA_MODES = (STATIC_CAMERA, FOLLOW_CAMERA)
 
-# The chase camera rides at roughly the robot's own height and rakes in almost
-# flat, which is the point of it: the caster ball (12.7 mm, 40 mm behind the
-# axle) and both wheels are only ever visible together from down there, and a
-# top-down shot cannot show contact geometry at all. The height is measured:
-# the chassis skirt hides the caster from 0.06 m up, and it clears the skirt
-# from about 0.045 m down (0.03 m puts it in plain view, at a very high
-# horizon). Both wheels show at any of these; a wheel is clearest abeam.
+# Chase camera: low, at about the robot's height, so wheels and caster show.
 DEFAULT_FOLLOW_DISTANCE = 0.18
 DEFAULT_FOLLOW_HEIGHT = 0.045
-# 0 sits the camera squarely behind the robot, 90 abeam of it, 45 between the
-# two -- measured round the robot's own heading, so it holds through every turn.
+# Bearing round the robot's heading: 0 behind, 90 abeam.
 DEFAULT_FOLLOW_ANGLE = 0.0
-# The chase camera's elevation normally *follows* from how high and how far
-# back it rides, so the two can never be set to disagree. ``follow_elevation``
-# overrides that and states the angle outright instead, with follow_distance
-# read as the straight-line range: 0 is level with the robot, negative goes
-# under the floor. MuJoCo renders the ground plane one-sided, so a camera below
-# it looks straight up through it at the caster ball, both tires and their
-# contact patches -- the one view that shows what the robot stands on.
+# None: the elevation follows from height and distance. Otherwise the angle
+# itself, with follow_distance as the range (negative: from under the floor).
 DEFAULT_FOLLOW_ELEVATION = None
-# The robot spans about 0-25 mm above the floor (axle 16 mm, deck top 20 mm,
-# caster centre 6.6 mm), so aiming here keeps body and contacts in frame.
+# Height of the chase camera's lookat point [m].
 FOLLOW_LOOKAT_HEIGHT = 0.015
-# A camera nailed to the raw pose holds the robot perfectly still and swings
-# the world around it instead, hiding exactly the wobble this view exists to
-# show; a camera that lags too much loses the robot out of frame. The two axes
-# want very different amounts, so they get their own time constants: heading is
-# what whips the whole world sideways and is smoothed hard, position only needs
-# enough lag to let the robot shift within the frame. Position lag is roughly
-# tau * speed, so at 1 m/s this is ~8 cm -- under one robot length, against a
-# stand-off of DEFAULT_FOLLOW_DISTANCE. In simulated seconds, so the framing is
-# identical at every --slowmo-factor.
+# Low-pass time constants [simulated s] of the chase camera's heading and position.
 FOLLOW_POSITION_TAU = 0.08
 FOLLOW_YAW_TAU = 0.30
-# The reference and trace capsules are sized for a shot framed on a whole
-# trajectory; from 0.18 m away a 7 mm tube is wider than the robot is tall and
-# simply buries it, so the chase camera draws them thinner.
+# Tube radius factor of the chase view.
 FOLLOW_LINE_SCALE = 0.3
 
-# >1 stretches the run out: the plant is sampled that many times more often and
-# the extra frames are played at the same rate, so the motion is genuinely
-# resolved rather than the same frames merely held longer.
+# > 1 samples the plant that many times more often at the same playback fps.
 DEFAULT_SLOWMO_FACTOR = 1.0
 
 STATIC_VARIANT = "static"
 PARAMETRIZED_VARIANT = "parametrized"
 
-# Deliberately not white: the chassis is a white cylinder, and a white
-# reference under it is indistinguishable from the robot at the zoom a whole
-# trajectory has to be framed at.
 REFERENCE_RGBA = (0.55, 0.95, 0.35, 1.0)
-# One colour per controller, the same in a single-variant video and in a
-# comparison, so a trace means the same thing across every video of a run.
+# One colour per controller.
 VARIANT_RGBA = {
     PARAMETRIZED_VARIANT: (0.98, 0.40, 0.10, 1.0),
     STATIC_VARIANT: (0.98, 0.30, 0.78, 1.0),
 }
-# What to call those colours when a run is reported on the terminal.
 VARIANT_COLOUR_NAMES = {PARAMETRIZED_VARIANT: "orange", STATIC_VARIANT: "pink"}
-# How a run names itself in the video's legend.
 VARIANT_LABELS = {
     PARAMETRIZED_VARIANT: "parametrized gains",
     STATIC_VARIANT: "static gains",
@@ -148,19 +82,12 @@ DEFAULT_TRACE_RGBA = VARIANT_RGBA[PARAMETRIZED_VARIANT]
 
 REFERENCE_RADIUS = 0.006
 TRACE_RADIUS = 0.007
-# Above the floor plane and stacked, so nothing z-fights with the ground or
-# with the layer under it.
+# Heights of the decor layers above the floor.
 REFERENCE_HEIGHT = 0.002
 REPLAY_TRACE_HEIGHT = 0.004
 TRACE_HEIGHT = 0.006
-# The replayed robot is a marker, not a body: a ring around where its chassis
-# is, with a heading tick. A ring rather than a disc, and wider than the
-# chassis, because the two runs spend most of a good comparison nearly on top
-# of each other -- a disc at the chassis's own radius is simply hidden under
-# the white body from a top-down camera, which is exactly the case where the
-# viewer most needs to see that both are still there.
-# The legend is sized off the frame height rather than fixed, so it stays
-# legible at 640x360 and does not swell at 4K.
+# The replayed robot is a ring with a heading tick, wider than the chassis.
+# The legend scales with the frame height.
 LEGEND_FONT_DIVISOR = 34
 LEGEND_MIN_FONT_SIZE = 13
 LEGEND_MARGIN_FRACTION = 0.02
@@ -180,16 +107,11 @@ FALLBACK_CHASSIS_RADIUS = 0.0485
 
 @dataclass(frozen=True)
 class View:
-    """One camera of a video: where it sits and what it follows.
+    """One camera of a video.
 
-    A video is a sequence of these. A single view fills the frame, which is
-    what every video was before split screens existed; several are tiled by
-    ``pane_rects`` and each gets its own renderer over the same physics step.
-
-    ``camera_mode="static"`` is the overhead shot, framed once on the whole
-    reference from ``elevation``/``azimuth``. ``"follow"`` is the chase camera,
-    placed ``follow_angle`` degrees round the robot's *own* heading so the
-    bearing holds through every turn.
+    ``camera_mode="static"`` is the overview, framed on the whole reference
+    from ``elevation``/``azimuth``. ``"follow"`` is the chase camera, placed
+    ``follow_angle`` degrees round the robot's heading.
     """
 
     camera_mode: str = STATIC_CAMERA
@@ -210,13 +132,7 @@ class View:
 
     @property
     def elevation_above_lookat(self) -> float:
-        """Degrees the camera sits above what it looks at; negative is below it.
-
-        For a chase camera this normally *follows* from the height and stand-off
-        rather than being a third setting that could disagree with them --
-        unless ``follow_elevation`` states it outright, which is the only way to
-        get under the floor.
-        """
+        """Degrees the camera sits above what it looks at (negative: below)."""
         if not self.is_follow:
             return float(self.elevation)
         if self.follow_elevation is not None:
@@ -232,11 +148,7 @@ class View:
 
     @property
     def line_scale(self) -> float:
-        """How much to thin the reference and trace tubes for this view.
-
-        From 0.18 m away a 7 mm tube is wider than the robot is tall and simply
-        buries it, so a chase view draws them thinner than an overview does.
-        """
+        """Radius factor of the reference and trace tubes in this view."""
         return FOLLOW_LINE_SCALE if self.is_follow else 1.0
 
     @property
@@ -265,15 +177,8 @@ def follow_bearing(angle: float) -> str:
 
 
 def pane_rects(num_views: int, width: int, height: int) -> list[tuple[int, int, int, int]]:
-    """``(x, y, w, h)`` per view, tiling the frame exactly.
-
-    One view fills the frame. Otherwise the first takes the left half and the
-    rest stack down the right, which is the layout the split screen exists for:
-    the whole trajectory on the left for context, the chase views beside it for
-    what the robot is actually doing under it. At 1920x1080 that is a 960x1080
-    overview and two 960x540 chase panes -- each rendered at its own size, so
-    nothing is scaled and nothing is letterboxed.
-    """
+    """``(x, y, w, h)`` per view, tiling the frame exactly: one view fills it,
+    otherwise the first takes the left half and the rest stack down the right."""
     if num_views < 1:
         raise ValueError(f"a video needs at least one view, got {num_views}")
     if num_views == 1:
@@ -284,8 +189,7 @@ def pane_rects(num_views: int, width: int, height: int) -> list[tuple[int, int, 
     rows = num_views - 1
     top = 0
     for row in range(rows):
-        # Any remainder goes to the last row rather than being spread, so the
-        # panes tile the frame exactly whatever the height divides into.
+        # The last row takes the remainder.
         row_height = int(height) - top if row == rows - 1 else int(height) // rows
         rects.append((left, top, int(width) - left, row_height))
         top += row_height
@@ -293,14 +197,8 @@ def pane_rects(num_views: int, width: int, height: int) -> list[tuple[int, int, 
 
 
 def per_chase_view(values, count: int, name: str) -> list:
-    """Broadcast a chase-camera setting over ``count`` panes.
-
-    A setting is either one value, which every pane shares, or one per pane.
-    ``None`` broadcasts too, since that is how a setting says "derive me" --
-    there is no way to spell a per-pane None on a command line anyway.
-    Anything else is a mismatch worth refusing rather than silently zipping
-    short: two panes and three distances is a typo, not a request.
-    """
+    """Broadcast a chase-camera setting (one value, None, or one per pane)
+    over ``count`` panes."""
     if values is None or isinstance(values, (int, float)):
         return [values] * count
     values = list(values)
@@ -320,13 +218,8 @@ def split_screen_views(
     follow_height=DEFAULT_FOLLOW_HEIGHT,
     follow_elevation=DEFAULT_FOLLOW_ELEVATION,
 ) -> list[View]:
-    """An overview plus one chase view per angle, in ``pane_rects`` order.
-
-    The chase settings are per pane: each takes one value shared by every pane,
-    or one value per angle. That is what lets a split screen watch the same run
-    from two genuinely different places -- abeam from under the floor beside
-    close-in from behind -- rather than the same shot twice at two bearings.
-    """
+    """An overview plus one chase view per angle, in ``pane_rects`` order;
+    each chase setting is shared or given per angle."""
     follow_angles = [float(angle) for angle in follow_angles]
     if not follow_angles:
         raise ValueError("a split screen needs at least one follow angle")
@@ -352,12 +245,8 @@ def split_screen_views(
 class DeploymentController:
     """Which controller of an iteration a run is driven under.
 
-    ``config_path`` is the config as the firmware reads it *off its own card*:
-    ``FirmwareConfig.from_file`` picks up a ``GAINMLP.JSN`` sitting next to it,
-    mirroring ``sdlog.rs``, so the static variant cannot be driven from the
-    iteration root -- the deployed network is right there and would be applied
-    to it. It is staged into its own directory instead, which is exactly the
-    swap the real SD card needs.
+    The static variant's config is staged into its own directory, since the
+    firmware picks up a ``GAINMLP.JSN`` next to the config.
     """
 
     variant: str
@@ -386,20 +275,13 @@ class VariantRun:
     controller: DeploymentController
     result: DeploymentResult
     rgba: tuple[float, float, float, float]
-    # Which run carries the rendered chassis; the other is drawn as a marker
-    # from its own recorded pose. Both are independent closed-loop deployments
-    # of the same plant on the same seed -- this is a drawing role only.
+    # Whether this run is the rendered chassis (else drawn as a marker).
     live: bool
 
 
 def find_iteration_root(trajectory: str | Path) -> Path:
-    """The active-learning iteration a trajectory file belongs to.
-
-    Identified by its ``ROBOTCFG.CFG``, which every iteration has and no
-    trajectory subdirectory does, so this works from a pickle in
-    ``tuning_trajectories/``, a bridged JSN in ``identification_trajectory/``
-    and the baseline in ``benchmark/`` alike.
-    """
+    """The active-learning iteration a trajectory file belongs to (the first
+    parent directory with a ``ROBOTCFG.CFG``)."""
     trajectory = Path(trajectory).resolve()
     for candidate in trajectory.parents:
         if (candidate / "ROBOTCFG.CFG").is_file():
@@ -411,26 +293,16 @@ def find_iteration_root(trajectory: str | Path) -> Path:
 
 
 def ships_two_controllers(iteration_root: str | Path) -> bool:
-    """Whether this iteration has a static baseline distinct from its deployed controller.
-
-    ``ROBOTCFG_static.CFG`` is written by ``finalize`` only when the previous
-    tuning ran an independent static tune beside a parametrized one, so its
-    presence *is* the question "was the parametrization worth it". Without it
-    there is one controller -- iteration 1, or an experiment with the
-    parametrization off -- and nothing to compare it against.
-    """
+    """Whether this iteration ships a static controller (``ROBOTCFG_static.CFG``)
+    beside its deployed one."""
     from wmr_simulator.active_learning.experiment import IterationPaths
 
     return IterationPaths(root=Path(iteration_root)).robotcfg_static_cfg.is_file()
 
 
 def resolve_controller(iteration_root: str | Path, variant: str, staging_dir: str | Path) -> DeploymentController:
-    """The iteration's deployed (``parametrized``) or static-gain controller.
-
-    Mirrors what the benchmark stage compares. An iteration without a
-    ``ROBOTCFG_static.CFG`` shipped only one controller, so both variants
-    resolve to the same config there, and the run is labelled as what it is.
-    """
+    """The iteration's deployed (``parametrized``) or static-gain controller
+    (the same config when the iteration ships only one)."""
     from wmr_simulator.active_learning.experiment import IterationPaths
 
     if variant not in VARIANT_RGBA:
@@ -467,12 +339,7 @@ def resolve_controller(iteration_root: str | Path, variant: str, staging_dir: st
 
 
 class FrameObserver:
-    """A ``run_deployment`` observer that samples the run at video cadence.
-
-    The frame schedule is derived from the plant on the first call rather than
-    up front: the plant is constructed inside ``run_deployment``, and its
-    timestep is what a frame interval has to be a whole number of.
-    """
+    """A ``run_deployment`` observer that samples the true pose at video cadence."""
 
     def __init__(self, fps: int = DEFAULT_FPS) -> None:
         self.fps = int(fps)
@@ -515,12 +382,8 @@ class FrameObserver:
 
 
 class DeploymentVideoRecorder(FrameObserver):
-    """A ``run_deployment`` observer that writes the run out as an mp4.
-
-    ``replay`` overlays another already-recorded run of the same reference: its
-    trace grows frame for frame beside this one's and its robot is drawn as a
-    marker. It is what puts two controllers in one video.
-    """
+    """A ``run_deployment`` observer that writes the run out as an mp4;
+    ``replay`` overlays another recorded run of the same reference."""
 
     def __init__(
         self,
@@ -541,11 +404,7 @@ class DeploymentVideoRecorder(FrameObserver):
     ) -> None:
         if slowmo_factor <= 0.0:
             raise ValueError(f"slowmo_factor must be positive, got {slowmo_factor}")
-        # Slow motion is a *sampling* rate, not a playback rate: the plant is
-        # watched slowmo times more often and the frames are written at the
-        # requested fps, so a 2x video is twice as long and twice as finely
-        # resolved. Dropping the writer's fps instead would give a video of the
-        # same length with fewer frames in it.
+        # Slow motion samples the plant more often; the playback fps stays.
         super().__init__(fps=max(1, round(fps * float(slowmo_factor))))
         self.output_fps = max(1, int(fps))
         import imageio.v2 as imageio
@@ -556,12 +415,9 @@ class DeploymentVideoRecorder(FrameObserver):
         self.reference_xy = np.asarray(reference_xy, dtype=float)[:, :2]
         self.dt = float(dt)
         self.out_path = Path(out_path)
-        # One view fills the frame; several are tiled into it by pane_rects,
-        # each rendered at its own pane's size rather than scaled to fit.
         self.views = (View(),) if views is None else tuple(views)
         self.slowmo_factor = float(slowmo_factor)
-        # h264 needs even dimensions on the *composed* frame; the panes are
-        # numpy slices of it and are free to be any size that tiles it.
+        # h264 needs even frame dimensions.
         self.width = int(width) + int(width) % 2
         self.height = int(height) + int(height) % 2
         self.trace_rgba = tuple(trace_rgba)
@@ -597,9 +453,7 @@ class DeploymentVideoRecorder(FrameObserver):
         mujoco = self._mujoco
         model = plant.model
         rects = pane_rects(len(self.views), self.width, self.height)
-        # mujoco.Renderer refuses to render larger than the model's offscreen
-        # framebuffer, which is a <visual><global> property of the XML. It is
-        # the largest *pane* that has to fit, not the composed frame.
+        # The offscreen framebuffer has to fit the largest pane.
         model.vis.global_.offwidth = max(model.vis.global_.offwidth, max(rect[2] for rect in rects))
         model.vis.global_.offheight = max(model.vis.global_.offheight, max(rect[3] for rect in rects))
         self._chassis_radius = _chassis_radius(mujoco, model)
@@ -616,8 +470,6 @@ class DeploymentVideoRecorder(FrameObserver):
         self._writer = self._imageio.get_writer(self.out_path, fps=self.output_fps, macro_block_size=1)
 
     def _frame(self, plant: MujocoPlant) -> None:
-        # Every pane draws the same physics step, so the panes of a frame are
-        # the same instant of one deployment seen from several cameras.
         frame = np.empty((self.height, self.width, 3), dtype=np.uint8)
         for pane in self._panes:
             frame[pane.top : pane.top + pane.height, pane.left : pane.left + pane.width] = pane.render(
@@ -628,20 +480,12 @@ class DeploymentVideoRecorder(FrameObserver):
         self._writer.append_data(frame)
 
     def _decorate(self, scene, scale: float) -> None:
-        """Add the reference, the traces and the replayed robot to one pane's scene.
-
-        Called once per pane per frame: each renderer owns its own scene, and
-        the tube radii are scaled per view, since a tube sized for an overview
-        buries the robot from 0.18 m away.
-        """
+        """Add the reference, the traces and the replayed robot to one pane's scene."""
         mujoco = self._mujoco
         _add_polyline(
             mujoco, scene, self.reference_xy, REFERENCE_HEIGHT, scale * REFERENCE_RADIUS, REFERENCE_RGBA
         )
         if self.replay_poses is not None and len(self.replay_poses):
-            # The two runs drive the same reference for the same duration, so
-            # they share a frame index; clamp anyway rather than let a
-            # one-frame rounding difference truncate the replay.
             index = min(self.num_frames, len(self.replay_poses))
             _add_polyline(
                 mujoco,
@@ -661,14 +505,8 @@ class DeploymentVideoRecorder(FrameObserver):
     # -- internals --------------------------------------------------------
 
     def _geom_budget(self, model) -> int:
-        """One geom per polyline segment, so the budget has to cover the traces.
-
-        The scene's ``maxgeom`` is fixed when the ``Renderer`` is built, and a
-        polyline that runs into it is silently truncated -- a trace that stops
-        growing mid-video and looks like the robot stopped. The run cannot last
-        longer than the reference does, so size the traces from that and double
-        it.
-        """
+        """Scene geom budget: one geom per polyline segment, sized from the
+        reference length with a factor of two."""
         frames = int(self.fps * len(self.reference_xy) * self.dt)
         traces = 2 if self.replay_poses is not None else 1
         marker = REPLAY_MARKER_SEGMENTS + 2
@@ -676,13 +514,7 @@ class DeploymentVideoRecorder(FrameObserver):
 
 
 class _ViewPane:
-    """One ``View``'s renderer and camera, and where its frame lands.
-
-    A pane is not a separate video: it renders whatever ``mjData`` it is handed,
-    so all the panes of a frame are the same physics step of the same
-    deployment, and the tiling in ``DeploymentVideoRecorder._frame`` is the only
-    thing that makes them a split screen.
-    """
+    """One ``View``'s renderer and camera, and where its frame lands."""
 
     def __init__(
         self,
@@ -702,20 +534,14 @@ class _ViewPane:
         self.scene_option = mujoco.MjvOption()
         self.camera = mujoco.MjvCamera()
         self.camera.type = mujoco.mjtCamera.mjCAMERA_FREE
-        # MuJoCo measures elevation downward-negative, so a camera 80 deg above
-        # what it looks at is -80 in the camera's own convention -- and a
-        # follow_elevation of -90, under the floor looking up, is +90.
+        # MuJoCo's elevation is negative above the lookat point.
         self.camera.elevation = -view.elevation_above_lookat
 
         if view.is_follow:
-            # Only the azimuth and the lookat move with the robot; how far back
-            # and how high the camera rides is fixed for the whole run.
             self.camera.distance = view.follow_range
         else:
             self.camera.azimuth = view.azimuth
-            # Framed against this pane's own aspect ratio, not the composed
-            # frame's: a 960x1080 overview is a different shot from a 1920x1080
-            # one and has to be framed as one.
+            # Framed for this pane's aspect ratio.
             lookat, distance = _frame_shot(
                 reference_xy,
                 azimuth=view.azimuth,
@@ -742,27 +568,14 @@ class _ViewPane:
         self.renderer.close()
 
     def _track(self, pose) -> None:
-        """Point the chase camera at the robot for this frame.
-
-        MuJoCo's free camera sits at
-        ``lookat - distance * [cos(az)cos(el), sin(az)cos(el), sin(el)]``, so the
-        camera is placed entirely by its azimuth: ``azimuth = yaw`` puts it
-        squarely behind the robot, and ``+ follow_angle`` swings it round toward
-        the robot's right -- 90 abeam, 45 between the two. Because the azimuth
-        is measured off the robot's *own* heading it holds through every turn,
-        which a fixed azimuth cannot do.
-
-        The camera lags the robot rather than locking to it: one nailed to the
-        raw pose holds the robot perfectly still and swings the world around it
-        instead, hiding exactly the wobble this view exists to show.
-        """
+        """Point the chase camera at the low-passed robot pose:
+        ``azimuth = yaw + follow_angle``."""
         x, y, yaw = (float(value) for value in pose)
         if self._pose is None:
             self._pose = (x, y, yaw)
         else:
             prev_x, prev_y, prev_yaw = self._pose
-            # Take the short way round: a raw difference across the +-pi
-            # branch cut would swing the camera a full turn the wrong way.
+            # Wrap the heading difference to [-pi, pi).
             delta_yaw = (yaw - prev_yaw + math.pi) % (2.0 * math.pi) - math.pi
             move, turn = self._position_alpha, self._yaw_alpha
             self._pose = (
@@ -813,21 +626,13 @@ def render_deployment(
     views=None,
     slowmo_factor: float = DEFAULT_SLOWMO_FACTOR,
 ) -> tuple[DeploymentResult, int]:
-    """Drive one deployment and write the mp4.
+    """Drive one deployment and write the mp4; returns the run's
+    ``DeploymentResult`` and the number of frames written.
 
-    Returns the run's ``DeploymentResult`` and the number of frames written.
-
-    ``log_dir`` keeps the ``TRxx`` the run produces. It defaults to a temporary
-    directory that is thrown away: a video is not data collection, and dropping
-    a log into an iteration's ``data/`` would hand identification a run nobody
-    asked for.
-
-    ``views`` is the cameras to render it from: one fills the frame (the
-    default, an overhead shot from ``elevation``/``azimuth``), several are tiled
-    into a split screen by ``pane_rects``. They all watch the same deployment,
-    so a split screen costs one render per pane and nothing else.
-    ``slowmo_factor`` above 1 samples the plant that much more often and plays
-    the frames at ``fps``, so the video is that many times longer.
+    ``log_dir`` keeps the run's ``TRxx`` log (default: a temporary directory).
+    ``views`` are the cameras (default: one overview from
+    ``elevation``/``azimuth``). ``slowmo_factor`` above 1 makes the video that
+    many times longer.
     """
     from wmr_simulator.pololu.reference_importer import load_reference
 
@@ -865,15 +670,8 @@ def render_deployment_comparison(
     views=None,
     slowmo_factor: float = DEFAULT_SLOWMO_FACTOR,
 ) -> tuple[list[VariantRun], int]:
-    """Both of an iteration's controllers, in one video, on the same seed.
-
-    Paired seeds make the hand placement and the sensor noise common random
-    numbers, so the two traces differ by the controller and nothing else -- the
-    same pairing the benchmark stage records the two variants under.
-
-    Refuses an iteration that ships only one controller: there both variants
-    resolve to the same config, and the video would be one run drawn twice.
-    """
+    """Both of an iteration's controllers in one video, on the same seed
+    (refuses an iteration that ships only one controller)."""
     import tempfile
 
     iteration_root = Path(iteration_root)
@@ -887,10 +685,7 @@ def render_deployment_comparison(
         replay = resolve_controller(iteration_root, STATIC_VARIANT, staging)
         live = resolve_controller(iteration_root, PARAMETRIZED_VARIANT, staging)
 
-        # The marker is indexed frame-for-frame against the rendered run, so
-        # it has to be sampled on the cadence that run is *rendered* at -- under
-        # slow motion that is fps * slowmo_factor, not fps, or the replay track
-        # runs out partway through and its robot freezes.
+        # Sampled at the rendered cadence, fps * slowmo_factor.
         replay_result, replay_poses = record_pose_track(
             replay.config_path,
             trajectory,
@@ -953,32 +748,20 @@ def _add_polyline(mujoco, scene, points_xy: np.ndarray, z: float, radius: float,
 
 
 def _add_robot_marker(mujoco, scene, pose, chassis_radius: float, rgba, line_scale: float = 1.0) -> None:
-    """The other run's robot: a ring around its chassis, with a heading tick.
-
-    A ring rather than a look-alike chassis for legibility, not for honesty --
-    both runs are real deployments. The two spend most of a good comparison
-    nearly on top of each other, and an opaque body at the chassis's own radius
-    would simply hide under the rendered one from a top-down camera.
-    """
+    """The other run's robot: a ring around its chassis, with a heading tick."""
     x, y, yaw = (float(value) for value in pose)
     radius = REPLAY_MARKER_RADIUS_FACTOR * chassis_radius
     angles = np.linspace(0.0, 2.0 * math.pi, REPLAY_MARKER_SEGMENTS + 1)
     ring = np.column_stack([x + radius * np.cos(angles), y + radius * np.sin(angles)])
     _add_polyline(mujoco, scene, ring, REPLAY_MARKER_HEIGHT, line_scale * 0.6 * TRACE_RADIUS, rgba)
-    # Which way it is pointing, since a ring alone cannot say. Drawn outside
-    # the ring so it clears the live chassis when the two runs coincide.
+    # Heading tick, outside the ring.
     heading = np.array([math.cos(yaw), math.sin(yaw)])
     tick = np.array([[x, y]]) + np.outer([1.0, 1.5], radius * heading)
     _add_polyline(mujoco, scene, tick, REPLAY_MARKER_HEIGHT, line_scale * 0.6 * TRACE_RADIUS, rgba)
 
 
 def _legend_overlay(entries, width: int, height: int) -> np.ndarray:
-    """The legend as an ``(h, w, 4)`` RGBA patch, drawn once per video.
-
-    A MuJoCo scene carries no text, so this is composited onto the rendered
-    frames rather than added to the scene. Nothing in it changes during a run,
-    which is why it is built up front instead of per frame.
-    """
+    """The legend as an ``(h, w, 4)`` RGBA patch, drawn once per video."""
     from PIL import Image, ImageDraw, ImageFont
 
     font_size = max(LEGEND_MIN_FONT_SIZE, round(height / LEGEND_FONT_DIVISOR))
@@ -994,7 +777,6 @@ def _legend_overlay(entries, width: int, height: int) -> np.ndarray:
     row_height = max(text_height, swatch_height)
     panel_width = 2 * pad + swatch_width + label_gap + max(box[2] - box[0] for box in boxes)
     panel_height = 2 * pad + len(entries) * row_height + (len(entries) - 1) * row_gap
-    # A legend wider than the frame is a sizing bug, not something to crop.
     panel_width = min(panel_width, width)
     panel_height = min(panel_height, height)
 
@@ -1059,12 +841,8 @@ def _frame_shot(
     fovy: float,
     aspect: float,
 ) -> tuple[np.ndarray, float]:
-    """``(lookat, distance)`` putting every point of the reference in frame.
-
-    Exact rather than an approximation of the foreshortening: each point is
-    projected onto the camera's own right/up axes and the distance is whatever
-    makes the worst one fit, in both screen directions.
-    """
+    """``(lookat, distance)`` putting every point of the reference in frame
+    (each point projected onto the camera's right/up axes)."""
     points = np.column_stack([np.asarray(points_xy, dtype=float)[:, :2], np.zeros(len(points_xy))])
     lookat = 0.5 * (points.min(axis=0) + points.max(axis=0))
 

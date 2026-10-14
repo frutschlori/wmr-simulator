@@ -6,10 +6,7 @@ import jax.numpy as jnp
 
 class PhysicalParams(NamedTuple):
     wheel_radius: jax.Array
-    # NB: base_diameter is the *effective* wheelbase, not the geometric one -- tire
-    # scrub in turns acts as a constant multiplicative wheelbase correction that is
-    # not separately identifiable (Borenstein & Feng 1996, E_b). Identification fits
-    # the effective value directly.
+    # base_diameter is the effective wheelbase (it absorbs tire scrub in turns).
     base_diameter: jax.Array
     max_wheel_speed: jax.Array = jnp.asarray(150.0, dtype=jnp.float32)
     time_constant: jax.Array = jnp.asarray(0.0, dtype=jnp.float32)
@@ -33,19 +30,15 @@ class PoseLog(NamedTuple):
     true_states: jax.Array    # [x, y, theta]
     command_time_s: jax.Array # geometry-controller command times
     wheel_cmd: jax.Array      # [omega_right_cmd, omega_left_cmd]
-    # [v_x, v_y, omega] body twist at the pose times. Pololu logs fill this with
-    # the Savitzky-Golay filter derivative (pololu.measurement_smoothing); consumers
-    # should prefer it over finite-differencing `states`. None for simulated logs.
+    # [v_x, v_y, omega] body twist at the pose times from the smoothing filter
+    # (Pololu logs); None for simulated logs.
     twists: jax.Array | None = None
-    # Raw (unsmoothed) mocap poses surviving outlier rejection and their times
-    # (pololu.measurement_smoothing); a shorter stream than time_s, for diagnostics/
-    # plots that want the raw measurement without the rejected spikes. None for
-    # simulated logs.
+    # Raw mocap poses that survived outlier rejection, and their times (Pololu
+    # logs); None for simulated logs.
     clean_time_s: jax.Array | None = None
     clean_states: jax.Array | None = None
-    # Controller gains [kx, ky, kth, kpmotor, kimotor, kdmotor] applied at each geometry
-    # step (command_time_s); time-varying under a gain parametrization. None for
-    # replayed/real logs.
+    # Controller gains applied at each geometry step (command_time_s); None for
+    # replayed and recorded logs.
     gains: jax.Array | None = None
 
 
@@ -72,15 +65,6 @@ def physical_params_to_array(params: PhysicalParams) -> jax.Array:
             params.time_constant,
         ],
         axis=-1,
-    )
-
-
-def physical_params_from_array(values: jax.Array) -> PhysicalParams:
-    return PhysicalParams(
-        wheel_radius=values[..., 0],
-        base_diameter=values[..., 1],
-        max_wheel_speed=values[..., 2],
-        time_constant=values[..., 3],
     )
 
 

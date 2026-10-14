@@ -10,7 +10,7 @@ experiment defaults, so the sets match what the loop would design.
     python scripts/generate_fixed_trajectory_sets.py --sets random-twist --random-sizes 15 45 150 --seed 1
     python scripts/generate_fixed_trajectory_sets.py --sets identification-random --random-identification 10
     python scripts/generate_fixed_trajectory_sets.py --sets matched \\
-        --compare "Pololu Data/test31 1 start gains/iteration_01/tuning_trajectories"
+        --compare experiments/exp01/iteration_01/tuning_trajectories
 
 Writes trajectory_exports/fixed_sets/<set>/ with one pickle per reference, a
 summary.yaml of motion statistics and an overview figure, plus one motion
@@ -26,7 +26,6 @@ from pathlib import Path
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
-import numpy as np
 import yaml
 
 from wmr_simulator.active_learning.experiment import DEFAULT_EXPERIMENT_CONFIG

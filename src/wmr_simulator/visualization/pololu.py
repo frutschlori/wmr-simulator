@@ -15,13 +15,9 @@ def plot_logged_summary(
     show_gains: bool = False,
     gains: np.ndarray | None = None,
 ) -> Path:
-    """Eight-panel overview of one log; ``imu_gyro_z`` (rad/s, see
-    pololu.log_loader.load_imu_gyro_z) is overlaid on the mocap omega.
-    ``show_gains`` overlays the applied controller gains (``log.pose.gains``,
-    simulated logs only) on the wheel-speed and state subplots. ``gains``
-    (``(num_commands, num_gains)``, at the command timestamps) overrides that
-    source -- used for recorded logs whose gains are reconstructed offline from
-    the gain parametrization (pololu.gain_reconstruction)."""
+    """Eight-panel overview of one log; ``imu_gyro_z`` [rad/s] is overlaid on
+    the mocap omega. ``show_gains`` overlays the applied gains of a simulated
+    log; ``gains`` ``(num_commands, num_gains)`` gives them for a recorded log."""
     plt = _plot_module()
 
     out_dir = Path(out_dir)
@@ -41,11 +37,7 @@ def plot_logged_summary(
     reference[:, 2] = np.unwrap(reference[:, 2])
     measured_pose[:, 2] = np.unwrap(measured_pose[:, 2])
 
-    # Pololu logs carry Savitzky-Golay-smoothed poses in states and filter-
-    # derivative twists; the raw (unsmoothed) mocap surviving outlier rejection
-    # lives in clean_states/clean_time_s (a shorter stream than time_s). Show
-    # that as slim background lines. Simulated logs (twists None) keep the
-    # single-stream plot.
+    # Raw mocap (clean_states) as slim background lines for recorded logs.
     pose_twists = getattr(log.pose, "twists", None)
     clean_time = getattr(log.pose, "clean_time_s", None)
     clean_states = getattr(log.pose, "clean_states", None)
@@ -143,8 +135,7 @@ def plot_logged_summary(
     ax_wheels.grid(True)
     wheel_legend_handles = [line_cmd_right, line_meas_right, line_cmd_left, line_meas_left]
 
-    # Duty on its own fixed [-1, 1] axis, so a run that reaches the limit reads
-    # as saturated at a glance instead of being rescaled away.
+    # Duty on a fixed [-1, 1] axis.
     duty_cycle = np.asarray(log.wheel.duty_cycle, dtype=float)
     duty_time = wheel_time[: len(duty_cycle)]
     ax_duty = ax_wheels.twinx()
@@ -186,8 +177,7 @@ def plot_logged_summary(
     ax_linear_acceleration.grid(True)
     ax_linear_acceleration.legend(handles=[line_ref_linear_acceleration, line_mocap_linear_acceleration])
 
-    # Applied controller gains along the run (time-varying under a gain
-    # parametrization): motor PI gains here, outer gains on the state subplots.
+    # Applied gains: motor gains here, outer gains on the state subplots.
     if gains is not None:
         gains_log = np.asarray(gains, dtype=float)
     else:
@@ -277,13 +267,8 @@ def plot_logged_trajectories(
     out_prefix: str = "logged_trajectories",
     out_dir: str | Path = "visualize",
 ) -> Path:
-    """One XY panel holding every logged trajectory of an iteration, so the set
-    can be judged without opening each per-log summary. ``logs`` is a list of
-    SimulationLogs (pololu.log_loader) with one ``labels`` entry each; each log
-    gets its own color, its reference dashed and its measured pose solid. The
-    legend carries only the two line styles -- the logs are named by an
-    annotation on each measured path, since a per-log legend of a whole
-    iteration is unreadable."""
+    """One XY panel with every logged trajectory of an iteration (reference
+    dashed, measured pose solid, each log annotated with its label)."""
     plt = _plot_module()
     from matplotlib.lines import Line2D
 
@@ -304,9 +289,7 @@ def plot_logged_trajectories(
         if not len(measured):
             continue
         ax.plot(measured[0, 0], measured[0, 1], marker="o", markersize=4, color=color)
-        # Each name sits at its own fraction along its own path: the runs of one
-        # iteration are chained repeats of the same trajectory, so labels pinned
-        # to the start point all land on top of each other.
+        # Stagger the labels along the paths.
         anchor = measured[int(round((index + 1) / (len(logs) + 1) * (len(measured) - 1)))]
         ax.annotate(
             label,
@@ -335,162 +318,6 @@ def plot_logged_trajectories(
     plt.close(fig)
     print(f"Logged trajectories PDF saved at: {output_path}")
     return output_path
-
-
-def plot_run_comparison(
-    log_groups,
-    labels,
-    *,
-    out_prefix: str = "run_comparison",
-    out_dir: str | Path = "visualize",
-) -> Path:
-    """Overlay groups of logs of the same reference: XY trajectory, the smoothed
-    mocap body twists (v, omega), and the x/y/theta states over time.
-    ``log_groups`` is one list of SimulationLogs (pololu.log_loader) per label;
-    all runs of a group share one color and are drawn as thin lines so the
-    run-to-run spread is visible. ``pose.twists`` carry the Savitzky-Golay
-    filter-derivative velocities. The reference is drawn from the first log of
-    the first group."""
-    plt = _plot_module()
-
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    output_path = out_dir / f"{out_prefix}.pdf"
-
-    colors = ("tab:blue", "tab:orange", "tab:green", "tab:purple")
-    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
-    ax_traj, ax_v, ax_w = axes[0, :]
-    state_axes = axes[1, :]
-
-    reference = np.asarray(log_groups[0][0].reference.states, dtype=float)
-    ref_time = np.asarray(log_groups[0][0].reference.time_s, dtype=float)
-    ax_traj.plot(reference[:, 0], reference[:, 1], color="tab:red", linestyle="--", linewidth=1.0, label="Reference")
-    reference_speed = np.linalg.norm(reference[:, 3:5], axis=1)
-    ax_v.step(ref_time, reference_speed, where="post", color="tab:red", linestyle="--", linewidth=0.9, label="Reference")
-    ax_w.step(ref_time, reference[:, 5], where="post", color="tab:red", linestyle="--", linewidth=0.9, label="Reference")
-    for index, ax in enumerate(state_axes):
-        ax.step(ref_time, reference[:, index], where="post", color="tab:red", linestyle="--", linewidth=0.9, label="Reference")
-
-    run_style = dict(linewidth=0.6, alpha=0.8)
-    for logs, label, color in zip(log_groups, labels, colors):
-        for run_index, log in enumerate(logs):
-            legend_label = label if run_index == 0 else None
-            pose_time = np.asarray(log.pose.time_s, dtype=float)
-            pose = np.asarray(log.pose.states, dtype=float)
-            twists = np.asarray(log.pose.twists, dtype=float)
-            ax_traj.plot(pose[:, 0], pose[:, 1], color=color, **run_style, label=legend_label)
-            ax_v.plot(pose_time, twists[:, 0], color=color, **run_style, label=legend_label)
-            ax_w.plot(pose_time, twists[:, 2], color=color, **run_style, label=legend_label)
-            for index, ax in enumerate(state_axes):
-                ax.plot(pose_time, pose[:, index], color=color, **run_style, label=legend_label)
-
-    ax_traj.set_xlabel("x [m]")
-    ax_traj.set_ylabel("y [m]")
-    ax_traj.set_title("Trajectory")
-    ax_traj.set_aspect("equal", adjustable="box")
-    ax_v.set_xlabel("time [s]")
-    ax_v.set_ylabel("linear velocity [m/s]")
-    ax_v.set_title("Linear Velocity (mocap, smoothed)")
-    ax_w.set_xlabel("time [s]")
-    ax_w.set_ylabel("angular velocity [rad/s]")
-    ax_w.set_title("Angular Velocity (mocap, smoothed)")
-    state_labels = ("x [m]", "y [m]", "theta [rad]")
-    state_titles = ("x State", "y State", "theta State")
-    for index, ax in enumerate(state_axes):
-        ax.set_xlabel("time [s]")
-        ax.set_ylabel(state_labels[index])
-        ax.set_title(state_titles[index])
-    for ax in axes.flat:
-        ax.grid(True)
-        ax.legend()
-
-    fig.tight_layout()
-    fig.savefig(output_path, bbox_inches="tight", transparent=False, facecolor="white")
-    plt.close(fig)
-    print(f"Comparison PDF saved at: {output_path}")
-    return output_path
-
-
-def _plot_motor_model_axes(
-    ax_duty,
-    time: np.ndarray,
-    duty_cycle: np.ndarray,
-    encoder_wheel_speeds: np.ndarray,
-    model_wheel_speeds: np.ndarray | None,
-):
-    ax_speed = ax_duty.twinx()
-    model_wheel_speeds = (
-        np.full_like(encoder_wheel_speeds, np.nan)
-        if model_wheel_speeds is None
-        else np.asarray(model_wheel_speeds, dtype=float)
-    )
-    model_wheel_speeds = model_wheel_speeds[: len(time)]
-
-    line_dc_l = ax_duty.step(
-        time,
-        duty_cycle[:, 1],
-        where="post",
-        color="tab:orange",
-        linestyle="--",
-        linewidth=0.8,
-        label="DC left",
-    )[0]
-    line_enc_l = ax_speed.plot(
-        time,
-        encoder_wheel_speeds[:, 1],
-        color="tab:orange",
-        linestyle="--",
-        linewidth=0.7,
-        label="enc left",
-    )[0]
-    line_model_l = ax_speed.plot(
-        time,
-        model_wheel_speeds[:, 1],
-        color="tab:orange",
-        linestyle="-",
-        linewidth=0.9,
-        label="model left",
-    )[0]
-    line_dc_r = ax_duty.step(
-        time,
-        duty_cycle[:, 0],
-        where="post",
-        color="tab:green",
-        linestyle="--",
-        linewidth=0.6,
-        label="DC right",
-    )[0]
-    line_enc_r = ax_speed.plot(
-        time,
-        encoder_wheel_speeds[:, 0],
-        color="tab:green",
-        linestyle="--",
-        linewidth=0.7,
-        label="enc right",
-    )[0]
-    line_model_r = ax_speed.plot(
-        time,
-        model_wheel_speeds[:, 0],
-        color="tab:green",
-        linestyle="-",
-        linewidth=0.9,
-        label="model right",
-    )[0]
-
-    _set_symmetric_ylim(ax_duty, duty_cycle)
-    speed_values = [encoder_wheel_speeds]
-    if model_wheel_speeds.size:
-        speed_values.append(model_wheel_speeds)
-    _set_symmetric_ylim(ax_speed, np.concatenate(speed_values, axis=0))
-    ax_duty.set_xlabel("time [s]")
-    ax_duty.set_ylabel("duty cycle")
-    ax_speed.set_ylabel("wheel speed [rad/s]")
-    ax_duty.set_title("Motor Model")
-    ax_duty.grid(True)
-    ax_duty.legend(
-        handles=[line_dc_l, line_enc_l, line_model_l, line_dc_r, line_enc_r, line_model_r],
-        loc="best",
-    )
 
 
 def _plot_module():
@@ -546,35 +373,3 @@ def _set_symmetric_ylim(ax, values: np.ndarray) -> None:
     if not np.isfinite(limit) or limit <= 0.0:
         limit = 1.0
     ax.set_ylim(-1.05 * limit, 1.05 * limit)
-
-
-def _shade_rejected_intervals(ax, time: np.ndarray, weights: np.ndarray | None) -> None:
-    if weights is None:
-        return
-    time = np.asarray(time, dtype=float)
-    weights = np.asarray(weights, dtype=float)
-    rejected_indices = np.flatnonzero(weights[: len(time)] <= 0.0)
-    for index in rejected_indices:
-        if index < 0 or index >= len(time):
-            continue
-        if index > 0:
-            left = 0.5 * (time[index - 1] + time[index])
-        elif len(time) > 1:
-            left = time[index] - 0.5 * (time[index + 1] - time[index])
-        else:
-            left = time[index]
-
-        if index + 1 < len(time):
-            right = 0.5 * (time[index] + time[index + 1])
-        elif index > 0:
-            right = time[index] + 0.5 * (time[index] - time[index - 1])
-        else:
-            right = time[index]
-        ax.axvspan(
-            left,
-            right,
-            color="0.85",
-            alpha=0.7,
-            linewidth=0.0,
-            zorder=0,
-        )

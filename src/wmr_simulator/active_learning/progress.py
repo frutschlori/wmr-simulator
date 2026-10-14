@@ -1,51 +1,17 @@
 """Cross-iteration evaluation of a full active-learning pipeline run.
 
-For every iteration this evaluates its benchmark recordings -- repeat runs of
-one *fixed* baseline reference, recorded under that iteration's controller --
-against the reference each run tracked. The reference never changes across
-iterations, so a difference between two iterations' points is a difference in
-the controller and nothing else; the iteration's own identification and tuning
-trajectories cannot answer that, being redesigned every iteration.
+For every iteration, the benchmark runs of the controller it deployed
+(``data/benchmark``, else ``data/benchmark_static``) are scored with the
+gain-tuning loss terms in two ways:
 
-The runs are read from ``data/benchmark`` (written by the ``benchmark`` stage,
-which drives them in the MuJoCo plant) or, for experiments recorded on the real
-robot by hand, from ``data/with gain MLP/circle`` (also accepting the older
-``data/with_gain_MLP/circle`` spelling) -- in both cases the runs of the
-controller the iteration *deployed*, which is what its gains and schedule
-describe. The static-gain baseline's runs beside them
-(``data/benchmark_static``) are a different controller and are compared with
-these in ``visualization.baseline_runs`` instead -- or plotted here in their
-own right by passing ``benchmark_dir`` and ``static_controller`` to
-``evaluate_pipeline_progress``, which is what an experiment whose hand-recorded
-runs live under a shape name of their own (``data/fast_circle_static``) needs.
-It computes the same
-gain-tuning loss terms (``position_tracking, heading_tracking,
-linear_velocity_tracking, angular_velocity_tracking, input, input_delta,
-omega_delta``) in two ways:
+- ``sim``: closed-loop simulation of the recording controller on the
+  iteration's identified nominal model, along each run's reference;
+- ``real``: the recorded run itself.
 
-- ``sim``  — closed-loop simulation of that iteration's *recording* controller
-  (the base gains + error-MLP schedule stored in ``problem_identified.yaml``,
-  which per project convention are exactly the gains used to record the runs)
-  on the identified nominal model, along each run's reference;
-- ``real`` — the actual recorded mocap/encoder trajectory of the run.
-
-The two are directly comparable (same controller, same reference).  Each
-iteration's plotted point is the mean over all of its available benchmark runs,
-which shows both how the real tracking improves across iterations and how well
-the identified sim predicts reality; the individual runs come back alongside it
-(``real_runs``) so the plot can show the spread the mean hides -- the runs are
-chained, so a diverging one is a real outcome rather than noise to be averaged
-away silently.
-
-Besides the loss terms, every recorded run is scored for yaw ringing
-(``baseline_runs.run_yaw_ringing``, the band-passed IMU yaw-rate tracking
-error): the smoothness metric beside the tracking ones. It is kept per shape,
-because only the fast shapes ring and pooling them with slow ones hides it. It
-has no sim counterpart -- the JAX plant's yaw rate comes off a PT1 and is smooth
-by construction.
-
-The heavy lifting (building the pipeline, the closed-loop rollout) lives here;
-``visualization.pipeline_progress`` only renders the returned records.
+Each iteration's point is the mean over its runs; the individual runs are
+returned as well. Every recorded run is also scored for yaw ringing
+(``baseline_runs.run_yaw_ringing``), per shape. ``visualization.pipeline_progress``
+renders the returned records.
 """
 
 from pathlib import Path
@@ -67,8 +33,7 @@ TERM_NAMES = (
 
 
 def _resolve_gain_tuning_config(experiment):
-    """Same resolution the tune-gains stage uses, so the loss weights and
-    realization count match how each iteration was actually tuned."""
+    """The gain-tuning config the tune-gains stage uses."""
     if experiment.config["use_standalone_gain_tuning_defaults"]:
         from wmr_simulator.gain_tuning.defaults import GAIN_TUNING_DEFAULTS
 
@@ -77,10 +42,9 @@ def _resolve_gain_tuning_config(experiment):
 
 
 def _reference_states_for_sim(run_reference):
-    """Convert a recorded log reference (body forward speed ``v_ff`` in col 3,
-    col 4 = 0) into the sim/global convention (``vx = v_ff cos theta``,
-    ``vy = v_ff sin theta``) that ``_reference_targets`` and the controller
-    feedforward expect."""
+    """Convert a recorded reference (body forward speed ``v_ff`` in column 3)
+    into the simulator's global convention (``vx = v_ff cos theta``,
+    ``vy = v_ff sin theta``)."""
     ref = np.asarray(run_reference, dtype=float)
     theta = ref[:, 2]
     v = ref[:, 3]
@@ -145,13 +109,8 @@ def _sim_run_terms(pipeline, base_gains, schedule_params, run_reference, robot_k
 
 
 def _real_run_terms(pipeline, log, weights):
-    """Loss terms of the recorded run, time-aligned to the reference timestamps.
-
-    Mirrors ``_base_loss_terms``: the position and heading tracking errors, the
-    linear and angular velocity errors normalized by (v_max, omega_max) -- each
-    of the four with its own weight -- duty-cycle input/input-delta energy, and
-    the normalized yaw-rate-chatter penalty.
-    """
+    """Loss terms of the recorded run (as in ``_base_loss_terms``), aligned to
+    the reference timestamps."""
     import jax.numpy as jnp
 
     from wmr_simulator.gain_tuning.objectives import pose_tracking_losses
@@ -196,8 +155,7 @@ def _real_run_terms(pipeline, log, weights):
     duty_delta = np.diff(duty_window, axis=0)
     input_delta = float(np.mean(np.sum(duty_delta**2, axis=1)))
 
-    # Yaw-rate chatter of the recorded run (same window, normalized by omega_max):
-    # the real oscillation the sim omega-delta term is meant to reproduce.
+    # Yaw-rate change of the recorded run, normalized by omega_max.
     omega_series = vel_omega[window, 1] if int(window.sum()) >= 2 else vel_omega[:, 1]
     omega_delta = float(np.mean(np.diff(omega_series / float(pipeline.omega_max)) ** 2))
 
@@ -214,58 +172,27 @@ def _real_run_terms(pipeline, log, weights):
     )
 
 
-def _benchmark_directory(paths, benchmark_dir=None) -> Path | None:
-    """Where one iteration's benchmark runs were recorded, if anywhere.
-
-    ``data/benchmark`` is what the benchmark stage writes for the *deployed*
-    controller, and ``data/benchmark_static`` for the static-gain baseline; the
-    two Gain-MLP circle spellings are where the hand-recorded runs of the
-    real-robot experiments live. First match wins, which is what makes this the
-    deployed controller's runs in every case: an iteration with a tuned
-    parametrization has both benchmark directories and ``benchmark`` is the one
-    it deployed, while iteration 1 (and any experiment with the parametrization
-    off) deploys the static controller and has only ``benchmark_static``.
-
-    ``benchmark_dir`` overrides that search with one ``data/`` subdirectory,
-    for hand-recorded experiments whose runs sit under a shape name of their
-    own (``data/fast_circle_static``) rather than under either standard name.
-    """
-    if benchmark_dir is not None:
-        directory = paths.data_dir / benchmark_dir
-        return directory if directory.is_dir() else None
-    for relative in (
-        Path("benchmark"),
-        Path("benchmark_static"),
-        Path("with gain MLP") / "circle",
-        Path("with_gain_MLP") / "circle",
-    ):
-        directory = paths.data_dir / relative
+def _benchmark_directory(paths) -> Path | None:
+    """The deployed controller's benchmark runs of one iteration:
+    ``data/benchmark``, else ``data/benchmark_static``, else None."""
+    for name in ("benchmark", "benchmark_static"):
+        directory = paths.data_dir / name
         if directory.is_dir():
             return directory
     return None
 
 
-def _load_benchmark_logs(paths, benchmark_dir=None) -> list:
-    """``(shape, run)`` for every benchmark recording of one iteration.
-
-    Benchmark logs are intentionally nested below ``data/`` and normally kept as
-    SD-card binaries; ``baseline_runs.load_run_logs`` decodes them into a
-    temporary directory, so progress plots stay read-only with respect to the
-    experiment data. The shape is the subdirectory of a benchmark set, or the
-    directory's own name when the runs sit in it directly.
-    """
+def _load_benchmark_logs(paths) -> list:
+    """``(shape, run)`` for every benchmark recording of one iteration."""
     from wmr_simulator.active_learning.baseline_runs import load_run_logs
 
-    directory = _benchmark_directory(paths, benchmark_dir)
+    directory = _benchmark_directory(paths)
     if directory is None:
         return []
     logs = load_run_logs(directory)
     if logs:
         return [(directory.name, run) for run in logs]
-    # A benchmark *set* keeps one subdirectory per reference, so the runs are one
-    # level further down. The progress point then pools the whole set, which is
-    # what makes it a transfer score rather than a score on one shape -- the
-    # per-shape breakdown is what the baseline-runs figures are for.
+    # A benchmark set has one subdirectory per reference.
     return [
         (shape_dir.name, run)
         for shape_dir in sorted(path for path in directory.glob("*") if path.is_dir())
@@ -273,9 +200,7 @@ def _load_benchmark_logs(paths, benchmark_dir=None) -> list:
     ]
 
 
-def _evaluate_iteration(
-    experiment, index, weights, num_realizations, seed, benchmark_dir=None, static_controller=False
-):
+def _evaluate_iteration(experiment, index, weights, num_realizations, seed):
     """Benchmark sim/real terms of one iteration: the two run means, the
     per-run real terms behind the second of them, and each run's yaw ringing
     keyed by shape (None where the log has no score, see ``run_yaw_ringing``)."""
@@ -288,7 +213,7 @@ def _evaluate_iteration(
     from wmr_simulator.active_learning.baseline_runs import run_yaw_ringing
 
     paths = experiment.paths(index)
-    logs = _load_benchmark_logs(paths, benchmark_dir)
+    logs = _load_benchmark_logs(paths)
     if not logs:
         return None
     problem_path = paths.problem_identified if paths.problem_identified.is_file() else paths.problem
@@ -299,16 +224,8 @@ def _evaluate_iteration(
     pipeline = ControllerTuningPipeline(
         str(problem_path), robot_params=robot_params, seed=seed, residual_model=None
     )
-    if static_controller:
-        # The runs were driven by the static-gain controller, so the sim curve
-        # has to be that one too -- the whole point of the pair is that sim and
-        # real differ only in plant, not in controller.
-        static = _static_gains(paths)
-        if static is None:
-            return None
-        base_gains_list, schedule_params = static.tolist(), None
-    else:
-        base_gains_list, schedule_params = _log_gain_parametrization(paths)
+    pipeline.extend_time_grids(max(len(run.log.reference.states) for _, run in logs))
+    base_gains_list, schedule_params = _log_gain_parametrization(paths)
     base_gains = jnp.asarray(base_gains_list, dtype=jnp.float32)
 
     key = jax.random.PRNGKey(seed)
@@ -348,46 +265,24 @@ def _terms_to_dict(terms):
 
 
 def _static_gains(paths):
-    """The iteration's *static* controller gains, or None when unavailable.
-
-    A deployed controller may run a gain parametrization, whose base gains are
-    not the applied ones (the error MLP scales them per sample) and so cannot
-    be reduced to one number per gain worth plotting. Every iteration created
-    from a tuning run that had a parametrization enabled therefore carries the
-    same tuning's independent static run in ``robot_config_static_gains.yaml``
-    (written by ``finalize``), which is the comparable number and what is
-    plotted. Without that file -- iteration 1, or an experiment with no
-    parametrization, where the deployed gains *are* static -- the iteration's
-    ``problem.yaml`` gains are used.
-    """
+    """The iteration's static controller gains (``robot_config_static_gains.yaml``,
+    else ``problem.yaml``), or None."""
     if paths.robot_config_static.is_file():
         config = load_yaml(paths.robot_config_static)
     elif paths.problem.is_file():
         config = load_yaml(paths.problem)
     else:
         return None
-    # Iterations from before the D-term carry five gains (kdmotor = 0).
     return np.asarray(controller_gains_list(config["controller"]["gains"]), dtype=float)
 
 
-def evaluate_pipeline_progress(experiment, benchmark_dir=None, static_controller=False):
+def evaluate_pipeline_progress(experiment):
     """Per-iteration gains and sim/real loss terms across the whole pipeline.
 
-    ``benchmark_dir`` names the ``data/`` subdirectory the runs are read from,
-    overriding the standard search (see ``_benchmark_directory``);
-    ``static_controller`` says those runs were driven on the iteration's static
-    gains rather than on its deployed controller, so the sim curve beside them
-    is simulated with those same static gains and no gain parametrization.
-
-    Returns a list (sorted by iteration) of dicts with keys ``index``,
-    ``gains`` (the *static* controller gains available to the iteration, see
-    ``_static_gains``), ``sim`` / ``real`` (loss-term dicts, None when the
-    iteration has no benchmark runs) and ``real_runs`` (one loss-term dict per
-    benchmark run, the spread behind ``real``) and ``yaw_ringing_by_shape``
-    (shape -> one ``baseline_runs.run_yaw_ringing`` value per benchmark run,
-    None entries for runs without a score). The gains deployed to *record*
-    the iteration are used (rather than the iteration's own tuned
-    ``results/gains.yaml``) so every iteration is represented.
+    Returns a list (sorted by iteration) of dicts with keys ``index``, ``gains``
+    (the static controller gains), ``sim`` / ``real`` (loss-term dicts, None
+    without benchmark runs), ``real_runs`` (one loss-term dict per run) and
+    ``yaw_ringing_by_shape`` (shape -> one ringing value per run).
     """
     config = _resolve_gain_tuning_config(experiment)
     weights = (
@@ -407,15 +302,7 @@ def evaluate_pipeline_progress(experiment, benchmark_dir=None, static_controller
         paths = experiment.paths(index)
         gains = _static_gains(paths)
 
-        evaluated = _evaluate_iteration(
-            experiment,
-            index,
-            weights,
-            num_realizations,
-            seed,
-            benchmark_dir=benchmark_dir,
-            static_controller=static_controller,
-        )
+        evaluated = _evaluate_iteration(experiment, index, weights, num_realizations, seed)
         sim = real = None
         real_runs = []
         yaw_ringing_by_shape = {}

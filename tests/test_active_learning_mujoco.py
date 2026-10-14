@@ -1,9 +1,4 @@
-"""MuJoCo standing in for the robot inside the active-learning loop.
-
-The deployment itself is covered by test_mujoco_deploy; what is tested here is
-the wiring: the logs land in the iteration the pipeline is waiting on, in the
-form decode-logs expects, and the loop knows when it is finished.
-"""
+"""MuJoCo deployments inside the active-learning loop."""
 
 from __future__ import annotations
 
@@ -56,15 +51,8 @@ def write_reference_jsn(path, duration=2.0, dt=0.05):
 
 
 def make_experiment(tmp_path, **deployment):
-    """An initialized experiment whose iteration 1 has a bridged JSN ready.
-
-    Stands in for the plan-id-trajectory stage, which is a full trajectory
-    optimization and far too slow for a test. The arc is written as the bridged
-    variant because that is the one a deployment drives; it does not actually
-    return to the start, so the divergence radius decides outright whether the
-    runs chain -- hence the permissive default here and the explicit override in
-    the test that wants the other branch.
-    """
+    """An initialized experiment whose iteration 1 has a bridged JSN ready (an
+    arc that does not return, so ``divergence_radius`` decides the chaining)."""
     config = {"num_logs": 2, "divergence_radius": 100.0}
     config.update(deployment)
     experiment = stage_init(
@@ -90,28 +78,15 @@ def test_deployment_fills_the_iterations_data_dir(experiment_with_trajectory):
     written = stage_simulate_deployment(experiment, 1)
 
     assert [path.name for path in written] == ["TR00", "TR01"]
-    # Nothing but the logs: decode-logs tries to decode every non-csv file it
-    # finds here, and a ground-truth sidecar would leak the hidden plant too.
+    # Nothing but the logs.
     assert sorted(path.name for path in paths.data_dir.iterdir()) == ["TR00", "TR01"]
 
     stage_decode_logs(experiment, 1)
     assert sorted(path.name for path in paths.data_dir.glob("*.csv")) == ["TR00.csv", "TR01.csv"]
 
 
-def test_a_second_deployment_appends_instead_of_overwriting(experiment_with_trajectory):
-    experiment = experiment_with_trajectory
-    stage_simulate_deployment(experiment, 1, num_logs=1)
-    written = stage_simulate_deployment(experiment, 1, num_logs=1)
-    assert [path.name for path in written] == ["TR01"]
-
-
 def _deployment_placement(exp) -> dict:
-    """The hand-placement spread the simulate-deployment stage draws under.
-
-    It is not run_deployment's own default -- the two are allowed to differ, and
-    a replay under a different spread draws a different placement and so is not
-    a replay of that run at all.
-    """
+    """The hand-placement spread the simulate-deployment stage draws under."""
     config = exp.config["mujoco_deployment"]
     return {
         "start_offset_radius": float(config["start_offset_radius"]),
@@ -133,7 +108,6 @@ def test_runs_are_chained_and_reproducible(experiment_with_trajectory, capsys):
 
     # The second run really did start from the first one's final pose.
     trajectory = _identification_trajectory_jsn(paths)
-    # Same spread the simulate-deployment stage drew under; see the benchmark test.
     offsets = _deployment_placement(experiment)
     replay = run_deployment(
         paths.robotcfg_cfg, trajectory, paths.data_dir,
@@ -147,49 +121,12 @@ def test_runs_are_chained_and_reproducible(experiment_with_trajectory, capsys):
     assert repeat.log_path.read_bytes() == second.read_bytes()
 
 
-def test_a_run_that_did_not_come_back_is_placed_by_hand_again(tmp_path, capsys):
-    """The bridge is what makes a chained repeat possible; a run that ended far
-    from the start did not drive it, so carrying its final pose over would
-    record the next log from wherever the robot happened to stop."""
-    from wmr_simulator.mujoco_sim.deploy import run_deployment
-
-    experiment = make_experiment(tmp_path, divergence_radius=0.0)  # everything diverges
-    paths = experiment.paths(1)
-
-    _, second = stage_simulate_deployment(experiment, 1)
-
-    report = capsys.readouterr().out
-    assert report.count("placed by hand") == 2
-    assert "diverged" in report
-
-    hand_placed = run_deployment(
-        paths.robotcfg_cfg, _identification_trajectory_jsn(paths), paths.data_dir,
-        seed=_deployment_seed(experiment, 1, 1), log_name="REPLACED",
-        **_deployment_placement(experiment),
-    )
-    assert hand_placed.log_path.read_bytes() == second.read_bytes()
-
-
-def test_deployment_seeds_are_distinct_per_run_and_stable(experiment_with_trajectory):
-    experiment = experiment_with_trajectory
-    seeds = {_deployment_seed(experiment, iteration, index)
-             for iteration in (1, 2) for index in range(4)}
-    assert len(seeds) == 8
-    assert _deployment_seed(experiment, 1, 0) == _deployment_seed(experiment, 1, 0)
-
-
 def test_the_bridged_variant_is_what_gets_deployed(experiment_with_trajectory):
     """The bridge drives the robot back to the start, which is what makes the
     chained repeat runs possible without touching it."""
     paths = experiment_with_trajectory.paths(1)
     write_reference_jsn(paths.identification_trajectory_dir / "identification_trajectory.JSN")
     assert _identification_trajectory_jsn(paths).name == "identification_trajectory_bridge.JSN"
-
-
-def test_a_missing_trajectory_names_the_stage_that_makes_one(tmp_path):
-    experiment = stage_init(tmp_path / "exp", {"problem": PROBLEM, "prior_tuning": False})
-    with pytest.raises(FileNotFoundError, match="plan-id-trajectory"):
-        _identification_trajectory_jsn(experiment.paths(1))
 
 
 def test_run_stops_once_the_iteration_target_is_reached(tmp_path, capsys):

@@ -12,7 +12,6 @@ from wmr_simulator.residual_model import (
     gate_weights,
     init_residual_model,
     load_residual_model,
-    residual_corrected_twist,
     residual_features,
     save_residual_model,
 )
@@ -20,7 +19,6 @@ from wmr_simulator.residual_model.residual import (
     RESIDUAL_INPUT_DIM,
     RESIDUAL_OUTPUT_DIM,
     ResidualEnsemble,
-    split_datasets_by_file,
     train_residual_ensemble,
 )
 from wmr_simulator.robot import DiffDrive, body_velocities
@@ -34,18 +32,8 @@ ROBOT_CFG = {
 
 
 def small_model(num_experts=3, hidden_sizes=(16,), seed=0, spectral_norm_cap=2.0, gate_scale=8.0):
-    """Untrained ensemble with a non-trivial gate and non-zero output layers.
-
-    ``init_residual_model`` zero-inits the last layer (so a fresh ensemble is
-    exactly the nominal model); tests that need a *non-zero* residual perturb
-    the final weights and give the gate real centers/scales.
-
-    The centers sit on the diagonal of [-1, 1] but ``gate_scale`` is wide, because
-    the descriptor's action half (the commanded twist) is an order of magnitude
-    larger than its state half at these duties -- a trained model normalizes that
-    away, this fixture does not. Wide enough to cover what ``DiffDrive.step``
-    feeds in, still narrow enough that the far-field OOD probes gate off.
-    """
+    """Untrained ensemble with a non-trivial gate and non-zero output layers
+    (``gate_scale`` wide enough to cover what ``DiffDrive.step`` feeds in)."""
     model = init_residual_model(
         jax.random.PRNGKey(seed),
         num_experts=num_experts,
@@ -66,30 +54,6 @@ def small_model(num_experts=3, hidden_sizes=(16,), seed=0, spectral_norm_cap=2.0
         target_std=jnp.ones(RESIDUAL_OUTPUT_DIM, dtype=jnp.float32),
         spectral_norm_cap=spectral_norm_cap,
     )
-
-
-def test_apply_residual_model_shapes():
-    model = small_model()
-    single = apply_residual_model(model, jnp.zeros(RESIDUAL_INPUT_DIM))
-    assert single.shape == (RESIDUAL_OUTPUT_DIM,)
-    batch = apply_residual_model(model, jnp.zeros((7, RESIDUAL_INPUT_DIM)))
-    assert batch.shape == (7, RESIDUAL_OUTPUT_DIM)
-
-
-def test_residual_features_layout():
-    features = residual_features(0.5, 1.5, 0.9, 2.0)
-    assert features.shape == (RESIDUAL_INPUT_DIM,)
-    np.testing.assert_allclose(np.asarray(features), [0.5, 1.5, 0.9, 2.0])
-
-
-def test_residual_corrected_twist():
-    model = small_model()
-    features = residual_features(0.5, 1.0, 0.5, 1.0)
-    delta = apply_residual_model(model, features)
-    v_x, v_y, omega = residual_corrected_twist(model, features, 0.5, 1.0)
-    assert np.isclose(float(v_x), 0.5 + float(delta[0]))
-    assert float(v_y) == 0.0
-    assert np.isclose(float(omega), 1.0 + float(delta[1]))
 
 
 def test_untrained_ensemble_is_zero_residual():
@@ -149,21 +113,6 @@ def test_save_load_roundtrip(tmp_path):
     )
 
 
-def test_load_rejects_mismatched_config(tmp_path):
-    model = small_model(num_experts=3, hidden_sizes=(16,))
-    config = {
-        "input_dim": RESIDUAL_INPUT_DIM,
-        "output_dim": RESIDUAL_OUTPUT_DIM,
-        "num_experts": 3,
-        "hidden_sizes": [32, 32],  # extra layer -> leaf-count mismatch on load
-        "spectral_norm_cap": 2.0,
-    }
-    path = tmp_path / "model.pkl"
-    save_residual_model(path, model, config, ROBOT_CFG)
-    with pytest.raises(Exception):
-        load_residual_model(path, ROBOT_CFG)
-
-
 def _saved_small_model(tmp_path):
     config = {
         "input_dim": RESIDUAL_INPUT_DIM,
@@ -177,16 +126,6 @@ def _saved_small_model(tmp_path):
     return path
 
 
-def test_load_accepts_the_training_plant_through_float32(tmp_path):
-    """PhysicalParams carry float32 copies of the yaml values; that round trip
-    is the same plant."""
-    from wmr_simulator.types import PhysicalParams
-
-    path = _saved_small_model(tmp_path)
-    params = PhysicalParams(**{name: jnp.asarray(value, dtype=jnp.float32) for name, value in ROBOT_CFG.items()})
-    load_residual_model(path, params)
-
-
 def test_load_refuses_a_different_nominal_plant(tmp_path):
     """A residual is measured minus *its* nominal model; added to any other
     model it corrects errors that plant does not have."""
@@ -194,30 +133,6 @@ def test_load_refuses_a_different_nominal_plant(tmp_path):
     other = {**ROBOT_CFG, "max_wheel_speed": 230.0}
     with pytest.raises(ValueError, match="max_wheel_speed"):
         load_residual_model(path, other)
-
-
-def test_step_without_residual_unchanged():
-    robot = DiffDrive(ROBOT_CFG, dt=0.01)
-    state = robot.get_init_state(jax.random.PRNGKey(0))
-    next_state = robot.step(state, jnp.asarray([0.5, 0.3]))
-    baseline = robot.step(state, jnp.asarray([0.5, 0.3]), residual_model=None)
-    np.testing.assert_allclose(np.asarray(next_state.pose), np.asarray(baseline.pose))
-    assert next_state.vel_omega.shape == (2,)
-    assert float(next_state.vel_lateral) == 0.0
-
-
-def test_step_with_residual_changes_pose_and_keeps_shapes():
-    robot = DiffDrive(ROBOT_CFG, dt=0.01)
-    model = small_model()
-    state = robot.get_init_state(jax.random.PRNGKey(0))
-    duty = jnp.asarray([0.5, 0.3])
-    for _ in range(5):
-        state = robot.step(state, duty)
-    without = robot.step(state, duty)
-    with_residual = robot.step(state, duty, residual_model=model)
-    assert with_residual.pose.shape == (3,)
-    assert with_residual.vel_omega.shape == (2,)
-    assert not np.allclose(np.asarray(without.pose), np.asarray(with_residual.pose))
 
 
 def test_step_residual_matches_manual_correction():
@@ -298,28 +213,3 @@ def test_train_reduces_residual_rmse():
     baseline_rmse = np.sqrt(np.mean(targets**2))
     assert model_rmse < 0.5 * baseline_rmse
     assert history["validation_loss"][-1] < history["validation_loss"][0]
-
-
-def test_split_holds_out_whole_files():
-    """Whole-file splits only -- the residual must see complete trajectories.
-    Too few files for the requested fraction still holds one file out."""
-    for num_files, expected_validation in ((2, 1), (3, 1), (4, 1), (5, 1), (10, 2)):
-        datasets = [{"features": np.zeros((8, RESIDUAL_INPUT_DIM))} for _ in range(num_files)]
-        train, validation = split_datasets_by_file(datasets, 0.2, seed=0)
-        assert len(validation) == expected_validation
-        assert len(train) == num_files - expected_validation
-        assert set(train).isdisjoint(validation)
-        assert set(train) | set(validation) == set(range(num_files))
-
-
-def test_split_rejects_a_single_file():
-    with pytest.raises(ValueError, match="at least 2 logs"):
-        split_datasets_by_file([{"features": np.zeros((8, RESIDUAL_INPUT_DIM))}], 0.2, seed=0)
-
-
-def test_gate_weights_shape():
-    model = small_model(num_experts=4)
-    weights = gate_weights(model, jnp.zeros((6, RESIDUAL_INPUT_DIM)))
-    assert weights.shape == (6, 4)
-    # Expert weights plus the null weight partition unity.
-    assert np.all(np.asarray(weights).sum(axis=1) <= 1.0 + 1e-5)

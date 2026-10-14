@@ -1,30 +1,22 @@
 """State-dependent gains tuned post hoc on a finished static run.
 
-The thesis' static (S) runs keep the gain parametrization off, so their data,
-identified models, residuals and tuning sets never depend on a parametrized
-controller. The state-dependent (D) controller is tuned afterwards on exactly
-those artefacts, iteration by iteration, which makes S vs D a comparison of the
-parametrization alone (decided 2026-10-01; trajectory designs are made at
-static gains anyway).
+A static run keeps the gain parametrization off. The state-dependent controller
+is then tuned on that run's identified models, residuals and tuning sets,
+iteration by iteration, so the comparison isolates the parametrization.
 
-A *variant* is one way of doing that (a hypothesis of Phase 3, e.g. a trust
-region or a speed-only schedule): a name plus overrides of the run's
-``gain_tuning`` block and of the problem's ``gain_parametrization``, stored in
+A *variant* is a name plus overrides of the run's ``gain_tuning`` block and of
+the problem's ``gain_parametrization``, stored in
 ``<run>/parametrized_variants/<name>.yaml``. Per iteration ``g``:
 
 - ``iteration_g/results/parametrized/<name>/`` holds the tuning problem and
-  ``gains.yaml`` (base gains, schedule, checks), tuned on iteration g's
-  identified model, residual (if the run has one) and tuning set;
+  ``gains.yaml``, tuned on iteration g's model, residual and tuning set;
 - ``iteration_{g+1}/parametrized/<name>/`` holds the deployable controller
-  (``robot_config.yaml``, ``problem.yaml``, ``ROBOTCFG.CFG``, ``GAINMLP.JSN``)
-  with iteration g's identified parameters, as ``finalize`` would write it;
-- the ``benchmark`` stage of iteration g+1 discovers that folder and drives it
-  as variant ``parametrized_<name>`` on the iteration's paired seeds, into
-  ``data/benchmark_parametrized_<name>/``.
+  (``robot_config.yaml``, ``problem.yaml``, ``ROBOTCFG.CFG``, ``GAINMLP.JSN``);
+- the ``benchmark`` stage of iteration g+1 drives it as variant
+  ``parametrized_<name>`` into ``data/benchmark_parametrized_<name>/``.
 
-Lineage: iteration 1 starts from the static run's own result of iteration 1
-with an identity network (the loop's ``seed_parametrization_from_static``);
-later iterations warm-start from the variant's previous base gains and network.
+Iteration 1 starts from the static result with an identity network; later
+iterations warm-start from the variant's previous result.
 """
 
 from __future__ import annotations
@@ -91,9 +83,8 @@ def stage_tune_parametrized(experiment: Experiment, iteration: int, variant: str
         load_yaml(experiment.config["problem"])["controller"]["gain_parametrization"],
         overrides.get("gain_parametrization") or {},
     )
-    # ``base_from_static`` (H3): the base gains are this iteration's static
-    # result every time and are held there; only the network is trained (and
-    # warm-started), so the controller is the static one times a schedule.
+    # ``base_from_static``: the base gains are held at this iteration's static
+    # result and only the network is trained.
     base_from_static = bool(overrides.get("base_from_static", False))
     previous = result_path(experiment, iteration - 1, variant) if iteration > 1 else None
     if previous is not None and previous.is_file():

@@ -1,0 +1,16 @@
+# The state-dependent controller (gated gain MLP on the static base gains),
+# tuned post hoc on the runs of examples/study_static.yaml.
+#
+#   python scripts/run_study.py examples/study_state_dependent.yaml
+#   python scripts/summarize_study.py experiments/state_dependent_matrix
+phase: state_dependent_matrix
+source_phase: static_matrix
+iterations: 5
+seeds: [0, 1, 2]
+variants: &variants
+  gated: {base_from_static: true, gain_parametrization: {gate_num_centers: 8}}
+configurations:
+  D-A-R: {source: S-A-R, variants: *variants}
+  D-A-N: {source: S-A-N, variants: *variants}
+  D-F-R: {source: S-F-R, variants: *variants}
+  D-F-N: {source: S-F-N, variants: *variants}

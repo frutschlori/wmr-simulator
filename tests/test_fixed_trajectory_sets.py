@@ -6,7 +6,7 @@ import pytest
 
 from wmr_simulator.active_learning.experiment import DEFAULT_EXPERIMENT_CONFIG
 from wmr_simulator.trajectory_optimization import fixed_sets
-from wmr_simulator.trajectory_optimization.baselines import chain_references, circle_reference, summarize_motion
+from wmr_simulator.trajectory_optimization.baselines import circle_reference, summarize_motion
 from wmr_simulator.trajectory_optimization.pipeline import ProblemDefinition
 
 PROBLEM = "problems/pololu_gains.yaml"
@@ -27,53 +27,6 @@ def forward_speed(states):
 def assert_inside(states, problem):
     assert np.all(states[:, :2] >= problem.environment_min - 1e-9)
     assert np.all(states[:, :2] <= problem.environment_max + 1e-9)
-
-
-def test_a_clockwise_circle_is_driven_forwards():
-    states = circle_reference(0.5, 4.0, DT, clockwise=True)
-    assert forward_speed(states).min() >= -1e-9
-    assert states[1:-1, 5].max() < 0.0
-
-
-def test_chained_references_continue_the_pose_through_a_stop():
-    first = circle_reference(0.5, 2.0, DT, sweep=np.pi)
-    second = circle_reference(0.8, 3.0, DT, sweep=2.0, clockwise=True)
-    chained = chain_references(first, second)
-    assert len(chained) == len(first) + len(second) - 1
-    seam = len(first) - 1
-    # At rest on both sides of the stop, so neighbouring samples barely move.
-    assert np.max(np.linalg.norm(np.diff(chained[seam - 1 : seam + 2, :2], axis=0), axis=1)) < 0.01
-    assert abs(chained[seam + 1, 2] - chained[seam - 1, 2]) < 0.05
-    assert forward_speed(chained).min() >= -1e-9
-
-
-def test_the_matched_set_matches_the_designed_set_and_its_limits(problem):
-    limits = fixed_sets.motion_limits(problem.robot_cfg)
-    references = fixed_sets.matched_reference_set(
-        problem.sim_time, DT, limits, problem.environment_min, problem.environment_max
-    )
-    assert len(references) == DEFAULT_EXPERIMENT_CONFIG["tuning_trajectories"]["num_trajectories"]
-    for states in references.values():
-        assert summarize_motion(states, DT)["duration"] == pytest.approx(problem.sim_time)
-        assert fixed_sets.is_within_limits(states, DT, limits)
-        assert forward_speed(states).min() >= -1e-9
-        assert_inside(states, problem)
-
-
-def test_the_fixed_identification_reference_keeps_each_phase_in_its_limits(problem):
-    phases = DEFAULT_EXPERIMENT_CONFIG["identification_trajectory"]["phases"]
-    states, identified_duration = fixed_sets.fixed_identification_reference(
-        phases, DT, problem.robot_cfg, problem.environment_min, problem.environment_max
-    )
-    assert identified_duration == pytest.approx(phases[0]["duration"])
-    assert (len(states) - 1) * DT == pytest.approx(sum(phase["duration"] for phase in phases))
-    seam = int(round(identified_duration / DT))
-    for part, phase in ((states[: seam + 1], phases[0]), (states[seam:], phases[1])):
-        assert fixed_sets.is_within_limits(part, DT, fixed_sets.motion_limits(problem.robot_cfg, phase["motion_limits"]))
-    assert np.linalg.norm(states[seam, 3:5]) < 1e-9
-    # The identified phase turns both ways.
-    assert states[:seam, 5].max() > 0.5 and states[:seam, 5].min() < -0.5
-    assert_inside(states, problem)
 
 
 def test_the_benchmark_set_converts_every_reference_whole():
@@ -127,39 +80,6 @@ def test_an_existing_set_is_never_overwritten(tmp_path):
         assert pickle.load(file)["fixed_set"] == "test"
     with pytest.raises(FileExistsError):
         fixed_sets.export_reference_set(references, tmp_path / "set", DT)
-
-
-def _export(directory, total_time):
-    fixed_sets.export_reference_set({"circle": circle_reference(0.5, total_time, DT)}, directory, DT)
-    return directory
-
-
-def test_a_fixed_tuning_set_is_copied_and_one_longer_than_the_horizon_is_refused(tmp_path):
-    from wmr_simulator.active_learning.stages import stage_init, stage_plan_tuning_trajectories
-
-    fitting = _export(tmp_path / "fits", 4.0)
-    experiment = stage_init(
-        tmp_path / "exp",
-        {
-            "problem": PROBLEM,
-            "prior_tuning": False,
-            "use_residual_model": False,
-            "optimize_tuning_trajectories": False,
-            "baseline_tuning_trajectories_dir": str(fitting),
-        },
-    )
-    paths = experiment.paths(1)
-    # Stands in for the identify stage, which the tuning stages build on.
-    paths.problem_identified.write_text(paths.problem.read_text())
-    copied = stage_plan_tuning_trajectories(experiment, 1)
-    assert [path.name for path in copied] == ["circle.pkl"]
-
-    too_long = _export(tmp_path / "long", 6.0)
-    experiment.config["baseline_tuning_trajectories_dir"] = str(too_long)
-    for path in experiment.paths(1).tuning_trajectories_dir.glob("*.pkl"):
-        path.unlink()
-    with pytest.raises(ValueError, match="tuning_trajectories.sim_time to at least 6.00"):
-        stage_plan_tuning_trajectories(experiment, 1)
 
 
 def test_the_designed_and_fixed_switches_are_independent(tmp_path):

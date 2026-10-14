@@ -1,0 +1,28 @@
+plan-id-trajectory:
+  started: '2026-10-09T12:47:54'
+  finished: '2026-10-09T12:48:07'
+  seconds: 13.5
+decode-logs:
+  started: '2026-10-09T13:40:28'
+  finished: '2026-10-09T13:40:32'
+  seconds: 4.0
+identify:
+  started: '2026-10-09T13:40:32'
+  finished: '2026-10-09T13:40:46'
+  seconds: 13.7
+train-residual:
+  started: '2026-10-09T13:40:46'
+  finished: '2026-10-09T13:41:10'
+  seconds: 24.0
+plan-tuning-trajectories:
+  started: '2026-10-09T13:41:10'
+  finished: '2026-10-09T13:42:59'
+  seconds: 109.3
+tune-gains:
+  started: '2026-10-09T13:42:59'
+  finished: '2026-10-09T13:43:57'
+  seconds: 58.0
+finalize:
+  started: '2026-10-09T13:43:57'
+  finished: '2026-10-09T13:43:57'
+  seconds: 0.0

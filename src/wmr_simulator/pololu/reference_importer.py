@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import json
 import pickle
 from dataclasses import dataclass
@@ -24,13 +23,8 @@ class PololuReference:
 
 
 def load_reference(path: str | Path, *, result_index: int = 0) -> PololuReference:
-    """A reference from either a Pololu ``.JSN`` or a simulator reference pickle.
-
-    The pickle route goes through ``reference_exporter.format_pololu_reference``,
-    i.e. builds the exact payload the robot would have been handed, so a
-    designed trajectory is driven identically whether it is given as the pickle
-    it was designed in or as the JSN exported from it.
-    """
+    """A reference from either a Pololu ``.JSN`` or a simulator reference
+    pickle (converted with ``reference_exporter.format_pololu_reference``)."""
     path = Path(path)
     if path.suffix.lower() != ".pkl":
         return load_pololu_reference(path, result_index=result_index)
@@ -207,31 +201,3 @@ def _accelerations_from_velocity(
         raise ValueError("acceleration must be 'finite-difference' or 'zero'.")
     edge_order = 2 if vx.shape[0] >= 3 else 1
     return np.gradient(vx, dt, edge_order=edge_order), np.gradient(vy, dt, edge_order=edge_order)
-
-
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="Convert a Pololu reference JSON/JSN file into a simulator reference pickle."
-    )
-    parser.add_argument("--input", type=str, default="Pololu Data/References/20cp_bridge.JSN")
-    parser.add_argument("--output-dir", type=str, default="trajectory_exports")
-    parser.add_argument("--output-name", type=str, default=None)
-    parser.add_argument("--result-index", type=int, default=0)
-    parser.add_argument("--final-action", choices=("repeat", "zero"), default="repeat")
-    parser.add_argument("--acceleration", choices=("finite-difference", "zero"), default="finite-difference")
-    args = parser.parse_args(argv)
-
-    output_path = export_pololu_reference_pickle(
-        args.input,
-        args.output_dir,
-        output_name=args.output_name,
-        result_index=args.result_index,
-        final_action=args.final_action,
-        acceleration=args.acceleration,
-    )
-    print(output_path)
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

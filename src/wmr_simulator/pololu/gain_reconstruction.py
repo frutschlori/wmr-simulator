@@ -1,12 +1,8 @@
 """Reconstruct the controller gains applied along a recorded log.
 
-The firmware does not log the per-step controller gains (saving MCU compute and
-SD-card space). When a run used a gain parametrization, we recover the applied
-gains offline by replaying the parametrization on the log's reference, measured
-pose and encoder body twist -- the same inputs the on-robot controller fed the
-parametrization every geometry step. The result aligns with the log's command
-timestamps so it can overlay the log summary plot like a simulated rollout's
-recorded gains.
+The firmware does not log the scheduled gains, so they are recomputed offline
+from the log's reference, measured pose and encoder body twist, on the log's
+command timestamps.
 """
 
 from __future__ import annotations
@@ -35,8 +31,7 @@ def applied_gains_over_log(log, base_gains, params) -> np.ndarray:
 
     command_time = np.asarray(log.pose.command_time_s, dtype=float)
 
-    # Unwrap headings before interpolation so linear interp never crosses a
-    # +/-pi jump; the parametrization re-wraps the heading error itself.
+    # Unwrap headings before interpolating.
     reference = np.array(log.reference.states, dtype=float, copy=True)
     reference[:, 2] = np.unwrap(reference[:, 2])
     pose = np.array(log.pose.states, dtype=float, copy=True)
@@ -44,7 +39,7 @@ def applied_gains_over_log(log, base_gains, params) -> np.ndarray:
 
     ref_samples = _interp_states(log.reference.time_s, reference, command_time)
     pose_samples = _interp_states(log.pose.time_s, pose, command_time)
-    # Spline-smoothed body twist columns [v, omega] (savgol; see pose_smoothing).
+    # Smoothed body twist [v, omega].
     twists = np.asarray(log.pose.twists, dtype=float)[:, [0, 2]]
     twist_samples = _interp_states(log.pose.time_s, twists, command_time)
 

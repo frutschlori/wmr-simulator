@@ -1,25 +1,13 @@
 """Run one deployment: config + trajectory in, an SD-card log out.
 
-This is the piece that stands in for carrying the SD card to the robot and
-back. It wires the three halves together and does nothing else of its own:
-
     ROBOTCFG.CFG / robot_config.yaml -> firmware.FirmwareConfig
     trajectory .JSN / .pkl           -> pololu.reference_importer
     plant.MujocoPlant  <-> firmware.Firmware  -> binlog.BinaryLogWriter
 
-The only randomization is the start pose: the plant's parameters stay fixed so
-the identification benchmark has one true parameter vector. The offset
-distribution is the pipeline's own (``gain_tuning.defaults``): uniform over a
-disk of ``init_offset_radius`` and uniform over +-``init_offset_angle``, which
-is how the robot is placed by hand.
-A repeat run instead passes ``start_pose`` and begins where the last one ended,
-the way a bridged trajectory is repeated on the robot without touching it.
-
-**Nothing but the log may be written into the target directory.** The
-pipeline's ``decode-logs`` stage tries to decode every non-csv, non-CFG file it
-finds in ``data/``, so a ground-truth sidecar next to the log would break it -
-and would leak the hidden truth into the pipeline besides. The ground-truth
-diagnostics come back in :class:`DeploymentResult` instead.
+The start pose is drawn like a hand placement (uniform over a disk of
+``init_offset_radius`` and +-``init_offset_angle``), or given as ``start_pose``
+for a chained repeat run. Only the log is written to the target directory; the
+ground truth is returned in :class:`DeploymentResult`.
 """
 
 from __future__ import annotations
@@ -35,13 +23,10 @@ from wmr_simulator.mujoco_sim.binlog import BinaryLogWriter
 from wmr_simulator.mujoco_sim.firmware import OUTER_OUTPUT_STAMP_DELAY_MS, Firmware, FirmwareConfig
 from wmr_simulator.mujoco_sim.plant import HiddenPlantConfig, MujocoPlant
 
-# Real logs start at the firmware's uptime, not at zero (59 s in the sample
-# log this was checked against). Any plausible offset works; a fixed one keeps
-# runs comparable.
+# Log timestamps start at the firmware's uptime.
 DEFAULT_BOOT_TIME_MS = 15_000
 
-# gain_tuning.defaults: measured across the exp04/exp05 logs, where the robot
-# was placed 31-100 mm and up to 9.5 deg off the reference start.
+# Hand-placement spread (gain_tuning.defaults).
 DEFAULT_START_OFFSET_RADIUS = 0.05
 DEFAULT_START_OFFSET_ANGLE = 0.2
 
@@ -57,21 +42,16 @@ class DeploymentResult:
     duration: float
     start_pose: tuple[float, float, float]
     start_offset: tuple[float, float, float]
-    # Where the robot ended up. Chaining runs starts the next one here instead
-    # of drawing a new placement, which is what driving a bridged trajectory
-    # buys on the real robot: nobody carries it back to the start.
+    # Where the robot ended up (the start of a chained next run).
     final_pose: tuple[float, float, float]
-    # Scored over the first ``scored_duration`` seconds of the trajectory only
-    # (the whole run when the caller gives no ``score_duration``), so that the
-    # wait and the return path of a bridged reference do not dilute the score.
+    # Scored over the first ``scored_duration`` seconds of the trajectory.
     tracking_rmse: float
     tracking_max: float
     final_pose_error: float
     max_duty: float
     duty_saturated_fraction: float
     scored_duration: float
-    # The same position RMSE over the whole run, bridge included: what every
-    # run before 2026-10-02 reported as ``tracking_rmse``.
+    # Position RMSE over the whole run, bridge included.
     tracking_rmse_full: float
 
 
@@ -92,22 +72,11 @@ def run_deployment(
 ) -> DeploymentResult:
     """Execute ``trajectory`` under ``robot_config`` and write a ``TRxx`` log.
 
-    ``start_pose`` places the robot at a given ``(x, y, yaw)`` instead of
-    drawing a hand placement -- how a *repeat* run starts, from wherever the
-    previous one's bridge path left the robot. The reported ``start_offset`` is
-    then how far off the trajectory's start that happened to be, which is the
-    same quantity as a drawn offset and comparable with it.
-
-    ``observer`` is called with ``(tick, plant)`` after every physics step. It
-    is how the video renderer gets at the run without a second copy of this
-    loop; it may read the plant's ground truth, which is why it is a caller's
-    hook and not something the log ever sees.
-
-    ``score_duration`` limits the ground-truth scores (position RMSE and
-    maximum, duty saturation) to the first ``score_duration`` seconds of the
-    trajectory. A bridged reference passes the duration of its unbridged
-    original, so the wait at the goal and the slow return path are driven but
-    not scored. ``None`` scores the whole run.
+    ``start_pose`` places the robot at ``(x, y, yaw)`` instead of drawing a
+    hand placement (a chained repeat run). ``observer`` is called with
+    ``(tick, plant)`` after every physics step (used by the video renderer).
+    ``score_duration`` limits the ground-truth scores to the first seconds of
+    the trajectory (None: the whole run).
     """
     from wmr_simulator.pololu.reference_importer import load_reference
 
@@ -135,9 +104,7 @@ def run_deployment(
         offset[2] = math.atan2(math.sin(offset[2]), math.cos(offset[2]))
     plant.reset(*start_pose)
 
-    # The firmware waits for the first mocap frame before starting the outer
-    # loop, and initializes the EKF from it (`wait_for_ekf_init`).
-    # Every frame passes the configured mocap calibration first, as on the robot.
+    # The EKF is initialized from the first (calibrated) mocap frame.
     first_mocap = config.mocap_calibration.correct(plant.read_mocap())
     firmware = Firmware(config, reference.states, reference.actions, _pose_of(first_mocap))
     firmware.reset_encoders(plant.encoder_counts())
@@ -145,8 +112,6 @@ def run_deployment(
     errors: list[float] = []
     duties: list[float] = []
     errors_full: list[float] = []
-    # Small tolerance so that score_duration = the run's own duration scores
-    # exactly the ticks an unlimited score would.
     score_end = math.inf if score_duration is None else float(score_duration) + 1e-9
     with BinaryLogWriter(log_path) as writer:
         for tick in firmware.clock(plant.timestep, boot_time_ms).ticks(firmware.duration):
@@ -210,19 +175,15 @@ def next_log_name(output_dir: str | Path) -> str:
     output_dir = Path(output_dir)
     for index in range(MAX_LOG_INDEX):
         name = f"TR{index:02d}"
-        # The decoded csv counts as taken too: the pipeline writes it next to
-        # the binary, and reusing the name would silently mix two runs.
+        # A decoded csv counts as taken.
         if not (output_dir / name).exists() and not (output_dir / f"{name}.csv").exists():
             return name
     raise RuntimeError(f"No free TRxx log slot in {output_dir} (TR00-TR{MAX_LOG_INDEX - 1:02d} all taken)")
 
 
 def sample_start_offset(rng: np.random.Generator, offset_radius: float, offset_angle: float) -> np.ndarray:
-    """``[dx, dy, dtheta]``, uniform over the disk by area and over +-angle.
-
-    Same distribution as ``trajectory_optimization.start_offsets`` draws for the
-    gain tuner, so a deployment starts the way the tuner assumed it would.
-    """
+    """``[dx, dy, dtheta]``, uniform over the disk by area and over +-angle
+    (as ``trajectory_optimization.start_offsets``)."""
     if offset_radius <= 0.0 and offset_angle <= 0.0:
         return np.zeros(3)
     radius = offset_radius * math.sqrt(rng.uniform())

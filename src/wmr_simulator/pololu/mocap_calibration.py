@@ -1,45 +1,24 @@
 """Calibration of the mocap rigid body against the robot's wheel axle.
 
-Motion capture tracks the rigid body Motive created from the marker deck, not
-the robot: its origin sits wherever the markers' centroid (or a hand-set pivot)
-happens to be, and its orientation is whatever the robot faced when the body
-was created. The robot model, the controller and the firmware all assume the
-pose of the wheel-axle midpoint, heading along the wheels' rolling direction.
-Measured on the real robots (2026-10-07, thesis_ch5/real_robot): a heading
-misalignment of +0.65 deg (robot 1) and -0.8 deg (robot 2), the tracked point
-about 11 mm ahead of the axle on robot 1.
-
-The mocap body frame is the robot frame turned by ``yaw_offset`` about the
-vertical, and the rigid body's origin sits at ``offset`` = (dx, dy) from the
-axle midpoint, in the *mocap* body frame:
+The mocap rigid body's origin and orientation are arbitrary, while the model,
+controller and firmware assume the pose of the wheel-axle midpoint. The mocap
+body frame is the robot frame turned by ``yaw_offset`` about the vertical, and
+the rigid body's origin sits at ``offset`` = (dx, dy) from the axle midpoint,
+in the mocap body frame:
 
     p_axle = p_mocap - Rz(yaw_mocap) offset,    yaw_robot = yaw_mocap - yaw_offset.
 
-The correction is planar. The deck tips by -3..+6 deg under braking and
-acceleration, so a rigid-body origin a few cm above the axle moves by 1-1.5 mm
-RMS; left uncorrected that cost nothing measurable in MuJoCo (gen-5 S-A-N
-controllers, 10 seeds: origin 35 mm above the axle -0.3 mm RMSE, 20 mm below
-+0.2, neither significant), against +3.2 mm (10/10) for a 1 deg heading offset.
-
-Estimation (``estimate_mocap_calibration``): the axle moves along the robot
-heading at the encoder speed (no sideways slip at the slow calibration speeds),
-so the mocap origin's velocity in the mocap body frame is
+Estimation (``estimate_mocap_calibration``): without sideways slip, the mocap
+origin's velocity in the mocap body frame is
 
     (vx_m, vy_m) = s v_enc (cos yaw_offset, -sin yaw_offset) + omega (-dy, dx),
 
-linear in (s cos yaw_offset, s sin yaw_offset, dx, dy). It needs no assumption
-that the robot drives straight: the heading is the measured one at every
-sample, and the encoders give only the forward speed, whose scale ``s`` (wheel
-radius, unequal wheels) is fitted and does not enter the heading offset.
-Straight runs pin the heading offset, turns on the spot (the origin circles the
-axle) the offset. ``calibration_reference_states`` is a run that does both,
-rests at its start pose, and fits the firmware's limits.
+linear in (s cos yaw_offset, s sin yaw_offset, dx, dy), with the encoder speed
+scale ``s`` fitted. Straight runs determine the heading offset, turns on the
+spot the origin offset; ``calibration_reference_states`` does both.
 
-The firmware applies the correction to every mocap frame before the EKF, the
-controller and the SD log see it (``mocap_*`` keys of ROBOTCFG.CFG,
-``firmware/src/trajectory_uart.rs``); ``mujoco_sim.firmware`` mirrors it. A log
-recorded with a calibration in place therefore already carries axle poses, and
-estimating on it again returns the residual calibration (ideally zero).
+The firmware applies the correction to every mocap frame (``mocap_*`` keys of
+ROBOTCFG.CFG); ``mujoco_sim.firmware`` mirrors it.
 """
 
 from __future__ import annotations
@@ -55,8 +34,7 @@ import numpy as np
 CONFIG_KEYS = ("mocap_yaw_offset", "mocap_offset_x", "mocap_offset_y")
 
 # Calibration samples are used only below this encoder speed and lateral
-# acceleration: above them the wheels start to slip and the encoder speed is no
-# longer the axle's (real robot, 2026-10-07: outward slip of ~0.02 s * v * omega).
+# acceleration (no wheel slip).
 MAX_SPEED = 1.0
 MAX_LATERAL_ACCELERATION = 1.5
 
@@ -72,10 +50,6 @@ class MocapCalibration:
     def config_values(self) -> dict[str, float]:
         return dict(zip(CONFIG_KEYS, (self.yaw_offset, *self.offset)))
 
-    @classmethod
-    def from_config_values(cls, values: Mapping[str, float]) -> "MocapCalibration":
-        yaw_offset, *offset = (float(values.get(key, 0.0)) for key in CONFIG_KEYS)
-        return cls(yaw_offset, tuple(offset))
 
     def to_mapping(self) -> dict:
         return {
@@ -135,19 +109,16 @@ def _wrap(angle):
 def calibration_reference_states(
     dt: float = 0.05,
     *,
-    # Along the arena's long axis (problems/pololu_gains.yaml: y in [-2.3, 2.3]).
-    start=(0.0, -0.7, 0.5 * math.pi),
+    # Along the arena's long axis (y).
+    start=(0.0, 0.0, 0.5 * math.pi),
     length: float = 1.4,
     peak_speed: float = 0.6,
     spin_angle: float = 3.0 * math.pi,
     spin_rate: float = 5.0,
 ) -> np.ndarray:
     """``[x, y, theta, vx, vy, omega, ax, ay]`` of the calibration run: a slow
-    straight run (heading offset), a turn on the spot of 1.5 revolutions
-    (offset), and the same back, ending on the start pose so the run can be
-    repeated without moving the robot. Every piece is a rest-to-rest
-    minimum-jerk profile; the defaults peak at 0.6 m/s and 5 rad/s and travel
-    1.4 m along the start heading, under the firmware's 350 points.
+    straight run, a turn on the spot of 1.5 revolutions, and the same back to
+    the start pose. Every piece is a rest-to-rest minimum-jerk profile.
     """
     from wmr_simulator.trajectory_optimization.reference_extension import (
         _minimum_jerk_path,
@@ -211,11 +182,22 @@ def calibration_samples(
     max_speed: float = MAX_SPEED,
     max_lateral_acceleration: float = MAX_LATERAL_ACCELERATION,
     edge_s: float = 0.3,
+    yaw_rate_source: str = "mocap",
 ) -> np.ndarray:
     """``(N, 4)`` = mocap body-frame velocity ``(vx_m, vy_m)``, encoder speed and
     yaw rate of one decoded log, at the mocap samples (the log loader's
-    smoothed mocap twist and its lag-aligned encoder speeds)."""
-    from wmr_simulator.pololu.log_loader import load_pololu_traj_control_log
+    smoothed mocap twist and its lag-aligned encoder speeds).
+
+    ``yaw_rate_source`` ``"gyro"`` takes the yaw rate from the IMU instead of
+    the differentiated mocap heading (the (vx_m, vy_m) targets stay mocap). The
+    gyro bias is the mean gyro-minus-mocap difference over the usable samples,
+    which cancels for the run's symmetric CCW/CW turns; the gyro scale is not
+    corrected (see ``gyro_scale`` in the diagnostics of the estimate).
+    """
+    from wmr_simulator.pololu.log_loader import load_imu_gyro_z, load_pololu_traj_control_log
+
+    if yaw_rate_source not in ("mocap", "gyro"):
+        raise ValueError(f"yaw_rate_source must be 'mocap' or 'gyro', got {yaw_rate_source!r}")
 
     log = load_pololu_traj_control_log(path)
     pose_time = np.asarray(log.pose.time_s, dtype=float)
@@ -227,7 +209,14 @@ def calibration_samples(
     usable &= pose_time <= min(pose_time[-1], wheel_time[-1]) - edge_s
     usable &= np.abs(speed) < max_speed
     usable &= np.abs(speed * twist[:, 2]) < max_lateral_acceleration
-    return np.column_stack([twist[usable, 0], twist[usable, 1], speed[usable], twist[usable, 2]])
+    omega = twist[:, 2]
+    if yaw_rate_source == "gyro":
+        gyro_time, gyro = load_imu_gyro_z(path)
+        if len(gyro) < 2:
+            raise ValueError(f"{path} has no gyro samples.")
+        omega = np.interp(pose_time, gyro_time, gyro)
+        omega = omega - float(np.mean(omega[usable] - twist[usable, 2]))
+    return np.column_stack([twist[usable, 0], twist[usable, 1], speed[usable], omega[usable]])
 
 
 def _solve(samples: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -254,9 +243,9 @@ def _calibration(solution: np.ndarray) -> tuple[MocapCalibration, float]:
 def estimate_mocap_calibration(
     log_paths: Iterable[str | Path], wheel_radius: float, **sample_options
 ) -> tuple[MocapCalibration, dict]:
-    """Least-squares calibration from decoded logs of the calibration run (see
-    the module docstring), and diagnostics: the speed scale ``s``, the residual
-    RMS, standard errors and the per-log estimates."""
+    """Least-squares calibration from decoded logs of the calibration run, and
+    diagnostics (speed scale ``s``, residual RMS, standard errors, per-log
+    estimates)."""
     log_paths = [Path(path) for path in log_paths]
     samples = [calibration_samples(path, wheel_radius, **sample_options) for path in log_paths]
     if not samples:

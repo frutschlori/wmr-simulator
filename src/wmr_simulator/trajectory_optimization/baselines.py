@@ -1,29 +1,18 @@
-"""Analytic baseline reference trajectories for comparison with optimized ones.
+"""Analytic reference trajectories.
 
-All baselines share the [T, 8] reference-state layout of the Bezier synthesis
-([x, y, theta, vx, vy, omega, ax, ay] sampled at geometry_controller_dt) and use
-the same quintic s-curve time scaling, so start and end velocities go to zero
-gracefully and the sample count is time / geometry_dt, just like the optimized
-trajectories they are compared against.
+All share the [T, 8] reference-state layout ([x, y, theta, vx, vy, omega, ax, ay]
+sampled at geometry_controller_dt) and the quintic s-curve time scaling, so
+they start and end at rest.
 
-Baseline types:
-  - circle:          constant-radius circle, parametrized by radius and time.
-  - lemniscate:      figure-eight (lemniscate of Gerono), parametrized by time
-                     and peak speed (amplitude is solved for the peak speed).
-  - lemniscate-ramp: figure-eight repeated for a number of cycles whose phase
-                     rate grows by a constant factor per completed cycle. An
-                     s-curve envelope ramps the rate in from zero and back out
-                     to zero, so the robot is never hit with a step in speed.
-  - spin:            rotation on the spot, parametrized by time and peak omega
-                     (the total rotation is solved for the peak omega).
+Types:
+  - circle:          constant-radius circle (or an arc, ``sweep``).
+  - lemniscate:      figure-eight (lemniscate of Gerono) with a given peak speed.
+  - lemniscate-ramp: figure-eight repeated for several cycles with a phase rate
+                     that grows by a constant factor per cycle.
+  - spin:            rotation on the spot with a given peak omega.
 
-Also, for trajectory_optimization.fixed_sets and not exposed on the CLI:
-``circle`` draws partial arcs (``sweep``), ``sine_reference`` a slalom
-``y = A sin(2 pi n u)`` along a straight chord (A = 0 is a line), and
-``place_reference`` / ``chain_references`` move and concatenate finished
-references rigidly.
-
-The CLI wrapper lives in scripts/generate_baseline_reference.py.
+``sine_reference`` (slalom), ``place_reference`` and ``chain_references`` are
+used by ``trajectory_optimization.fixed_sets``.
 """
 
 from __future__ import annotations
@@ -59,8 +48,7 @@ def _assemble_reference(
 ) -> np.ndarray:
     """Assemble the [T, 8] reference-state matrix from path derivatives.
 
-    Mirrors bspline._reference_from_derivatives: heading comes from the path
-    tangent (well-defined even where the speed is zero at the endpoints).
+    The heading comes from the path tangent (as in bspline).
     """
     velocity = dpos_du * u_dot[:, None]
     acceleration = dpos_du * u_ddot[:, None] + d2pos_du2 * (u_dot[:, None] ** 2)
@@ -125,10 +113,7 @@ def circle_reference(
     time_grid = baseline_time_grid(total_time, dt)
     duration = time_grid[-1]
     direction = -1.0 if clockwise else 1.0
-    # Parametrized by the s-curve's own s in [0, 1], which only increases:
-    # _assemble_reference reads the heading off dpos/ds, so a parameter that
-    # runs backwards (the polar angle of a clockwise circle) would turn every
-    # heading by pi and drive the circle in reverse.
+    # Parametrized by the increasing s in [0, 1], so the heading points forward.
     s = sigma(time_grid, duration)
     phi = start_angle + direction * sweep * s
     center = np.asarray(center, dtype=float)
@@ -148,13 +133,7 @@ def lemniscate_reference(
     center: tuple[float, float] = (0.0, 0.0),
     rotation: float = 0.0,
 ) -> np.ndarray:
-    """A Gerono lemniscate, optionally rotated about its centre.
-
-    The curve spans ``2a`` along its own x axis but only ``a`` along y, so an
-    environment taller than it is wide fits a far larger figure-8 at
-    ``rotation = pi/2`` than at 0 -- on the shipped 2.6 x 4.6 m box that is a
-    ~4 m long curve against the ~1.9 m the unrotated form is capped at.
-    """
+    """A Gerono lemniscate (``2a`` long, ``a`` wide), optionally rotated about its centre."""
     if max_speed <= 0.0:
         raise ValueError("max_speed must be positive.")
     if cycles < 1:
@@ -470,7 +449,7 @@ def run_baseline_closed_loop(problem_path: str, reference_states: np.ndarray, se
     from wmr_simulator.simulation import SimulationPipeline
 
     simulation = SimulationPipeline(problem_path=problem_path, seed=seed, reference_trajectories_dir=None)
-    _extend_time_grids(simulation, len(reference_states))
+    simulation.extend_time_grids(len(reference_states))
     log = simulation.run_closed_loop(
         simulation.hidden_params,
         use_hidden_robot=True,
@@ -478,26 +457,3 @@ def run_baseline_closed_loop(problem_path: str, reference_states: np.ndarray, se
         reference_states=jnp.asarray(reference_states, dtype=jnp.float32),
     )
     return simulation, log
-
-
-def _extend_time_grids(simulation, num_reference_samples: int) -> None:
-    """Regrow the pipeline time grids when the baseline outlasts the problem sim_time.
-
-    run_closed_loop slices its log time axes from these grids, so a reference
-    longer than sim_time would otherwise produce time/state length mismatches.
-    """
-    if num_reference_samples <= len(simulation.reference_time_grid):
-        return
-    duration = (num_reference_samples - 1) * simulation.geometry_dt
-    simulation.sim_time = duration
-    simulation.reference_time_grid = simulation._time_grid(duration, simulation.geometry_dt)
-    simulation.pose_time_grid = simulation._time_grid(duration, simulation.wheel_dt)
-    simulation.sim_time_grid = simulation.pose_time_grid
-    simulation.wheel_time_grid = simulation.pose_time_grid - simulation.wheel_dt
-    simulation.command_time_grid = simulation.reference_time_grid[:-1] + 0.5 * simulation.wheel_dt
-    simulation.reference_pose_indices = np.arange(
-        0,
-        len(simulation.reference_time_grid) * simulation.inner_steps_per_geometry_step,
-        simulation.inner_steps_per_geometry_step,
-        dtype=np.int32,
-    )

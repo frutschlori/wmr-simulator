@@ -4,9 +4,7 @@ import jax.numpy as np
 # Firmware `inner_controller.rs` clamps the integrator state, in duty units.
 INTEGRAL_DUTY_LIMIT = 0.8
 
-# The flat controller gain vector. kdmotor came last (2026-09-30) so the first
-# five slots keep their meaning in every config, log and GAINMLP.JSN written
-# before it; controller_gains_array reads those with kdmotor = 0.
+# The flat controller gain vector (five-gain vectors are read with kdmotor = 0).
 GAIN_NAMES = ("kx", "ky", "kth", "kpmotor", "kimotor", "kdmotor")
 NUM_GAINS = len(GAIN_NAMES)
 KDMOTOR_INDEX = GAIN_NAMES.index("kdmotor")
@@ -16,12 +14,8 @@ CONTROLLER_STATE_SIZE = 4
 
 
 def controller_gains_array(gains):
-    """Gain vector (or batch ``(..., n)``) as float32 ``(..., NUM_GAINS)``.
-
-    Gain vectors from before the D-term have five entries; they are read with
-    kdmotor = 0, which is the controller that recorded them (the firmware's
-    ``kd_inner`` was always shipped at 0).
-    """
+    """Gain vector (or batch ``(..., n)``) as float32 ``(..., NUM_GAINS)``;
+    five-gain vectors get kdmotor = 0."""
     gains = np.asarray(gains, dtype=np.float32)
     if gains.shape[-1] == NUM_GAINS - 1:
         gains = np.concatenate([gains, np.zeros((*gains.shape[:-1], 1), dtype=np.float32)], axis=-1)
@@ -31,10 +25,8 @@ def controller_gains_array(gains):
 
 
 def controller_gains_list(gains) -> list[float]:
-    """One gain vector as Python floats, padded like :func:`controller_gains_array`.
-
-    For exports and yaml, which must not round through float32.
-    """
+    """One gain vector as Python floats (no float32 rounding), padded like
+    :func:`controller_gains_array`."""
     values = [float(gain) for gain in gains]
     if len(values) == NUM_GAINS - 1:
         values.append(0.0)
@@ -110,7 +102,6 @@ class Controller:
         px_d, py_d, th_d = refstate[0:3]
         vx_d, vy_d, w_d = refstate[3:6]
         v_d = np.sqrt(vx_d**2 + vy_d**2 + 1e-12)
-        # ax_d, ay_d = refstate[6:8]
 
         x_e = (px_d - px) * np.cos(th) + (py_d - py) * np.sin(th)
         y_e = -(px_d - px) * np.sin(th) + (py_d - py) * np.cos(th)
@@ -138,13 +129,11 @@ class Controller:
         ki_duty = ki / motor_gain
         ir = np.clip(ir + ki_duty * self.dt * er, -INTEGRAL_DUTY_LIMIT, INTEGRAL_DUTY_LIMIT)
         il = np.clip(il + ki_duty * self.dt * el, -INTEGRAL_DUTY_LIMIT, INTEGRAL_DUTY_LIMIT)
-        # D-term on the error, as in the firmware: the previous error starts at 0
-        # (and is reset there on a trajectory resume), so the reference steps the
-        # outer loop issues every few inner ticks kick it like on the robot.
+        # D-term on the error, as in the firmware (the previous error starts at 0).
         dr = (er - er_prev) / self.dt
         dl = (el - el_prev) / self.dt
-        # Map to duty cycles for the motor model. kp and kd are in wheel-speed
-        # units like the feedforward; the firmware's are these / wheel_max.
+        # Map to duty cycles (kp and kd in wheel-speed units; the firmware's are
+        # these / wheel_max).
         duty_r = (ur_ref + kp * er + kd * dr) / motor_gain + ir
         duty_l = (ul_ref + kp * el + kd * dl) / motor_gain + il
         return np.stack([ir, il, er, el]), duty_r, duty_l

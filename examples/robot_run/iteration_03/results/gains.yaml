@@ -1,0 +1,42 @@
+gains:
+- 3.36175799369812
+- 4.154010772705078
+- 7.6580915451049805
+- 3.1635992527008057
+- 0.0
+- 0.0
+static_gains: null
+schedule_enabled: false
+schedule: null
+used_residual_model: true
+final_loss: 0.0183565616607666
+final_validation_loss: 0.020379487425088882
+static_final_loss: null
+static_final_validation_loss: null
+checks:
+  static:
+    stalled: true
+    start_training_loss: 0.0183565616607666
+    returned_training_loss: 0.0183565616607666
+    training_loss_improvement: 0.0
+    start_validation_loss: 0.020379487425088882
+    returned_validation_loss: 0.020379487425088882
+    unchanged_from_init: true
+    bound_hits:
+    - gain: kimotor
+      bound: zero
+      value: 0.0
+    - gain: kdmotor
+      bound: zero
+      value: 0.0
+    divergence:
+      tuned:
+        rollouts: 60
+        diverged: 0
+        median_position_rmse: 0.05514500964521152
+warnings:
+- 'static: the returned start never left its start point (stalled solve, training
+  loss improved 0.00 %).'
+- 'static: returned gains equal the input gains.'
+- 'static: kimotor = 0 on the zero bound.'
+- 'static: kdmotor = 0 on the zero bound.'

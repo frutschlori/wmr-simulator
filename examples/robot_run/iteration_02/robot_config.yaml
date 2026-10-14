@@ -1,0 +1,37 @@
+robot:
+  wheel_radius: 0.016067029908299446
+  base_diameter: 0.08911702781915665
+  max_wheel_speed: 225.3980712890625
+  time_constant: 0.24855799973011017
+controller:
+  gains:
+  - 3.048274040222168
+  - 4.854456901550293
+  - 7.108404159545898
+  - 3.687633514404297
+  - 0.0
+  - 0.0
+  gain_parametrization:
+    kind: error_mlp
+    enabled: false
+    hidden_sizes:
+    - 16
+    seed: 0
+    scheduled_indices:
+    - 0
+    - 1
+    - 2
+    - 3
+    - 4
+    bound: 5.0
+    learn_bound: false
+    spectral_norm_cap: 2.0
+    gate_num_centers: 0
+    gate_bandwidth_scale: 1.5
+    gate_ood_sigma: 3.0
+mocap_calibration:
+  yaw_offset_rad: -0.021130647725771803
+  yaw_offset_deg: -1.2107
+  offset_m:
+  - -0.00046003920310161146
+  - 0.0014471714578729485

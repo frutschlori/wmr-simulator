@@ -1,12 +1,8 @@
 """Append a wait + bridge-back segment to a Pololu reference JSN.
 
-The bridged reference replays the original trajectory, waits at its goal, and
-then drives a planned bridge path back to the start pose, so an experiment can
-be repeated without repositioning the robot by hand. The bridged JSN is a
-regular Pololu reference and is exported next to the unbridged one by default
-(``<name>_bridge.JSN``).
-
-The CLI wrapper lives in scripts/pololu_append_bridge_reference.py.
+The bridged reference (``<name>_bridge.JSN``) drives the original trajectory,
+waits at its goal and drives a planned path back to the start pose, so an
+experiment can be repeated without repositioning the robot by hand.
 """
 
 from __future__ import annotations
@@ -341,16 +337,12 @@ def smooth_route_states(start_pose: np.ndarray, goal_pose: np.ndarray, dt: float
 
 
 def arc_line_arc_states(start_pose: np.ndarray, goal_pose: np.ndarray, dt: float, route: ArcReturn) -> np.ndarray:
-    """A return a differential drive tracks with heading feedback all the way:
-    a forward arc onto the tangent line, the line, a forward arc onto the goal
-    pose -- the fastest of the four tangent routes that stays in the box, each
-    piece rest to rest. The turn-line-turn return it replaces turned on the spot,
-    where the Kanayama law has no heading feedback (``v_ref * kth * sin
-    theta_e``), and the robot arrived wherever its wheelbase belief put it: 119 of
-    159 iteration-2 repeats in Phase 2 v6 started more than 0.5 rad off heading.
-    When no route fits the box at any radius, the one leaving it least is
-    driven. Starts at ``start_pose`` (included). With ``route.smooth`` the
-    return is ``smooth_route_states`` instead."""
+    """A return that always drives forward (the Kanayama law has no heading
+    feedback at v_ref = 0): an arc onto the tangent line, the line, an arc onto
+    the goal pose -- the fastest of the four tangent routes that stays in the
+    box, each piece rest to rest. When no route fits the box at any radius, the
+    one leaving it least is driven. Starts at ``start_pose`` (included). With
+    ``route.smooth`` the return is ``smooth_route_states`` instead."""
     from wmr_simulator.trajectory_optimization.reference_extension import arc_turn, straight_line
 
     if route.smooth:
@@ -451,8 +443,7 @@ def append_bridge_reference(
         decimals=decimals,
     )
     with output_path.open("w", encoding="utf-8") as file:
-        # Compact: the firmware reads the JSN into a 48 KiB buffer, and indented
-        # JSON spends about half of it on whitespace (serde_json_core reads both).
+        # Compact JSON, for the firmware's 48 KiB buffer.
         json.dump(formatted, file, separators=(",", ":"))
         file.write("\n")
     from wmr_simulator.pololu.reference_exporter import check_firmware_limits
@@ -543,9 +534,6 @@ def plot_bridged_reference(
     ax_xy, ax_state = axes
 
     if pieces:
-        # The identified phase, the wait and the bridge keep the colours of the
-        # plain plot (C0-C2); appended trajectories take the next ones in order,
-        # arc turns are neutral.
         extent = np.ptp(full_reference_states[:, :2], axis=0).max()
         start, appended = 0, 0
         for piece in pieces:
@@ -576,8 +564,6 @@ def plot_bridged_reference(
     ax_xy.grid(True)
     # One entry per label: every arc turn shares one.
     legend = dict(zip(*reversed(ax_xy.get_legend_handles_labels())))
-    # Beside the axes: the equal-aspect path panel leaves room there, and inside
-    # it the legend covers the path.
     ax_xy.legend(legend.values(), legend.keys(), loc="center left", bbox_to_anchor=(1.02, 0.5))
 
     ax_state.plot(time, full_reference_states[:, 0], label="x")
@@ -596,8 +582,9 @@ def plot_bridged_reference(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Append a wait and bridge-back path to a Pololu reference JSN.")
-    parser.add_argument("--input", type=str, default="Pololu Data/References/dt comparison/")
-    parser.add_argument("--output", type=str, default="Pololu Data/References/dt comparison/bridged/")
+    parser.add_argument("--input", type=str, required=True, help="Reference JSN, or a directory of them.")
+    parser.add_argument("--output", type=str, default=None,
+                        help="Output JSN or directory (default: <name>_bridge.JSN next to the input).")
     parser.add_argument("--plot-output", type=str, default=None)
     parser.add_argument("--wait-time", type=float, default=1.0)
     parser.add_argument("--bridge-time", type=float, default=5.0)

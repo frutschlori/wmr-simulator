@@ -14,25 +14,15 @@ from wmr_simulator.robot import DiffDrive, DiffDriveState
 from wmr_simulator.planner import compute_reference_trajectory
 from wmr_simulator.types import PhysicalParams, PoseLog, ReferenceLog, SimulationLog, WheelLog
 
-# Stochastic model entries zeroed by `noise_enabled: false` in the problem yaml.
-# KF process-noise tuning (proc_pos_std, proc_theta_std) is left untouched: it
-# shapes the filter, not the simulated world.
+# Noise entries zeroed by `noise_enabled: false` in the problem yaml (the KF
+# process noise is filter tuning and stays).
 NOISE_ESTIMATOR_KEYS = ("noise_pos", "noise_angle", "enc_angle_noise")
 
 
 def apply_noise_configuration(problem_cfg: dict) -> dict:
-    """Zero all stochastic model parameters when the problem disables noise.
-
-    `noise_enabled: false` (top-level yaml key, default true) turns off the
-    simulated mocap/encoder measurement noise in place, so every consumer of
-    the config (simulation, gain tuning, trajectory-optimization FIM
-    variances) sees a deterministic model.
-
-    NB: the gain-tuning FIM relies on measurement/encoder noise for
-    observability of the motor feedback gains (see
-    trajectory_optimization.pipeline closed_loop_gain_measurement_sequence);
-    expect a near-singular FIM in that mode with noise disabled.
-    """
+    """Zero the simulated measurement noise when the problem sets
+    ``noise_enabled: false`` (the gain-tuning FIM then becomes near-singular in
+    the motor gains)."""
     if problem_cfg.get("noise_enabled", True):
         return problem_cfg
     estimator_cfg = problem_cfg.get("estimator", {})
@@ -43,13 +33,8 @@ def apply_noise_configuration(problem_cfg: dict) -> dict:
 
 
 def advance_logged_series(time_s, values, lead_s: float):
-    """Shift a logged (N, K) series earlier in time by ``lead_s``.
-
-    JAX (differentiable) counterpart of ``pololu.measurement_smoothing.shift_series``:
-    the value returned at t is the logged value at t + lead_s, linearly
-    interpolated and held at the last sample. ``lead_s <= 0`` returns the series
-    unchanged.
-    """
+    """Shift a logged (N, K) series earlier in time by ``lead_s`` (JAX
+    counterpart of ``pololu.measurement_smoothing.shift_series``)."""
     if lead_s <= 0.0:
         return values
     query_time = time_s + lead_s
@@ -69,8 +54,7 @@ class SimulationPipeline:
         residual_model=None,
         sim_time: float | None = None,
     ):
-        # Optional learned residual dynamics (residual_model.residual.ResidualEnsemble);
-        # None keeps the nominal dynamics untouched.
+        # Optional residual dynamics (None: nominal model).
         self.residual_model = residual_model
         with open(problem_path, "r", encoding="utf-8") as file:
             problem_cfg = yaml.safe_load(file)
@@ -117,11 +101,8 @@ class SimulationPipeline:
         self.robot_cfg = self.problem["robot"]
         self.estimator_cfg = self.problem["estimator"]
         self.controller_cfg = self.problem["controller"]
-        # Logged ("estimated") wheel speeds are what the log loader makes of a
-        # recorded run (pololu.log_loader): the firmware low-pass inverted and
-        # the remaining lag against the mocap taken out. Here that is the raw
-        # encoder speed u_hat -- the increment over the last wheel step, which
-        # lags the true speed by half a step -- read half a step later.
+        # Logged ("estimated") wheel speeds correspond to the log loader's output:
+        # the raw encoder speed advanced by half a wheel step.
         self.wheel_log_lead_s = 0.5 * self.wheel_dt
 
         self.robot = DiffDrive(robot_cfg=self.robot_cfg, dt=self.wheel_dt)
@@ -150,8 +131,7 @@ class SimulationPipeline:
         self.gain_parametrization_enabled = (
             bool(gain_parametrization_cfg.get("enabled", False)) if gain_parametrization_cfg else False
         )
-        # The MLP's velocity features are normalized by the robot velocity limits
-        # so that they land in ~[-1, 1].
+        # The MLP's velocity features are normalized by the robot velocity limits.
         v_max = float(self.robot_cfg.get("v_max", 1.0)) or 1.0
         omega_max = float(self.robot_cfg.get("omega_max", 1.0)) or 1.0
         self.v_max = v_max
@@ -161,14 +141,29 @@ class SimulationPipeline:
             gain_parametrization_cfg, self.gain_parametrization_feature_scale
         )
 
-        # Compiled batch rollouts, keyed by the options that are static to the
-        # traced function (see run_closed_loop_batch).
-        self._batch_rollout_cache: dict[tuple, object] = {}
 
         master_key = jax.random.PRNGKey(seed)
         target_key, replay_key = jax.random.split(master_key, 2)
         self.target_robot_key, self.target_estimator_key = jax.random.split(target_key, 2)
         self.robot_key, self.estimator_key = jax.random.split(replay_key, 2)
+
+    def extend_time_grids(self, num_reference_samples: int) -> None:
+        """Grow the time grids when a reference outlasts the problem's sim_time."""
+        if num_reference_samples <= len(self.reference_time_grid):
+            return
+        duration = (num_reference_samples - 1) * self.geometry_dt
+        self.sim_time = duration
+        self.reference_time_grid = self._time_grid(duration, self.geometry_dt)
+        self.pose_time_grid = self._time_grid(duration, self.wheel_dt)
+        self.sim_time_grid = self.pose_time_grid
+        self.wheel_time_grid = self.pose_time_grid - self.wheel_dt
+        self.command_time_grid = self.reference_time_grid[:-1] + 0.5 * self.wheel_dt
+        self.reference_pose_indices = np.arange(
+            0,
+            len(self.reference_time_grid) * self.inner_steps_per_geometry_step,
+            self.inner_steps_per_geometry_step,
+            dtype=np.int32,
+        )
 
     @staticmethod
     def _time_grid(duration: float, dt: float) -> np.ndarray:
@@ -229,8 +224,7 @@ class SimulationPipeline:
         robot_state = self.robot.get_init_state(key=robot_key, init_pose=pose0)
         estimator_state = self.estimator.get_init_state(key=estimator_key, start_pose=pose0)
         if wheel_speeds is not None:
-            # A rollout that starts mid-run (residual_model.closed_loop): the
-            # wheels already turn, and the estimator has measured it.
+            # A rollout that starts with turning wheels.
             wheel_speeds = jnp.asarray(wheel_speeds, dtype=jnp.float32)
             robot_state = robot_state._replace(wheel_speeds=wheel_speeds)
             estimator_state = estimator_state._replace(u_hat=wheel_speeds, u_true=wheel_speeds, u_lp=wheel_speeds)
@@ -261,11 +255,8 @@ class SimulationPipeline:
         """Roll out the closed loop along ``reference_states``.
 
         ``initial_pose`` [x, y, theta] starts the robot (and its estimator)
-        somewhere other than the reference's first pose. Comparing a simulated
-        run against a recorded one needs it: the real robot is never placed
-        exactly on the reference start, and the initial offset it has to drive
-        out is part of what the tracking error measures. ``initial_wheel_speeds``
-        [right, left] starts it moving (default at rest).
+        away from the reference's first pose; ``initial_wheel_speeds``
+        [right, left] starts it moving (default: at rest).
         """
         if wheel_speed_log_source not in {"estimated", "true"}:
             raise ValueError("wheel_speed_log_source must be 'estimated' or 'true'.")
@@ -288,9 +279,7 @@ class SimulationPipeline:
         def geometry_step(carry, ref_state):
             robot_state, estimator_state, controller_state = carry
             pose_est = self.estimator.get_est_pose(estimator_state)
-            # Parametrized gains are computed once per geometry step (from the
-            # reference and the same estimates the controller sees) and reused
-            # by the inner loop.
+            # Scheduled gains are computed once per geometry step.
             if schedule_params is None:
                 step_gains = controller_gains
                 log_gains = nominal_gains
@@ -316,8 +305,7 @@ class SimulationPipeline:
 
             def wheel_step(inner_carry, inner_index):
                 inner_robot_state, inner_estimator_state, inner_controller_state = inner_carry
-                # Firmware shifts the wheel ticker half a period after the outer tick, so the
-                # wheel loop sees the fresh command on its first step.
+                # The wheel loop sees the fresh command on its first step.
                 wheel_est = self.estimator.get_est_wheel_speeds(inner_estimator_state)
                 next_controller_state, applied_duty_cycle = self.controller.compute_duty(
                     inner_controller_state,
@@ -432,65 +420,6 @@ class SimulationPipeline:
                 gains=applied_gains,
             ),
         )
-
-    def run_closed_loop_batch(
-        self,
-        robot_params: PhysicalParams,
-        reference_trajectories,
-        use_hidden_robot: bool = False,
-        controller_gains=None,
-        schedule_params=None,
-        wheel_speed_log_source: str = "estimated",
-        residual_model=None,
-        est_params: PhysicalParams | None = None,
-    ) -> SimulationLog:
-        """Roll out one closed loop per reference trajectory in a single call.
-
-        The returned :class:`SimulationLog` has a leading trajectory axis on
-        every field. Eager ``run_closed_loop`` calls each cost a fresh XLA
-        compile of the rollout scan (~0.2 s), which dominates plotting a set of
-        trajectories; vmapping under one jit makes it a single compile that is
-        then cached for later calls with the same batch shape.
-        """
-        cache = self._batch_rollout_cache
-        key = (
-            bool(use_hidden_robot),
-            wheel_speed_log_source,
-            controller_gains is None,
-            schedule_params is None,
-            est_params is None,
-            id(residual_model),
-        )
-        rollout = cache.get(key)
-        if rollout is None:
-
-            def rollout(params, estimator_params, gains, schedule, references):
-                def single(reference_states):
-                    return self.run_closed_loop(
-                        params,
-                        est_params=estimator_params,
-                        use_hidden_robot=use_hidden_robot,
-                        controller_gains=gains,
-                        schedule_params=schedule,
-                        wheel_speed_log_source=wheel_speed_log_source,
-                        residual_model=residual_model,
-                        reference_states=reference_states,
-                    )
-
-                return jax.vmap(single)(references)
-
-            rollout = jax.jit(rollout)
-            cache[key] = rollout
-        return rollout(
-            robot_params,
-            est_params,
-            controller_gains,
-            schedule_params,
-            jnp.asarray(reference_trajectories, dtype=jnp.float32),
-        )
-
-    def simulate(self, *args, **kwargs):
-        return self.run_closed_loop(*args, **kwargs)
 
 
 def make_replay_segment_plan(

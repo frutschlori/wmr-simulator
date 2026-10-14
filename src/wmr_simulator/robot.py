@@ -16,19 +16,13 @@ class DiffDriveState(NamedTuple):
     vel_omega: jax.Array      #  [v, w]
     duty_cycle: jax.Array     # motor duty cycles in [-1, 1]
     wheel_speed_cmd: jax.Array  # desired wheel speed command for diagnostics
-    # Lateral body velocity (scalar). Always 0 (a true two-wheel differential
-    # drive has no chassis side-slip, and the residual only corrects v/omega);
-    # kept separate from vel_omega so the logged [v, omega] shape is unaffected.
+    # Lateral body velocity (scalar, always 0).
     vel_lateral: jax.Array = np.zeros((), dtype=np.float32)
 
 
 def body_velocities(wheel_speeds, wheel_radius, base_diameter):
-    """Body velocities (v, omega) from wheel speeds.
-
-    ``base_diameter`` is the *effective* wheelbase (see DiffDrive.__init__).
-    This is ideal differential-drive kinematics (no lateral body velocity: a
-    true two-wheel differential drive has no chassis side-slip).
-    """
+    """Body velocities (v, omega) from wheel speeds (ideal differential-drive
+    kinematics with the effective wheelbase ``base_diameter``)."""
     ur, ul = wheel_speeds[0], wheel_speeds[1]
     v = 0.5 * wheel_radius * (ur + ul)
     omega = wheel_radius * (ur - ul) / base_diameter
@@ -53,10 +47,7 @@ class DiffDrive:
     def __init__(self, robot_cfg, dt=0.01):
         # static model physical parameters
         self.r = robot_cfg['wheel_radius']
-        # Effective wheelbase: tire scrub in turns acts as a constant multiplicative
-        # wheelbase correction that is not separately identifiable from the geometric
-        # wheelbase (Borenstein & Feng 1996, E_b). Configure/identify the effective
-        # value directly.
+        # Effective wheelbase (absorbs tire scrub in turns).
         self.L = robot_cfg['base_diameter']
         # max wheel speed
         self.max_wheel_speed = robot_cfg['max_wheel_speed']
@@ -76,7 +67,7 @@ class DiffDrive:
         max_wheel_speed=None,
         time_constant=None,
     ):
-        # optionally accept explicit physical parameters s.t. SI-loop can differentiate through module
+        # Explicit physical parameters, so identification can differentiate through them.
         r = self.r if wheel_radius is None else wheel_radius
         L = self.L if base_diameter is None else base_diameter
         max_speed = self.max_wheel_speed if max_wheel_speed is None else max_wheel_speed
@@ -105,28 +96,18 @@ class DiffDrive:
         # 1) Saturate duty cycle commands
         duty_cycle = np.clip(duty_cycle, min=-1.0, max=1.0)
 
-        # 2) First-order wheel dynamics (discrete), motor side (what the encoders
-        #    see). This is the *nominal* lag prediction; a learned residual may
-        #    correct it below.
+        # 2) First-order wheel dynamics (discrete), motor side.
         target_wheel_speeds = max_speed * duty_cycle
         nominal_lag_wheel_speeds = alpha * state.wheel_speeds + (1.0 - alpha) * target_wheel_speeds
 
         logged_wheel_speed_cmd = target_wheel_speeds if wheel_speed_cmd is None else wheel_speed_cmd
         next_wheel_speeds = nominal_lag_wheel_speeds
-        # 3) Body velocities (effective wheelbase, ideal differential-drive
-        #    kinematics). There is no traction model: slip is left to the residual.
+        # 3) Body velocities (ideal differential-drive kinematics).
         v_nom, w_nom = body_velocities(next_wheel_speeds, r, L)
 
         if residual_model is not None:
-            # 4) Learned additive residual (see residual_model.residual):
-            #    conditioned on the (state, action) pair -- the nominal predicted
-            #    twist and the commanded twist the lag is heading toward -- it
-            #    corrects the forward speed and yaw rate the ideal kinematics get
-            #    wrong. The action half is what lets it express transient errors
-            #    (motor time constant, delay, backlash), which are proportional to
-            #    command minus state. A mixture-of-experts gate zeroes the
-            #    correction in operating regimes the training data never covered.
-            #    No lateral side-slip in nominal operation, so v_y stays 0.
+            # 4) Additive residual on [v, omega] from the nominal and the
+            #    commanded twist (residual_model.residual).
             v_cmd, w_cmd = body_velocities(target_wheel_speeds, r, L)
             delta = apply_residual_model(
                 residual_model, residual_features(v_nom, w_nom, v_cmd, w_cmd)
@@ -136,7 +117,7 @@ class DiffDrive:
         else:
             v = v_nom
             w = w_nom
-        # 5) Pose integration (ideal differential-drive kinematics, v_y = 0).
+        # 5) Pose integration.
         next_pose = integrate_planar_pose(state.pose, v, w, dt)
 
         # Logged vel_omega stays [v_x_body, omega].
@@ -201,9 +182,6 @@ class DiffDrive:
     def get_pose(state):
         return state.pose
 
-    @staticmethod
-    def get_wheel_speeds(state):
-        return state.wheel_speeds
 
     @staticmethod
     def _wrap_to_pi(angle):

@@ -3,15 +3,8 @@ import jax.numpy as jnp
 from wmr_simulator.types import PhysicalParams, SimulationLog
 
 
-# The position residual is scored along the measured heading only. The nominal
-# model cannot move sideways, so the lateral residual holds whatever moves the
-# tracked point sideways besides turning: a mocap rigid-body origin off the axle
-# (lateral speed d * omega) and sideslip in turns. Fitted against it, the
-# wheelbase absorbed both (2026-10-07, real robot: 98-103 mm against 87-89 from
-# the heading alone and from encoder vs gyro yaw rate; in MuJoCo, with the mocap
-# point on the axle, both fits give 85 mm against a true 84.9 on the identified
-# phase). The longitudinal residual pins the wheel radius, the heading one the
-# wheelbase.
+# The position residual is scored along the measured heading only: the lateral
+# residual holds mocap offsets and sideslip the nominal model cannot produce.
 
 
 def _longitudinal_error(predicted_poses, target_poses):
@@ -49,12 +42,7 @@ def pose_loss_variances(pipeline, target_log: SimulationLog):
 def input_pose_variances(pipeline, target_log: SimulationLog):
     estimator = pipeline.estimator
     theta = target_log.pose.states[:-1, 2]
-    # Encoder increment noise only, and constant per wheel. The multiplicative
-    # slip term that used to scale this by dphi^2 (with the encoder variance
-    # subtracted off so it was not double counted) went with the random-slippage
-    # model itself, which is no longer in the plant -- weighting residuals for a
-    # disturbance the simulator never generates only mis-scales the fit. Losing
-    # the dphi dependence is why the wheel-speed lookup above is gone too.
+    # Encoder increment noise, constant per wheel.
     encoder_variance = estimator.enc_angle_noise ** 2
     wheel_increment_variance = jnp.full((theta.shape[0], 2), encoder_variance, dtype=jnp.float32)
     cos_theta = jnp.cos(theta)

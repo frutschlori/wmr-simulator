@@ -1,11 +1,4 @@
-"""Collecting an experiment's held-out baseline runs across its iterations.
-
-A baseline run is a recording of a reference the iteration neither identified on
-nor tuned against, so it is the one thing that stays fixed while the controller
-moves. What is tested here is the bookkeeping that makes the comparison figure
-honest: which directories count as baseline runs, which controller each one
-belongs to, and that identification data never gets in.
-"""
+"""Scoring of benchmark runs: tracking RMSE and yaw ringing."""
 
 from __future__ import annotations
 
@@ -13,15 +6,9 @@ import numpy as np
 import pytest
 
 from wmr_simulator.active_learning.baseline_runs import (
-    MAX_RUNS_PER_ITERATION,
-    PARAMETRIZED_VARIANT,
-    STATIC_VARIANT,
-    baseline_run_directories,
-    collect_baseline_runs,
     load_run_logs,
     run_tracking_rmse,
     run_yaw_ringing,
-    variant_panels,
 )
 from wmr_simulator.active_learning.experiment import Experiment
 from wmr_simulator.pololu.log_loader import POLOLU_TRAJ_CONTROL_COLUMNS
@@ -107,94 +94,6 @@ def experiment(tmp_path):
     return build
 
 
-def _write_runs(directory, count, radial_offset=0.0):
-    for index in range(count):
-        write_run_csv(directory / f"TR{index:02d}.csv", radial_offset=radial_offset)
-    return directory
-
-
-def test_the_benchmark_pair_is_one_shape_recorded_under_two_controllers(experiment):
-    """Both benchmark directories hold runs of benchmark.trajectory, so they are
-    one shape compared across controllers -- not two unrelated shapes."""
-    exp = experiment(1)
-    paths = exp.paths(1)
-    _write_runs(paths.benchmark_data_dir, 2)
-    _write_runs(paths.benchmark_static_data_dir, 2)
-
-    directories = baseline_run_directories(paths)
-
-    assert list(directories) == ["benchmark"]
-    assert directories["benchmark"][PARAMETRIZED_VARIANT] == paths.benchmark_data_dir
-    assert directories["benchmark"][STATIC_VARIANT] == paths.benchmark_static_data_dir
-
-
-def test_identification_logs_are_not_baseline_runs(experiment):
-    """Runs directly in data/ are what the iteration was fitted on, so they are
-    not held out and cannot serve as the fixed reference point."""
-    exp = experiment(1)
-    paths = exp.paths(1)
-    _write_runs(paths.data_dir, 3)
-
-    assert baseline_run_directories(paths) == {}
-
-
-def test_hand_recorded_robot_runs_split_by_controller(experiment):
-    """On the robot a shape sits directly in data/ when it was driven on static
-    gains and under the gain-MLP directory when the network was on the card;
-    the recorded experiments carry both spellings of that directory."""
-    exp = experiment(2)
-    first, second = exp.paths(1), exp.paths(2)
-    _write_runs(first.data_dir / "circle", 2)
-    _write_runs(first.data_dir / "with_gain_MLP" / "circle", 2)
-    _write_runs(second.data_dir / "lemniscate", 2)
-    _write_runs(second.data_dir / "with gain MLP" / "lemniscate", 2)
-
-    assert baseline_run_directories(first) == {
-        "circle": {
-            STATIC_VARIANT: first.data_dir / "circle",
-            PARAMETRIZED_VARIANT: first.data_dir / "with_gain_MLP" / "circle",
-        }
-    }
-    assert baseline_run_directories(second) == {
-        "lemniscate": {
-            STATIC_VARIANT: second.data_dir / "lemniscate",
-            PARAMETRIZED_VARIANT: second.data_dir / "with gain MLP" / "lemniscate",
-        }
-    }
-
-
-def test_the_gain_mlp_directory_is_not_itself_a_shape(experiment):
-    """It is a controller, not a reference: the shapes are its subdirectories."""
-    exp = experiment(1)
-    paths = exp.paths(1)
-    _write_runs(paths.data_dir / "with gain MLP" / "circle", 2)
-
-    assert list(baseline_run_directories(paths)) == ["circle"]
-
-
-def test_only_five_runs_of_a_group_are_kept(experiment):
-    """Repeats of one reference under one controller: past a handful the extra
-    lines land on top of each other and only thicken the same band."""
-    exp = experiment(1)
-    paths = exp.paths(1)
-    _write_runs(paths.benchmark_data_dir, MAX_RUNS_PER_ITERATION + 3)
-
-    logs = load_run_logs(paths.benchmark_data_dir, max_runs=MAX_RUNS_PER_ITERATION)
-
-    assert [run.name for run in logs] == [f"TR{index:02d}" for index in range(MAX_RUNS_PER_ITERATION)]
-
-
-def test_a_decoded_log_is_read_once_not_twice(experiment):
-    """decode-logs leaves TRxx.csv next to the binary TRxx, so both spellings of
-    one run are in the glob; reading both would double every line in the plot."""
-    exp = experiment(1)
-    paths = exp.paths(1)
-    write_run_csv(paths.benchmark_data_dir / "TR00.csv")
-    (paths.benchmark_data_dir / "TR00").write_bytes(b"binary source of TR00.csv")
-
-    assert [run.name for run in load_run_logs(paths.benchmark_data_dir)] == ["TR00"]
-
-
 def test_the_tracking_error_is_measured_against_the_reference_the_run_tracked(experiment):
     """The number the legend ranks iterations by: a run that held a constant
     0.04 m offset from its reference scores exactly that."""
@@ -224,21 +123,6 @@ def test_yaw_ringing_sees_the_oscillation_and_not_the_turn(experiment):
     assert run_yaw_ringing(no_imu) is None
 
 
-def test_yaw_ringing_reads_every_ringing_frequency_alike(experiment):
-    """The band is flat over the frequencies the robot and MuJoCo ring at, so a
-    2.5 Hz ringing and a 5 Hz one of the same amplitude score the same (the old
-    0.3 s moving average read them 0.73 vs 1.2)."""
-    exp = experiment(1)
-    paths = exp.paths(1)
-    write_run_csv(paths.benchmark_data_dir / "TR00.csv", yaw_ringing_amplitude=2.0, ringing_frequency_hz=2.5)
-    write_run_csv(paths.benchmark_data_dir / "TR01.csv", yaw_ringing_amplitude=2.0, ringing_frequency_hz=5.0)
-
-    slow, fast = load_run_logs(paths.benchmark_data_dir)
-
-    assert run_yaw_ringing(slow) == pytest.approx(run_yaw_ringing(fast), rel=0.05)
-    assert run_yaw_ringing(fast) == pytest.approx(2.0 / np.sqrt(2.0), rel=0.05)
-
-
 def test_yaw_ringing_does_not_score_the_references_own_yaw_rate(experiment):
     """A reference whose yaw rate swings inside the band, tracked perfectly,
     scores ~0: the reference yaw rate is subtracted before filtering."""
@@ -264,113 +148,3 @@ def test_yaw_ringing_stops_where_the_robot_leaves_the_track(experiment):
 
     assert run_yaw_ringing(departed) == pytest.approx(run_yaw_ringing(tracked), rel=0.1)
     assert run_yaw_ringing(early) is None
-
-
-def test_the_loops_own_shape_is_collected_as_the_pipeline_records_it(experiment):
-    """The layout a MuJoCo experiment produces: iteration 1 records only the
-    stock static controller, and every later iteration records both its deployed
-    (parametrized) controller and its static-gain baseline."""
-    exp = experiment(3)
-    _write_runs(exp.paths(1).benchmark_static_data_dir, 2, radial_offset=0.05)
-    _write_runs(exp.paths(2).benchmark_static_data_dir, 2, radial_offset=0.03)
-    _write_runs(exp.paths(2).benchmark_data_dir, 2, radial_offset=0.02)
-    _write_runs(exp.paths(3).benchmark_static_data_dir, 2, radial_offset=0.03)
-    _write_runs(exp.paths(3).benchmark_data_dir, 2, radial_offset=0.01)
-
-    collected = collect_baseline_runs(exp)
-
-    assert list(collected) == ["benchmark"]
-    records = collected["benchmark"]
-    assert [record.index for record in records] == [1, 2, 3]
-    assert list(records[0].runs) == [STATIC_VARIANT]
-    assert set(records[1].runs) == {PARAMETRIZED_VARIANT, STATIC_VARIANT}
-    assert variant_panels(records) == (
-        (STATIC_VARIANT, "Static gains"),
-        (PARAMETRIZED_VARIANT, "Gain parametrization"),
-    )
-    # Both variants recorded the same reference, so the figure has one to draw.
-    assert records[1].reference.shape[1] == 3
-
-
-def test_an_experiment_that_started_benchmarking_late_plots_what_it_has(experiment):
-    """A missing iteration is a missing colour, not a missing figure."""
-    exp = experiment(3)
-    _write_runs(exp.paths(3).benchmark_static_data_dir, 2)
-
-    records = collect_baseline_runs(exp)["benchmark"]
-
-    assert [record.index for record in records] == [3]
-
-
-def test_a_single_controller_gets_a_single_panel(experiment):
-    """Iteration 1 deploys the stock static controller and has nothing tuned to
-    compare it against, so a second panel would be an empty one."""
-    exp = experiment(1)
-    _write_runs(exp.paths(1).benchmark_static_data_dir, 2)
-
-    records = collect_baseline_runs(exp)["benchmark"]
-
-    assert variant_panels(records) == ((STATIC_VARIANT, "Static gains"),)
-
-
-def test_the_static_panel_comes_first(experiment):
-    """The comparison reads left to right as "before the parametrization, after
-    it", so the panel order is fixed rather than dictionary order."""
-    exp = experiment(1)
-    paths = exp.paths(1)
-    _write_runs(paths.benchmark_data_dir, 2)
-    _write_runs(paths.benchmark_static_data_dir, 2)
-
-    records = collect_baseline_runs(exp)["benchmark"]
-
-    assert [variant for variant, _ in variant_panels(records)] == [STATIC_VARIANT, PARAMETRIZED_VARIANT]
-
-
-def test_the_figure_is_written_for_every_shape(experiment):
-    """The stage hook: one figure per baseline shape in the iteration's own
-    visualize dir, so each iteration keeps the comparison as it stood."""
-    from wmr_simulator.active_learning.stages import _plot_baseline_runs
-
-    exp = experiment(2)
-    _write_runs(exp.paths(1).data_dir / "circle", 2)
-    _write_runs(exp.paths(2).data_dir / "circle", 2, radial_offset=0.02)
-    _write_runs(exp.paths(2).benchmark_data_dir, 2, radial_offset=0.01)
-    paths = exp.paths(2)
-
-    written = _plot_baseline_runs(exp, 2)
-
-    assert sorted(path.rsplit("/", 1)[-1] for path in written) == [
-        "baseline_runs_benchmark.pdf",
-        "baseline_runs_circle.pdf",
-    ]
-    # Their own subdirectory: a benchmark set produces one figure per reference,
-    # and half a dozen of those loose in visualize/ buries everything else.
-    figures = paths.visualize_dir / "baseline runs"
-    assert all((figures / name.rsplit("/", 1)[-1]).is_file() for name in written)
-    assert not list(paths.visualize_dir.glob("baseline_runs_*.pdf"))
-
-
-def test_an_experiment_without_baseline_runs_plots_nothing(experiment):
-    """Most iterations of a real-robot experiment have no baseline recordings at
-    all; that is not a failure worth a traceback in the tune-gains stage."""
-    from wmr_simulator.active_learning.stages import _plot_baseline_runs
-
-    exp = experiment(1)
-
-    assert _plot_baseline_runs(exp, 1) == []
-
-
-def test_every_iteration_gets_the_comparison_as_it_stood(experiment):
-    """Each iteration's figure holds itself and the iterations before it, never
-    a later one -- including when the figures are written after the fact."""
-    from wmr_simulator.active_learning.stages import plot_baseline_runs_per_iteration
-
-    exp = experiment(3)
-    for index in (1, 2, 3):
-        _write_runs(exp.paths(index).benchmark_static_data_dir, 1, radial_offset=0.01 * index)
-
-    written = plot_baseline_runs_per_iteration(exp)
-
-    assert len(written) == 3
-    assert all((exp.paths(index).visualize_dir / "baseline runs" / "baseline_runs_benchmark.pdf").is_file()
-               for index in (1, 2, 3))

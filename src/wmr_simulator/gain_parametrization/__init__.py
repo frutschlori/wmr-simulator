@@ -1,12 +1,5 @@
-"""Controller-gain parametrization.
-
-This package owns the mapping
-
-    base gains + parametrization parameters + rollout context -> controller gains
-
-for closed-loop simulation and gain tuning. The one implementation is the
-tracking-error MLP over the schedulable gains (``error_mlp``).
-"""
+"""Controller-gain parametrization: base gains + parameters + rollout context
+-> controller gains (implemented by ``error_mlp``)."""
 
 from __future__ import annotations
 
@@ -40,14 +33,8 @@ def params_from_cfg(cfg: dict | None, feature_scale) -> ErrorMlpParams:
 
 
 def gains_over_samples(base_gains, params, ref_states, pose_states, twist_states):
-    """Applied controller gains for a batch of geometry-step samples.
-
-    Vectorizes :func:`apply` over stacked ``ref_states`` ``(N, 8)``, ``pose_states``
-    ``(N, 3)`` and ``twist_states`` ``(N, 2)`` and returns ``(N, num_gains)``.
-    This is the offline counterpart to the gains a closed-loop rollout records:
-    replaying it on a recorded log's reference/pose/twist recovers the gains the
-    on-robot controller applied without logging them on the firmware.
-    """
+    """Applied controller gains ``(N, num_gains)`` for stacked ``ref_states``
+    ``(N, 8)``, ``pose_states`` ``(N, 3)`` and ``twist_states`` ``(N, 2)``."""
     import jax.numpy as jnp
 
     base = jnp.asarray(base_gains)

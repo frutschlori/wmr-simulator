@@ -24,23 +24,15 @@ OPTIMIZER_ADAM = "adam"
 OPTIMIZER_BFGS = "bfgs"
 OPTIMIZERS = (OPTIMIZER_ADAM, OPTIMIZER_BFGS)
 
-# One bounded BFGS solve, in optimistix steps. Those steps are *line-search
-# trials*, not accepted updates, so this is not a step count: measured on this
-# objective, a budget of 5 does not leave the initial point at all, 15 crawls,
-# 40 reaches the conditional optimum. `--steps` is then split into chunks of
-# this size, which also gives the loss history one point per chunk.
+# Optimistix steps (line-search trials) per bounded BFGS solve; the step
+# budget is split into solves of this size.
 _BFGS_STEPS_PER_SOLVE = 40
 _BFGS_RTOL = 1e-4
 _BFGS_ATOL = 1e-8
 
 
 def describe_optimizer(optimizer: str, num_steps: int, learning_rate: float | None = None) -> str:
-    """One-line description of the refinement budget, for log lines.
-
-    The two optimizers read ``num_steps`` differently and only Adam has a
-    learning rate, so every message that reports the budget goes through here
-    instead of assuming Adam.
-    """
+    """One-line description of the refinement budget, for log lines."""
     optimizer = optimizer.strip().lower()
     if optimizer == OPTIMIZER_BFGS:
         return (
@@ -54,7 +46,6 @@ def describe_optimizer(optimizer: str, num_steps: int, learning_rate: float | No
 
 _NUM_GAINS = NUM_GAINS
 _NUM_STABLE_GAINS = 4
-_GAIN_NAMES = GAIN_NAMES
 _LOSS_COMPONENT_NAMES = (
     "position_tracking",
     "heading_tracking",
@@ -68,15 +59,13 @@ _LOSS_COMPONENT_NAMES = (
 
 
 # ---------------------------------------------------------------------------
-# Optimizer-value <-> controller-gain reparametrization (base gains only)
+# Optimizer values <-> controller gains
 #
-# The trainable vector is [gain_values(6), parametrization_flat(num_w)]. The first six entries
-# are the base gain vector in a bounded reparam space (log-space for the four
-# "stable" gains, sqrt-space over [0, k_max_rest] for the motor I and D gains,
-# which may be exactly 0); they are clipped to [0, 1]. A sqrt-space gain that
-# starts at exactly 0 has zero gradient and stays there.
-# The trailing parametrization entries are linear (can be negative) and are not
-# clipped here; each parametrization is responsible for bounding its own effect.
+# The trainable vector is [gain_values(6), parametrization_flat(num_w)]. The
+# gain values lie in [0, 1]: log space for the first four gains, sqrt space
+# over [0, k_max_rest] for kimotor and kdmotor (which may be exactly 0; a
+# sqrt-space gain that starts at 0 has zero gradient). The parametrization
+# entries are unbounded.
 # ---------------------------------------------------------------------------
 
 
@@ -124,12 +113,8 @@ def _with_motor_zero_variants(values: jax.Array) -> jax.Array:
 
 
 def _relative_lhs_values(unit_samples, center_values, relative_range, k_min_stab, k_max_stab, k_max_rest):
-    """Map unit LHS samples into a per-gain band of +/- ``relative_range`` around
-    the center gains (in gain space), returned as optimizer values.
-
-    The gain transform is monotonic, so the gain-space band maps to a per-dim
-    optimizer-space box; a disabled gain (0) keeps a zero-width band.
-    """
+    """Map unit LHS samples into a per-gain band of +/- ``relative_range``
+    around the center gains, returned as optimizer values."""
     center_gains = controller_gains_from_optimizer_values(
         center_values, k_min_stab=k_min_stab, k_max_stab=k_max_stab, k_max_rest=k_max_rest
     )
@@ -153,15 +138,9 @@ def _candidate_optimizer_values(
     k_max_rest=20.0,
     w_init=None,
 ):
-    """Build candidate vectors of width (NUM_GAINS + num_w). LHS searches the gain part.
-
-    ``init_gain_values`` may hold several rows; each becomes its own candidate.
-    When ``presearch_relative_range`` > 0 the LHS samples a +/- band around the
-    (first) init gains instead of the full [k_min_stab, k_max_stab] range. The
-    parametrization part is the same for every candidate: ``w_init`` (identity
-    when None), so the presearch scores the gains with the parametrization it
-    will be optimized with.
-    """
+    """Candidate vectors of width (NUM_GAINS + num_w): the init gains plus
+    LHS samples of the gain part (over the full range, or a band around the
+    first init gains). The parametrization part is ``w_init`` (None: identity)."""
     init_gain_values = jnp.atleast_2d(init_gain_values)
     if num_lhs_points <= 0:
         gain_candidates = init_gain_values
@@ -211,14 +190,11 @@ def _make_terms_for_values(
     reference_trajectories = (
         None if reference_trajectories is None else jnp.asarray(reference_trajectories, dtype=jnp.float32)
     )
-    # (T, R) per-rollout weights, or None for an unweighted mean. Frozen for the
-    # run (see ``rollout_outlier_weights``), so the objective stays a smooth
-    # function of the gains.
+    # (T, R) per-rollout weights (None: unweighted), frozen for the run.
     realization_weights = (
         None if realization_weights is None else jnp.asarray(realization_weights, dtype=jnp.float32)
     )
-    # (R, 3) -- one offset set shared by every trajectory (the tuner's own draw)
-    # -- or (T, R, 3), one set per trajectory, as read off the design pickles.
+    # (R, 3) shared by all trajectories, or (T, R, 3) per trajectory.
     initial_pose_offsets = (
         None if initial_pose_offsets is None else jnp.asarray(initial_pose_offsets, dtype=jnp.float32)
     )
@@ -275,10 +251,7 @@ def _make_terms_for_values(
                 replay_estimator_keys,
                 weights=None if realization_weights is None else realization_weights[0],
             )
-        # A trajectory whose rollouts were all dropped must not contribute at all,
-        # so the outer mean over trajectories is weighted too -- otherwise
-        # ``weighted_realization_mean``'s all-zero fallback would quietly put it
-        # back in at full strength.
+        # A trajectory whose rollouts were all dropped gets weight 0.
         trajectory_weights = (
             None if realization_weights is None else jnp.max(realization_weights, axis=1)
         )
@@ -321,11 +294,7 @@ def per_rollout_losses(
     omega_delta_weight=0.0,
     key_namespace=TRAINING_KEY_NAMESPACE,
 ) -> np.ndarray:
-    """``(T, R)`` total loss of every single rollout at one gain vector.
-
-    The objective the optimizer sees is the mean of these; this is the
-    breakdown, used to spot a rollout that has diverged.
-    """
+    """``(T, R)`` total loss of every single rollout at one gain vector."""
     reference_trajectories = jnp.asarray(reference_trajectories, dtype=jnp.float32)
     num_trajectories = int(reference_trajectories.shape[0])
     robot_keys = split_realization_keys_by_trajectory(
@@ -366,25 +335,12 @@ def per_rollout_losses(
 
 
 def rollout_outlier_weights(losses: np.ndarray, outlier_loss_factor: float):
-    """0/1 weights dropping rollouts whose loss dwarfs the median.
+    """0/1 weights dropping rollouts whose loss exceeds ``outlier_loss_factor``
+    times the median (a diverging rollout stalls the line search).
 
-    A single diverging rollout is enough to stall the whole BFGS solve: measured
-    on ``gain_optimized_current`` at ``noise_angle`` 0.01 / seed 0, one rollout
-    scored 1.287 against a 0.0075 median and was 86% of the training loss, so it
-    dominated the gradient, the backtracking line search never found a
-    sufficient decrease, and the tuner returned the stock gains untouched. The
-    same rollout tracks at 0.019 pose RMSE under the *tuned* gains, so it is not
-    an impossible trajectory -- the outlier is what blocks the solver from
-    reaching the gains that fix it.
-
-    The mask is computed once, at the initial gains, and then frozen. Deciding
-    per evaluation instead would make the objective discontinuous exactly where
-    a rollout crosses the threshold, which is a worse problem for a line search
-    than the outlier itself.
-
-    ``outlier_loss_factor <= 0`` disables the check. Never drops everything: if
-    the rule would empty the set (all rollouts equally bad), it keeps all of
-    them, since that is a broken configuration rather than an outlier.
+    Computed once at the initial gains, so the objective stays smooth.
+    ``outlier_loss_factor <= 0`` disables the check; if every rollout would be
+    dropped, all are kept.
     """
     losses = np.asarray(losses, dtype=float)
     weights = np.ones_like(losses)
@@ -460,7 +416,7 @@ def _select_initial_optimizer_values(
         dtype=float,
     )
     for rank, (candidate_index, gains) in enumerate(zip(top_indices, top_gains), start=1):
-        gain_text = ", ".join(f"{name}={value:.7g}" for name, value in zip(_GAIN_NAMES, gains))
+        gain_text = ", ".join(f"{name}={value:.7g}" for name, value in zip(GAIN_NAMES, gains))
         print(f"  {rank}. loss={candidate_losses[candidate_index]:.8f}  {gain_text}")
     return candidate_values[jnp.asarray(best_indices)], candidate_losses[best_indices], best_indices
 
@@ -506,8 +462,7 @@ def _run_adam_optimizer(
         terms = loss_terms_for_optimizer_values(values)
         return jnp.sum(terms), terms
 
-    # Score used to keep the best iterate: the validation loss when there is a
-    # validation set, else the training loss.
+    # The best iterate is chosen on the validation loss if there is one.
     def score_of(loss_values, validation_values):
         return loss_values if validation_loss_for_optimizer_values is None else validation_values
 
@@ -525,10 +480,7 @@ def _run_adam_optimizer(
             if validation_loss_terms_for_optimizer_values is None
             else jax.vmap(validation_loss_terms_for_optimizer_values)(values)
         )
-        # Track the best iterate *seen*, per start. A fixed step size on this
-        # objective can sit on a cliff edge (large kx blows the rollout up), so
-        # the last iterate is not reliably the best one -- it can be an order of
-        # magnitude worse than a point the run already passed through.
+        # Keep the best iterate per start; the last one is not reliably the best.
         score = score_of(loss_values, validation_values)
         improved = score < best_score
         next_best_score = jnp.where(improved, score, best_score)
@@ -556,9 +508,7 @@ def _run_adam_optimizer(
         (initial_values, current_opt_state, initial_values, initial_score),
         jnp.arange(num_steps),
     )
-    # The scan scores each iterate before its update, so the final iterate has
-    # not been scored yet; fold it in so a run that improved to the very end
-    # keeps its last step.
+    # Score the final iterate too (the scan scores each iterate before its update).
     final_score = score_of(
         jax.vmap(lambda v: jnp.sum(loss_terms_for_optimizer_values(v)))(final_values),
         jnp.full((final_values.shape[0],), jnp.inf, dtype=jnp.float32)
@@ -603,35 +553,21 @@ def _run_bfgs_optimizer(
 ):
     """Multistart BFGS, with the same return contract as ``_run_adam_optimizer``.
 
-    A "step" here is a *restart*: one bounded ``optx.minimise`` of
-    ``_BFGS_STEPS_PER_SOLVE`` inner steps, resumed from the previous solve's
-    answer. Restarting rather than running one long solve is deliberate --
-    measured on the joint loop's gain block, 5 restarts of 40 reach 0.009939
-    where a single 200-step solve stalls at 0.013097, because a fresh Hessian
-    approximation escapes the flat directions the previous one had baked in.
-    It is also what gives this a per-chunk loss history at all, since
-    ``minimise`` exposes no per-step trace.
-
-    There is no learning rate: the line search sets the step length, which is
-    the whole reason this reaches ``kimotor = 0`` (on the box boundary, half an
-    optimizer-space unit from the nominal value) where Adam cannot.
+    The budget is split into restarts of ``_BFGS_STEPS_PER_SOLVE`` steps, each
+    resumed from the previous solution with a fresh Hessian approximation;
+    the loss history has one point per restart.
     """
     num_solves = max(1, int(num_steps) // _BFGS_STEPS_PER_SOLVE)
     solver = optx.BestSoFarMinimiser(optx.BFGS(rtol=_BFGS_RTOL, atol=_BFGS_ATOL))
 
     def objective(values, _args):
-        # Bare scalar: the (value, aux) form is for `solver.step`, not
-        # `minimise`. Clipping inside keeps the box constraint out of the
-        # solver's hands; only the gain part is clipped, the parametrization
-        # tail bounds its own effect.
+        # The box constraint is applied by clipping inside the objective.
         return jnp.sum(loss_terms_for_optimizer_values(clip_optimizer_values(values)))
 
     def one_solve(values):
         solution = optx.minimise(
             objective, solver, values, args=None,
             max_steps=_BFGS_STEPS_PER_SOLVE,
-            # Hitting the cap without converging is the budget working, not a
-            # failure.
             throw=False,
         )
         return clip_optimizer_values(solution.value)
@@ -652,8 +588,6 @@ def _run_bfgs_optimizer(
         values, best_values, best_score = carry
         next_values = jax.vmap(one_solve)(values)
         losses, validation, terms, validation_terms = scored(next_values)
-        # Same best-iterate bookkeeping as the Adam path: score on validation
-        # when there is one, else on training.
         score = losses if validation_loss_for_optimizer_values is None else validation
         improved = score < best_score
         return (
@@ -737,28 +671,16 @@ def optimize_controller_gains(
     outlier_loss_factor: float = 0.0,
     freeze_gains: bool = False,
 ):
-    """Single-stage joint optimization of base gains and the gain schedule.
+    """Joint optimization of the base gains and the gain schedule.
 
-    ``freeze_gains`` holds the base gains at the (first) init gains and trains
-    the parametrization alone: the controller is then the given static one
-    times a learned schedule.
+    The trainable vector is ``[gain_values(6), parametrization_flat(num_w)]``;
+    the presearch and multistart act on the gain part. Without
+    ``schedule_enabled`` the parametrization is the identity (static
+    controller). ``freeze_gains`` holds the base gains at the init gains and
+    trains the parametrization alone. ``init_gains`` may be a batch ``(N, 6)``.
 
-    The trainable vector is ``[gain_values(6), parametrization_flat(num_w)]``. LHS
-    presearch and multistart operate on the gain part, with the parametrization
-    held at its start value (the warm-started template, else the identity
-    mapping) so the candidates are scored under the controller that Adam then
-    refines jointly.
-    When ``schedule_enabled`` is False, ``num_w = 0`` and the parametrization is
-    fixed at its identity mapping, reproducing the static controller.
-
-    ``init_gains`` may be a single gain vector or a batch ``(N, 6)`` of them
-    (each becomes its own candidate/start); five-gain vectors from before the
-    D-term are read with kdmotor = 0 (``controller.controller_gains_array``).
-
-    Returns a dict with the best start's gains/parametrization plus the raw
-    per-start loss histories and selection metadata (``best_start_index``,
-    ``start_candidate_indices``, ``final_gains_per_start``); use
-    :func:`histories_for_start` to extract one start's history lists.
+    Returns a dict with the best start's gains/parametrization, the per-start
+    loss histories (see :func:`histories_for_start`) and selection metadata.
     """
     if k_min_stab <= 0.0:
         raise ValueError("k_min_stab must be positive for log-space optimization.")
@@ -777,16 +699,9 @@ def optimize_controller_gains(
 
     num_w = gain_parametrization_num_params(schedule_template) if schedule_enabled else 0
 
-    # Root noise keys and one start-pose offset per realization, drawn once and
-    # held fixed for the whole run so the objective stays a deterministic
-    # function of the gains. Each trajectory receives independent child noise
-    # keys in `_make_terms_for_values`; ``realizations`` injects roots shared
-    # with the trajectory designer (joint_tuning) instead, and its count then
-    # wins over ``num_realizations``.
-    # Designed start offsets, when the trajectories shipped them, replace the
-    # tuner's own draw: they are the conditions the trajectory was designed to
-    # be informative under, so the number of realizations is theirs, not the
-    # caller's.
+    # Noise keys and start offsets are drawn once, so the objective is a
+    # deterministic function of the gains. Designed start offsets replace the
+    # drawn ones and set the number of realizations.
     if training_start_offsets is not None:
         designed_realizations = int(jnp.asarray(training_start_offsets).shape[1])
         if designed_realizations != num_realizations:
@@ -822,10 +737,8 @@ def optimize_controller_gains(
             f"{init_offset_radius:.4g} m / {np.rad2deg(init_offset_angle):.3g} deg of the reference start."
         )
 
-    # Drop rollouts that have diverged at the initial gains, before anything is
-    # optimized: one of them is enough to stall the solve outright (see
-    # ``rollout_outlier_weights``). Training only -- a validation score with its
-    # outliers removed would flatter the result, so those are only reported.
+    # Drop training rollouts that diverge at the initial gains (validation
+    # outliers are only reported).
     training_realization_weights = None
     if outlier_loss_factor > 0.0 and training_reference_trajectories is not None:
         initial_losses = per_rollout_losses(
@@ -909,7 +822,6 @@ def optimize_controller_gains(
             )
             _, validation_dropped = rollout_outlier_weights(validation_losses, outlier_loss_factor)
             if validation_dropped:
-                # Reported, never excluded: the held-out score has to stay honest.
                 print(
                     f"Validation rollouts: {len(validation_dropped)}/{validation_losses.size} "
                     f"diverge at the initial gains (worst "
@@ -943,8 +855,7 @@ def optimize_controller_gains(
         validation_loss_terms_for_optimizer_values = with_frozen_gains(validation_loss_terms_for_optimizer_values)
         validation_loss_for_optimizer_values = with_frozen_gains(validation_loss_for_optimizer_values)
         print("Base gains frozen at the init gains; training the parametrization only.")
-    # Warm-start the parametrization from the template (e.g. the previous
-    # iteration's trained schedule) instead of the identity mapping.
+    # Warm-start the parametrization from the template instead of the identity.
     w_init = gain_parametrization_flat_params(schedule_template) if (schedule_enabled and warm_start_schedule) else None
     candidate_values = _candidate_optimizer_values(
         pipeline=pipeline,
@@ -958,10 +869,6 @@ def optimize_controller_gains(
         w_init=w_init,
     )
     if w_init is not None:
-        # Flat params are zero exactly when the template is a fresh seed (zero
-        # output layer / zero W, both "identity mapping" by convention) rather
-        # than an actually trained theta from a previous iteration -- warn
-        # accordingly instead of always claiming a "previous result".
         if bool(jnp.allclose(w_init, 0.0)):
             print("Gain parametrization template has no trained theta yet; starting from identity.")
         else:
@@ -1020,12 +927,7 @@ def optimize_controller_gains(
             num_steps=num_steps,
         )
     )
-    # Pick the winning start on the validation trajectories when there are any.
-    # Selecting on the training loss rewards the start that fit its own noise
-    # draw / trajectory split best: measured over seeds 0-3, the lowest-training-
-    # loss run was also the worst-generalizing one. `selection_scores` already
-    # falls back to the training loss when there is no validation set, and it is
-    # the score of each start's *best* iterate, not of its last one.
+    # Pick the start whose best iterate scores lowest (validation loss if any).
     if freeze_gains:
         final_values = jnp.asarray(final_values).at[:, :_NUM_GAINS].set(frozen_gain_values)
     best_index = int(np.argmin(selection_scores))
@@ -1034,10 +936,7 @@ def optimize_controller_gains(
         final_values[:, :_NUM_GAINS], k_min_stab=k_min_stab, k_max_stab=k_max_stab, k_max_rest=k_max_rest
     )
     best_gains = final_gains_per_start[best_index]
-    # Losses *of the returned point*. The loss histories are the raw per-step
-    # traces, so their last entry belongs to the last iterate, which is not the
-    # one returned; reporting it would advertise a number the exported gains do
-    # not achieve.
+    # Losses of the returned point (not the last entries of the histories).
     best_training_loss = float(loss_for_optimizer_values(best_values))
     best_validation_loss = (
         None
@@ -1061,9 +960,7 @@ def optimize_controller_gains(
         "best_training_loss": best_training_loss,
         "best_validation_loss": best_validation_loss,
         "start_candidate_indices": np.asarray(start_candidate_indices, dtype=int),
-        # Optimizer-space vectors (gain part + parametrization tail) each start
-        # began from and returned, so a caller can tell a refinement that never
-        # left its start point (a stalled solve) from one that converged.
+        # Optimizer-space start and end points per start (for stall checks).
         "initial_values_per_start": np.asarray(initial_values, dtype=float),
         "final_values_per_start": np.asarray(final_values, dtype=float),
         "loss_history_per_start": loss_history,

@@ -1,8 +1,8 @@
-"""Generate an analytic baseline reference trajectory for comparison runs.
+"""Generate an analytic reference trajectory (circle, figure-eight, spin or
+waypoint spline).
 
-Exports the reference as a pickle (directly digestible by the other pipelines)
-and as a Pololu JSN (runnable on the robot), then runs the problem's closed
-loop on it and writes the summary plot to visualize/.
+Exports the reference as a pickle and as a Pololu JSN, then runs the problem's
+closed loop on it and writes the summary plot to visualize/.
 
 Examples:
   python scripts/generate_baseline_reference.py --type circle --radius 0.5 --time 10
@@ -103,10 +103,7 @@ def baseline_params_from_args(args) -> dict:
         "cycles": args.cycles,
         "speed_rate": args.speed_rate,
         "amplitude": args.amplitude,
-        # In ramp mode max_speed *overrides* the amplitude (it rescales the path
-        # to hit that peak), so --no-max-speed is how you ask for a curve of a
-        # given size and let the speed follow from the duration. Without this
-        # the argument's own default silently discarded --amplitude.
+        # max_speed overrides the amplitude; --no-max-speed keeps the amplitude.
         "max_speed": None if args.no_max_speed else args.max_speed,
         "rotation": args.rotation,
         "ramp_up_fraction": args.ramp_up_fraction,
@@ -190,7 +187,6 @@ def report_motion(reference_states: np.ndarray, dt: float, robot_cfg: dict) -> N
 def main():
     parser = argparse.ArgumentParser(description="Generate a baseline reference trajectory.")
     parser.add_argument("--problem", default="problems/pololu_gains.yaml")
-    # SCRIPT_BASELINE_TYPES = ("circle", "lemniscate", "lemniscate-ramp", "spin", "waypoints")
     parser.add_argument("--type", choices=list(SCRIPT_BASELINE_TYPES), default="waypoints")
     parser.add_argument("--export-dir", default="trajectory_exports/baselines")
     parser.add_argument("--name", default=None, help="Export stem (default: baseline_<type>_<timestamp>).")
@@ -212,9 +208,6 @@ def main():
     parser.add_argument("--no-max-speed", action="store_true", default=False,
                         help="Ramp mode: keep --amplitude and let the speed follow from --time.")
     parser.add_argument("--cycles", type=int, default=1, help="Figure-eight cycles (lemniscate modes).")
-    # A lemniscate is twice as long as it is wide, so on an environment that is
-    # taller than it is wide --rotation 1.5708 buys a much bigger figure-8 for
-    # the same speed. Radians, about the path centre.
     parser.add_argument("--rotation", type=float, default=0.0,
                         help="Rotate the lemniscate about its center, in radians.")
 
@@ -230,7 +223,6 @@ def main():
                         help="Number of random waypoints including start and goal (waypoints mode).")
     parser.add_argument("--start-heading", type=float, default=0,
                         help="Heading constraint for the start waypoint in radians (waypoints mode).")
-    # parser.add_argument("--waypoints", type=parse_waypoints, default='[[1, 1], [1, 0], [0, 0], [0, 1]]')
     parser.add_argument("--waypoints", type=parse_waypoints, default=None)
     parser.add_argument("--sample-heading", action="store_true", default=False,
                         help="Sample heading constraints at waypoints other than a specified start heading "

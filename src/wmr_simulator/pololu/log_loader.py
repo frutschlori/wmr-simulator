@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import os
 from pathlib import Path
 
@@ -56,8 +55,7 @@ POLOLU_TRAJ_CONTROL_COLUMNS = (
     "roll_raw",
     "pitch_raw",
 )
-# Decoded before 2026-10-07, when the decoder dropped the EKF and mocap z, roll
-# and pitch; still read as they are.
+# Header of csvs written by the earlier decoder (without EKF and mocap z/roll/pitch).
 LEGACY_POLOLU_TRAJ_CONTROL_COLUMNS = POLOLU_TRAJ_CONTROL_COLUMNS[:29]
 
 
@@ -79,29 +77,15 @@ def load_pololu_traj_control_log_and_encoder_lag(
     *,
     clip_after_first_trajectory: bool = False,
 ) -> tuple[SimulationLog, EncoderLag | None]:
-    """Load one Pololu traj-control csv into a SimulationLog.
+    """Load one Pololu traj-control csv into a SimulationLog, and the encoder
+    lag that was removed (None when not measurable).
 
-    All streams share one time base in seconds, zeroed at the start of the
-    trajectory: any idle stretch the recording carries before the run is dropped
-    (_clip_before_trajectory_start).
-
-    The mocap poses are always smoothed with a Savitzky-Golay filter
-    (measurement_smoothing.smooth_pose_stream): repeated frames, samples too
-    close together, and residual-outlier poses are dropped, ``pose.states``
-    holds the filtered poses and ``pose.twists`` holds the filter-derivative
-    body twists at the pose times, so downstream consumers never
-    finite-difference raw mocap. The raw poses are kept in ``pose.true_states``
-    for diagnostics/plots; the survivors of rejection in ``pose.clean_states``.
-
-    The encoder wheel speeds are un-low-passed (the firmware's 3 Hz one-pole is
-    inverted exactly), lightly Savitzky-Golay smoothed, and shifted by the lag
-    this log's encoder twist shows against its mocap twist
-    (measurement_smoothing.smooth_and_align_encoder_speeds /
-    estimate_encoder_lag); that lag is returned next to the log, None when the
-    log is too short or still to measure it (then no shift is applied).
-
-    Smoothing and outlier-rejection defaults for both mocap and encoders are
-    configured in the measurement_smoothing submodule (DEFAULT_* constants).
+    All streams share one time base in seconds, zeroed at the trajectory start.
+    ``pose.states`` holds the Savitzky-Golay smoothed mocap poses,
+    ``pose.twists`` their body twists, ``pose.true_states`` the raw poses and
+    ``pose.clean_states`` the raw poses that survived outlier rejection. The
+    encoder speeds are un-low-passed, smoothed and shifted by the measured lag
+    (``measurement_smoothing``).
     """
     columns, data = _read_time_normalized(Path(path), clip_after_first_trajectory)
 
@@ -112,9 +96,7 @@ def load_pololu_traj_control_log_and_encoder_lag(
     )
     pose_time, pose_states = _sparse_stream(columns, data, ("x_raw", "y_raw", "yaw_raw"))
     raw_pose_states = pose_states
-    # Duplicate frames are dropped inside the filter but the smoothed grid is
-    # interpolated back to all raw timestamps, so every stream keeps its
-    # original length/time base.
+    # The smoothed grid is interpolated back to all raw timestamps.
     smoothed = smooth_pose_stream(pose_time, pose_states)
     pose_states = smoothed.pose(pose_time)
     pose_twists = smoothed.body_twist(pose_time)
@@ -124,9 +106,6 @@ def load_pololu_traj_control_log_and_encoder_lag(
         ("omega_r_meas", "omega_l_meas"),
         trigger_names=("omega_r_meas", "omega_l_meas"),
     )
-    # Undo the firmware low-pass and smooth lightly, then take out whatever lag
-    # the encoder twist still shows against the mocap twist in this log
-    # (measurement_smoothing, DEFAULT_ENCODER_* knobs).
     wheel_speeds = smooth_and_align_encoder_speeds(wheel_time, wheel_speeds)
     encoder_lag = estimate_encoder_lag(wheel_time, wheel_speeds, pose_time, pose_twists)
     if encoder_lag is not None:
@@ -183,13 +162,7 @@ def load_pololu_traj_control_log_and_encoder_lag(
 
 
 def clip_log_to_duration(log: SimulationLog, duration: float) -> SimulationLog:
-    """The first ``duration`` seconds of a loaded log, every stream cut on its own time base.
-
-    For a trajectory whose leading part is what an identification fits (a
-    motion-phased identification trajectory, whose later phases are driven for
-    the residual model's sake); the Savitzky-Golay pose smoothing ran on the
-    whole log, so the cut edge carries no filter transient.
-    """
+    """The first ``duration`` seconds of a loaded log, every stream cut on its own time base."""
 
     def keep(time_s):
         return np.asarray(time_s) <= float(duration)
@@ -229,13 +202,8 @@ def load_imu_gyro_z(
     *,
     clip_after_first_trajectory: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """IMU yaw rate stream from one traj-control csv, converted to rad/s.
-
-    The csv logs the gyro in deg/s; timestamps share the time base of
-    load_pololu_traj_control_log (seconds, zeroed at the trajectory start).
-    Returns empty arrays for logs without IMU samples (older logs have the
-    gyro columns in the header but never fill them).
-    """
+    """IMU yaw rate [rad/s] of one traj-control csv, on the time base of
+    load_pololu_traj_control_log (empty arrays without IMU samples)."""
     columns, data = _read_time_normalized(Path(path), clip_after_first_trajectory)
     gyro_time, gyro = _sparse_stream(columns, data, ("gyro_z",), trigger_names=("gyro_z",))
     return gyro_time, np.deg2rad(gyro[:, 0]) if len(gyro) else gyro.reshape(0)
@@ -251,8 +219,7 @@ def _read_time_normalized(path: Path, clip_after_first_trajectory: bool) -> tupl
     data = data[np.isfinite(data[:, ts_index])]
     data = data[np.argsort(data[:, ts_index])]
     if len(data) == 0:
-        # Header-only csv: the decoder emits one for an empty/aborted recording
-        # (a few-byte SD-card binary). Nothing to normalize against.
+        # Header-only csv (empty recording).
         raise ValueError(f"No data rows in {path} (empty recording).")
     data = data.copy()
     data[:, ts_index] = data[:, ts_index] / 1000.0
@@ -349,17 +316,9 @@ def _clip_before_trajectory_start(
 ) -> np.ndarray:
     """Drop the idle stretch a recording can carry before its trajectory starts.
 
-    A recording is opened before the run is triggered, so a log can begin with a
-    leftover reference sample of the previous run followed by seconds of
-    standstill in which only the IMU keeps logging. Zeroing the time base on the
-    first row then shifts the whole trajectory off t = 0.
-
-    The reference is logged every ~50 ms while a trajectory runs, so reference
-    rows are grouped into blocks separated by gaps longer than
+    Reference rows are grouped into blocks separated by gaps longer than
     ``max_reference_gap_s``; the first block spanning at least
     ``min_trajectory_s`` is the trajectory and everything before it is dropped.
-    Logs whose reference stream is one contiguous block (the normal case) are
-    returned untouched.
     """
     reference_rows = _rows_with(columns, data, ("x_des", "y_des", "yaw_des", "v_ff", "w_ff"))
     if len(reference_rows) == 0:
@@ -372,12 +331,8 @@ def _clip_before_trajectory_start(
     for start, end in zip(block_starts, block_ends):
         if reference_ts[end - 1] - reference_ts[start] >= min_trajectory_s:
             if start == 0:
-                # Normally the first reference arrives a few control ticks
-                # after the recording begins; keep that short mocap/encoder
-                # lead-in.  A recovered SD-card chunk can instead begin with
-                # seconds of non-reference records, in which case this first
-                # (and only) reference block is still the trajectory and must
-                # define t = 0.
+                # Keep a short lead-in before the first reference; a long one
+                # is dropped so the trajectory defines t = 0.
                 if reference_ts[start] - data[0, ts_index] <= max_reference_gap_s:
                     return data
             return data[data[:, ts_index] >= reference_ts[start]]
@@ -418,13 +373,10 @@ def _settled_after(
     settle_speed: float,
     settle_window_s: float = 0.2,
 ) -> float:
-    """First timestamp at/after ``stop_ts`` where the robot's measured speed is
-    below ``settle_speed``. Extends the clip past a reference stop so the braking
-    maneuver (robot still coasting/drifting after v_ff/w_ff drop to zero) stays
-    in the log. Speed is the raw-mocap displacement over a ``settle_window_s``
-    window, which averages out the duplicate frames and timestamp jitter that
-    make sample-to-sample finite differences unusable. Falls back to keeping
-    everything if the robot never settles within the log."""
+    """First timestamp at/after ``stop_ts`` where the robot's speed (raw mocap
+    displacement over ``settle_window_s``) is below ``settle_speed``, so the
+    braking after the reference stops stays in the log. The log end if it
+    never settles."""
     ts_index = columns.index("ts")
     mocap_rows = _rows_with(columns, data, ("x_raw", "y_raw"))
     t = _col(columns, mocap_rows, "ts")
@@ -451,10 +403,7 @@ def list_pololu_log_paths(log_dir: str | Path) -> list[Path]:
 
 
 def _looks_like_pololu_log(path: Path) -> bool:
-    """True for a traj-control csv with the expected header *and* at least one
-    data row; a header-only file (decoded from an empty/aborted SD-card
-    recording) is not loadable, so discovery skips it rather than failing the
-    whole run on it."""
+    """True for a traj-control csv with the expected header and at least one data row."""
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except (OSError, UnicodeDecodeError):
@@ -463,62 +412,3 @@ def _looks_like_pololu_log(path: Path) -> bool:
         return False
     columns = tuple(name.strip() for name in lines[0].split(","))
     return columns in (POLOLU_TRAJ_CONTROL_COLUMNS, LEGACY_POLOLU_TRAJ_CONTROL_COLUMNS)
-
-
-def print_log_summary(log_path: Path, log: SimulationLog):
-    print(f"Loaded {log_path}")
-    print(f"Reference samples: {len(log.reference.time_s)}")
-    print(f"Pose samples: {len(log.pose.time_s)}")
-    print(f"Wheel samples: {len(log.wheel.time_s)}")
-    print(f"Command samples: {len(log.pose.command_time_s)}")
-
-
-if __name__ == "__main__":
-    from wmr_simulator.visualization.pololu import plot_logged_summary
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--log", type=str, default="Pololu Data/Experiments/exp05/iteration_01/data/TR01.csv")
-    parser.add_argument("--output", type=str, default=None, help="Output filename prefix")
-    parser.add_argument("--out-dir", type=str, default="visualize")
-    parser.add_argument("--clip-after-first-trajectory", default=True, action="store_true")
-    # Mocap/encoder smoothing defaults are configured in the measurement_smoothing submodule.
-    args = parser.parse_args()
-
-    log_path = Path(args.log)
-    if log_path.is_dir():
-        output_dir = Path(args.out_dir) / log_path.name
-        for path in list_pololu_log_paths(log_path):
-            log = load_pololu_traj_control_log(
-                path,
-                clip_after_first_trajectory=args.clip_after_first_trajectory,
-            )
-            print_log_summary(path, log)
-            imu_time, imu_gyro_z = load_imu_gyro_z(
-                path, clip_after_first_trajectory=args.clip_after_first_trajectory
-            )
-            out_prefix = f"{args.output}_{path.stem}" if args.output is not None else f"pololu_{path.stem}"
-            plot_logged_summary(
-                log,
-                out_prefix=out_prefix,
-                out_dir=output_dir,
-                imu_time_s=imu_time,
-                imu_gyro_z=imu_gyro_z,
-            )
-        raise SystemExit(0)
-
-    log = load_pololu_traj_control_log(
-        log_path,
-        clip_after_first_trajectory=args.clip_after_first_trajectory,
-    )
-    print_log_summary(log_path, log)
-    imu_time, imu_gyro_z = load_imu_gyro_z(
-        log_path, clip_after_first_trajectory=args.clip_after_first_trajectory
-    )
-    out_prefix = args.output if args.output is not None else f"pololu_{log_path.stem}"
-    plot_logged_summary(
-        log,
-        out_prefix=out_prefix,
-        out_dir=args.out_dir,
-        imu_time_s=imu_time,
-        imu_gyro_z=imu_gyro_z,
-    )

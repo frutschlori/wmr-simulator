@@ -1,11 +1,9 @@
 """Export the error-MLP gain parametrization for the Pololu firmware.
 
-The firmware crate ``firmware/libs/gain_mlp`` (pololu-rs) evaluates the MLP
-every outer control tick from the same inputs the simulator uses: the current
-setpoint, the EKF pose and the encoder body twist. This module renders the
-trained :mod:`wmr_simulator.gain_parametrization.error_mlp` parameters into the
-JSON file that crate parses (``GAINMLP.JSN`` on the SD card, next to
-``TRJ0001.JSN`` and ``ROBOTCFG.CFG``):
+The firmware crate ``libs/gain_mlp`` (pololu-rs) evaluates the MLP every outer
+control tick from the current setpoint, the EKF pose and the encoder body
+twist. This module writes the JSON file that crate parses (``GAINMLP.JSN`` on
+the SD card, next to ``ROBOTCFG.CFG``):
 
     {
       "kind": "error_mlp",
@@ -16,23 +14,15 @@ JSON file that crate parses (``GAINMLP.JSN`` on the SD card, next to
       "weights": [... flat: per layer W row-major, then b ...]
     }
 
-The spectral normalization of :func:`error_mlp.effective_layers` is baked into
-the exported weights, so the firmware forward pass is a plain tanh MLP (no
-power iteration on the MCU). Factors are multiplicative, so they apply
-unchanged to the firmware gains even though the inner motor gains use
-different units (duty/(rad/s) instead of the simulator's wheel-speed units).
+The spectral normalization is baked into the exported weights. A fitted
+out-of-distribution gate is exported as an optional ``"gate"`` block
+(``centers`` row-major K x 7, ``scales``, ``mean``, ``std``, ``ood_sigma``) and
+evaluated by :func:`reference_forward` (the MuJoCo firmware port); the firmware
+crate does not read it.
 
-A fitted out-of-distribution gate (``error_mlp.gate``) is exported as an
-optional ``"gate"`` block (``centers`` row-major K x 7, ``scales``, ``mean``,
-``std``, ``ood_sigma``) and evaluated by :func:`reference_forward`, i.e. by the
-MuJoCo firmware port. The Rust crate does not read it yet (2026-10-03), so a
-gated network must not go onto the robot before it does.
-
-A golden file with input/output pairs computed by JAX can be exported next to
-the network; the firmware crate's host test (``cargo test``) checks its
-implementation against it.
-
-Firmware capacity limits are mirrored from ``firmware/libs/gain_mlp/src/lib.rs``.
+A golden file with JAX-computed input/output pairs can be exported for the
+crate's host test (``cargo test``). Capacity limits are mirrored from
+``libs/gain_mlp/src/lib.rs``.
 """
 
 from __future__ import annotations
@@ -249,7 +239,7 @@ def main(argv: list | None = None) -> int:
     parser.add_argument("--problem", type=str, default="problems/pololu_gains.yaml",
                         help="Problem yaml providing the parametrization config, gains and robot limits.")
     parser.add_argument("--tuned", type=str, default=None,
-                        help="Tuning result yaml (run_gain_tuning --out); overrides gains and parametrization.")
+                        help="Tuning result yaml (results/gains.yaml of an iteration); overrides gains and parametrization.")
     parser.add_argument("--golden", type=str, default=None,
                         help="Also write a golden test file with JAX-evaluated cases to this path.")
     parser.add_argument("--cases", type=int, default=32, help="Number of golden cases.")

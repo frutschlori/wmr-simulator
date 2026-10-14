@@ -1,22 +1,10 @@
-"""Post-hoc checks on a gain-tuning result.
+"""Post-hoc checks on a gain-tuning result, recorded as warnings next to the gains.
 
-Each one is a known way the tuner fails silently, so each is a result to report
-rather than an error: the stage records them next to the gains and carries on.
-
-* **Stall.** BFGS sometimes never leaves its start point (the line search
-  rejects every trial, or no iterate beats the start on the validation set),
-  and the tuner then ships its input gains unchanged -- about one run in 18,
-  measured on ``real02/iteration_05`` and ``test07``.
-* **Box bound.** The sim has no interior optimum in some gains (``kpmotor``
-  monotone to the lower bound, ``ky`` unobservable on slow designs), so a gain
-  on the search box is a failure of the model or the design set, not a tuned
-  value. The sqrt-space gains (``kimotor``, ``kdmotor``) may reach exactly 0 by
-  design; that is reported as its own bound, ``zero``.
-* **Divergence.** Rollouts in the tuning plant whose position error leaves the
-  benchmark's divergence radius. For a parametrized run this is also scored on
-  the *bare* base gains: they are not a controller anybody drives, but when
-  they diverge the network is cancelling a runaway base gain (memory
-  ``gain-mlp-undoes-kpmotor``) rather than scheduling a working one.
+* **Stall.** The solve never left its start point and returned its input gains.
+* **Box bound.** A gain ended on its search-box bound (``zero`` for kimotor or
+  kdmotor at exactly 0).
+* **Divergence.** Tuning rollouts whose position error leaves the divergence
+  radius; for a parametrized run also scored on the bare base gains.
 """
 
 from __future__ import annotations
@@ -28,11 +16,10 @@ from wmr_simulator.gain_tuning.objectives import TRAINING_KEY_NAMESPACE, VALIDAT
 from wmr_simulator.gain_tuning.optimizers import controller_gains_to_optimizer_values
 
 # Optimizer-space distance (unit box) under which a gain counts as on its bound.
-# In log space over [1e-3, 20] this is a factor of 1.01 from the bound.
 BOUND_TOLERANCE = 1e-3
 # Optimizer-space movement under which a start counts as never having moved.
 STALL_TOLERANCE = 1e-6
-# Same radius the benchmark and the deployment call a diverged run.
+# Position error [m] above which a rollout diverged.
 DIVERGENCE_RADIUS = 0.25
 _NUM_LOG_GAINS = 4
 
@@ -55,12 +42,8 @@ def bound_hits(gains, k_min_stab: float, k_max_stab: float, k_max_rest: float) -
 
 
 def stalled(optimization: dict) -> bool:
-    """Whether the returned start ended exactly where it began.
-
-    The returned point is the best-scoring iterate of its start, the start
-    itself included, so this is also true when the solve moved but never beat
-    its starting point on the selection score.
-    """
+    """Whether the returned start ended exactly where it began (also when the
+    solve moved but never beat its start)."""
     best = int(optimization["best_start_index"])
     initial = np.asarray(optimization["initial_values_per_start"][best], dtype=float)
     final = np.asarray(optimization["final_values_per_start"][best], dtype=float)
@@ -69,14 +52,7 @@ def stalled(optimization: dict) -> bool:
 
 def start_and_returned_losses(optimization: dict) -> dict:
     """Training and validation loss of the returned start at its start point
-    and at the returned point.
-
-    Tells the two kinds of stall apart. Measured in Phase 1 of the thesis
-    study (2026-09-30), every stall at iteration >= 2 returned exactly its
-    start's training loss while the solves that moved improved on it by only
-    0.03-2 %: a loop that has converged, not a stuck line search like the one
-    that shipped stock gains on real02.
-    """
+    and at the returned point."""
     best = int(optimization["best_start_index"])
     training = np.asarray(optimization["loss_history_per_start"], dtype=float)[:, best]
     validation_history = optimization["validation_loss_history_per_start"]
@@ -113,14 +89,9 @@ def rollout_divergence(
     schedule_params=None,
     radius: float = DIVERGENCE_RADIUS,
 ) -> dict:
-    """Diverged rollouts of one controller over the whole tuning set.
-
-    Every (trajectory, realization) pair of the training and validation sets,
-    under exactly the keys and start offsets the objective scored them with. A
-    rollout diverged when its position error exceeds ``radius`` anywhere in its
-    second half (the first half still carries the start offset being driven
-    out) or is not finite.
-    """
+    """Diverged rollouts of one controller over the training and validation
+    sets: position error above ``radius`` in the second half of the rollout
+    (the first half drives out the start offset), or not finite."""
     from wmr_simulator.visualization.gain_tuning import realization_keys_for_set, rollout_realizations
 
     errors = []
@@ -136,8 +107,7 @@ def rollout_divergence(
             pipeline, robot_params, references, offsets, robot_keys, estimator_keys,
             controller_gains=controller_gains, schedule_params=schedule_params,
         )
-        # Poses are on the wheel-loop clock, the reference on the geometry
-        # clock; sample the poses where the objective does.
+        # Sample the wheel-clock poses on the geometry clock.
         stride = int(pipeline.inner_steps_per_geometry_step)
         reference = np.asarray(references, dtype=float)[:, 1:, :2]
         indices = np.arange(stride, reference.shape[1] * stride + 1, stride)[: reference.shape[1]]

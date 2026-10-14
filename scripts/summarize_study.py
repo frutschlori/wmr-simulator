@@ -1,6 +1,6 @@
 """Collect a study phase's runs into summary.csv, benchmark_runs.csv and summary.md.
 
-    python scripts/summarize_study.py "Pololu Data/thesis_ch5/phase1_tuner"
+    python scripts/summarize_study.py experiments/static_matrix
 """
 
 from __future__ import annotations

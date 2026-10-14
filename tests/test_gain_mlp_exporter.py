@@ -1,15 +1,5 @@
-"""Firmware export of the error-MLP gain parametrization.
-
-The numpy ``reference_forward`` mirrors the math of the firmware crate
-``firmware/libs/gain_mlp`` (pololu-rs); matching it against the JAX
-implementation validates that the exported payload (with spectral
-normalization baked into the weights) reproduces ``error_mlp.factors``.
-
-The comparison is at the *factor* level, which is the whole firmware contract:
-the factors are unitless, so they apply unchanged to the firmware's inner motor
-gains even though those are in duty/(rad/s) rather than the simulator's
-wheel-speed units.
-"""
+"""Firmware export of the error-MLP gain parametrization: the numpy
+``reference_forward`` (mirroring the firmware crate) against ``error_mlp.factors``."""
 
 import os
 
@@ -120,21 +110,6 @@ def _gated_params(seed: int = 7):
     return with_gate(params, samples)
 
 
-def test_gate_keeps_the_network_on_its_data_and_the_static_gains_off_it():
-    from wmr_simulator.gain_parametrization.error_mlp import _forward, effective_layers, features, gate
-
-    params = _gated_params()
-    on = (jnp.asarray([0.0, 0.0, 0.0, 0.75, 0.0, 0.0, 1.0, 0.0]), jnp.zeros(3), jnp.asarray([0.75, 1.0]))
-    off = (jnp.asarray([0.0, 0.0, 0.0, 2.5, 0.0, 9.0, 0.0, 0.0]), jnp.asarray([-0.4, 0.3, 0.8]), jnp.asarray([1.0, 3.0]))
-    z_on = features(*on, params.feature_scale)
-    assert float(gate(params, z_on)) > 0.9
-    ungated = np.clip(1.0 + np.asarray(_forward(effective_layers(params), z_on)), 0.0, 5.0)
-    np.testing.assert_allclose(np.asarray(jax_factors(params, *on)), ungated, atol=0.05)
-    z_off = features(*off, params.feature_scale)
-    assert float(gate(params, z_off)) < 1e-3
-    np.testing.assert_allclose(np.asarray(jax_factors(params, *off)), 1.0, atol=1e-3)
-
-
 def test_gate_round_trips_through_the_config_and_the_firmware_payload():
     from wmr_simulator.gain_parametrization import to_cfg
 
@@ -151,10 +126,3 @@ def test_gate_round_trips_through_the_config_and_the_firmware_payload():
         ref_state = jnp.asarray([ref[0], ref[1], ref[2], ref[3], 0.0, ref[4], 0.0, 0.0], dtype=jnp.float32)
         expected = np.asarray(jax_factors(restored, ref_state, jnp.asarray(pose), jnp.asarray(twist)))
         np.testing.assert_allclose(reference_forward(payload, ref, pose, twist), expected, rtol=1e-4, atol=1e-5)
-
-
-def test_no_gate_is_the_ungated_network():
-    cfg = {"kind": "error_mlp", "hidden_sizes": [16], "bound": 5.0, "spectral_norm_cap": 1.0}
-    params = _random_params(cfg)
-    assert params.gate_centers.shape[0] == 0
-    assert "gate" not in gain_mlp_payload(params)

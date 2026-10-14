@@ -51,11 +51,8 @@ def time_scaling_derivatives(
     """Path parameter s(t) in [0, 1] and its first two time derivatives.
 
     ``phase_breaks`` (fractions of the duration) split the s-curve into
-    consecutive phases, each its own quintic s-curve over the same share of the
-    path parameter as of the time. The reference comes to rest at every
-    boundary with zero acceleration, so the trajectory stays C^2 in time and
-    each phase can be held to its own motion envelope (a slow phase followed by
-    a fast one, say) without one leaking into the other.
+    consecutive quintic s-curves, each over the same share of s as of the time;
+    the reference rests at every boundary (C^2 in time).
     """
     selected_time_scaling = normalize_time_scaling(time_scaling)
     breaks = normalize_phase_breaks(phase_breaks)

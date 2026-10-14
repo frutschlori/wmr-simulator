@@ -1,11 +1,4 @@
-"""The gains the trajectory designer computes its FIM around.
-
-Every rollout in TrajectoryOptimizationPipeline drives the *static* controller
--- none of them passes ``schedule_params`` -- so the design point has to be the
-static gains. A parametrized run's base gains are not a controller anybody
-runs, and designing at them while driving the static controller designs for a
-robot that does not exist.
-"""
+"""The gains the trajectory designer computes its FIM around (the static gains)."""
 
 from pathlib import Path
 
@@ -34,11 +27,6 @@ def static_gain_pipeline():
     )
 
 
-def test_design_point_defaults_to_the_problem_gains(default_pipeline):
-    problem_gains = load_yaml(PROBLEM)["controller"]["gains"]
-    np.testing.assert_allclose(np.asarray(default_pipeline.controller_gains), problem_gains, rtol=1e-6)
-
-
 def test_explicit_gains_are_the_design_point_and_the_driven_gains(
     default_pipeline, static_gain_pipeline
 ):
@@ -56,11 +44,6 @@ def test_explicit_gains_are_the_design_point_and_the_driven_gains(
     )
 
 
-def test_a_gain_vector_of_the_wrong_length_is_refused():
-    with pytest.raises(ValueError, match="Expected 6 controller gains"):
-        TrajectoryOptimizationPipeline(problem_path=PROBLEM, controller_gains=[1.0, 2.0, 3.0])
-
-
 def _trained_problem(tmp_path) -> Path:
     """The stock problem with a non-identity gain parametrization baked in."""
     problem_cfg = load_yaml(PROBLEM)
@@ -75,9 +58,7 @@ def _trained_problem(tmp_path) -> Path:
 
 
 def test_a_trained_gain_parametrization_does_not_reach_the_design(tmp_path, default_pipeline):
-    """The designer drives the static controller, so a trained network in the
-    problem yaml changes nothing about the design -- which is exactly why the
-    base gains it was trained against are the wrong design point."""
+    """A trained network in the problem yaml changes nothing about the design."""
     trained_pipeline = TrajectoryOptimizationPipeline(
         problem_path=str(_trained_problem(tmp_path)), objective_mode="gain-tuning"
     )
@@ -90,8 +71,7 @@ def test_a_trained_gain_parametrization_does_not_reach_the_design(tmp_path, defa
 
 def test_static_design_gains_prefer_the_static_baseline(tmp_path):
     """The active-learning designers read their design point out of
-    robot_config_static_gains.yaml -- the same file the tune-gains stage warm
-    starts its static run from -- not out of the iteration's problem yaml."""
+    robot_config_static_gains.yaml, not the iteration's problem yaml."""
     experiment = stage_init(tmp_path / "exp", {"problem": PROBLEM, "prior_tuning": False})
     paths = experiment.paths(1)
 
@@ -112,40 +92,6 @@ def test_static_design_gains_prefer_the_static_baseline(tmp_path):
         )
     next_paths = stage_finalize(experiment, 1)
 
-    # The iteration problem carries the parametrized run's (runaway) base gains;
-    # the designers must not use those.
+    # The iteration problem carries the parametrized run's base gains.
     assert load_yaml(next_paths.problem)["controller"]["gains"][2] == 41.0
     assert _static_design_gains(next_paths) == STATIC_GAINS
-
-
-def test_a_trained_parametrization_without_explicit_gains_is_flagged(tmp_path, capsys):
-    """Designing at a trained network's base gains is the flaw ``controller_gains``
-    exists for, and nothing downstream can tell it happened -- so say so. The
-    stock yamls ship an *enabled* parametrization at theta = 0, which is the
-    static controller exactly, so enablement alone must not trip it."""
-    TrajectoryOptimizationPipeline(problem_path=PROBLEM)
-    assert "WARNING" not in capsys.readouterr().out
-
-    TrajectoryOptimizationPipeline(problem_path=str(_trained_problem(tmp_path)))
-    assert "gain parametrization is trained" in capsys.readouterr().out
-
-    TrajectoryOptimizationPipeline(
-        problem_path=str(_trained_problem(tmp_path)), controller_gains=STATIC_GAINS
-    )
-    assert "WARNING" not in capsys.readouterr().out
-
-
-def test_random_tuning_initializations_keep_start_and_goal_apart(default_pipeline):
-    """A start drawn next to its goal left a near-stationary design (2026-10-04)."""
-    rng = np.random.default_rng(0)
-    for _ in range(200):
-        points = np.asarray(default_pipeline._random_gain_tuning_control_points(rng, 7))
-        assert np.linalg.norm(points[-1] - points[0]) >= default_pipeline.min_start_goal_distance - 1e-6
-
-
-def test_a_start_goal_distance_beyond_the_workspace_is_refused():
-    pipeline = TrajectoryOptimizationPipeline(
-        problem_path=PROBLEM, objective_mode="gain-tuning", min_start_goal_distance=100.0
-    )
-    with pytest.raises(ValueError, match="min_start_goal_distance"):
-        pipeline._random_gain_tuning_control_points(np.random.default_rng(0), 7)

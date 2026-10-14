@@ -74,22 +74,22 @@ def visualize(env_file, states, reference_states=None, out_prefix="simulation_vi
         vis[f"Obstacle_Box{k}"].set_transform(tf.translation_matrix(center))
 
     px_trace, py_trace, _ = states[:, 0].copy(), states[:, 1].copy(), states[:, 2].copy()
-    vis[f"trace_0"].set_object(
+    vis["trace_0"].set_object(
         g.Line(g.PointsGeometry(_line_points(px_trace, py_trace)), g.LineBasicMaterial(color=DnametoColor.get("blue"))))
-    vis[f"unicycle0"].set_object(
+    vis["unicycle0"].set_object(
         g.Mesh(g.Box([0.1, 0.05, 0.05]), material=g.MeshLambertMaterial(color=DnametoColor.get("blue"))))
 
     if reference_states is not None:
         px_traced, py_traced = ref_pos[:, 0].copy(), ref_pos[:, 1].copy()
-        vis[f"trace_d0"].set_object(g.Line(g.PointsGeometry(_line_points(px_traced, py_traced)),
+        vis["trace_d0"].set_object(g.Line(g.PointsGeometry(_line_points(px_traced, py_traced)),
                                            g.LineBasicMaterial(color=DnametoColor.get("red"))))
-        vis[f"unicycle_d0"].set_object(
+        vis["unicycle_d0"].set_object(
             g.Mesh(g.Box([0.1, 0.05, 0.05]), material=g.MeshLambertMaterial(color=DnametoColor.get("red"))))
     for k, state in enumerate(states):
         with anim.at_frame(vis, k) as frame:
             px, py, th = state[0], state[1], state[2]
 
-            frame[f"unicycle0"].set_transform(
+            frame["unicycle0"].set_transform(
                 tf.translation_matrix([px, py, 0]).dot(
                     tf.quaternion_matrix(tf.quaternion_from_euler(0, 0, th))
                 )
@@ -98,7 +98,7 @@ def visualize(env_file, states, reference_states=None, out_prefix="simulation_vi
             if reference_states is not None and k < len(ref_pos):
                 px_ref, py_ref = ref_pos[k, 0], ref_pos[k, 1]
                 th_ref = ref_th[k]
-                frame[f"unicycle_d0"].set_transform(
+                frame["unicycle_d0"].set_transform(
                     tf.translation_matrix([px_ref, py_ref, 0]).dot(
                         tf.quaternion_matrix(tf.quaternion_from_euler(0, 0, th_ref))
                     )

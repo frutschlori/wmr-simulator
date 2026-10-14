@@ -1,0 +1,88 @@
+logs:
+- examples/robot_run/iteration_02/data/TR00.csv
+- examples/robot_run/iteration_02/data/TR01.csv
+- examples/robot_run/iteration_02/data/TR02.csv
+- examples/robot_run/iteration_02/data/TR03.csv
+- examples/robot_run/iteration_02/data/TR04.csv
+excluded_logs: []
+estimated_params:
+  wheel_radius: 0.01601337641477585
+  base_diameter: 0.09035217761993408
+  max_wheel_speed: 222.45494079589844
+  time_constant: 0.20878057181835175
+final_loss: 0.9888365864753723
+final_motor_loss: 0.9428817629814148
+encoder_lags:
+  TR00.csv:
+    lag_ms: -24.25
+    yaw_correlation: 0.9545
+    speed_correlation: 0.9957
+  TR01.csv:
+    lag_ms: -26.99
+    yaw_correlation: 0.9426
+    speed_correlation: 0.9978
+  TR02.csv:
+    lag_ms: -26.75
+    yaw_correlation: 0.9509
+    speed_correlation: 0.9976
+  TR03.csv:
+    lag_ms: -31.31
+    yaw_correlation: 0.9342
+    speed_correlation: 0.9973
+  TR04.csv:
+    lag_ms: -28.01
+    yaw_correlation: 0.9535
+    speed_correlation: 0.9979
+outlier_z_threshold: 3.5
+outlier_detection_evaluated: true
+per_log:
+- log: examples/robot_run/iteration_02/data/TR00.csv
+  estimated_params:
+    wheel_radius: 0.016025517135858536
+    base_diameter: 0.09066861122846603
+    max_wheel_speed: 217.15042114257812
+    time_constant: 0.20511935651302338
+  final_loss: 0.9891207814216614
+  final_motor_loss: 0.9286325573921204
+  max_robust_z: 2.981820867552898
+  excluded: false
+- log: examples/robot_run/iteration_02/data/TR01.csv
+  estimated_params:
+    wheel_radius: 0.016022559255361557
+    base_diameter: 0.09084705263376236
+    max_wheel_speed: 223.72296142578125
+    time_constant: 0.2082679271697998
+  final_loss: 0.9892778992652893
+  final_motor_loss: 0.9331090450286865
+  max_robust_z: 0.6657571561751178
+  excluded: false
+- log: examples/robot_run/iteration_02/data/TR02.csv
+  estimated_params:
+    wheel_radius: 0.01601555198431015
+    base_diameter: 0.09057583659887314
+    max_wheel_speed: 223.0520477294922
+    time_constant: 0.20968930423259735
+  final_loss: 0.9880979061126709
+  final_motor_loss: 0.9473990797996521
+  max_robust_z: 0.30033649459149103
+  excluded: false
+- log: examples/robot_run/iteration_02/data/TR03.csv
+  estimated_params:
+    wheel_radius: 0.015996316447854042
+    base_diameter: 0.08904868364334106
+    max_wheel_speed: 224.62887573242188
+    time_constant: 0.21084661781787872
+  final_loss: 0.9881674647331238
+  final_motor_loss: 0.9484807848930359
+  max_robust_z: 1.7004245863570855
+  excluded: false
+- log: examples/robot_run/iteration_02/data/TR04.csv
+  estimated_params:
+    wheel_radius: 0.01599782146513462
+    base_diameter: 0.09032703191041946
+    max_wheel_speed: 224.1463165283203
+    time_constant: 0.20966540277004242
+  final_loss: 0.9856904149055481
+  final_motor_loss: 0.9447847008705139
+  max_robust_z: 0.2750700941147155
+  excluded: false

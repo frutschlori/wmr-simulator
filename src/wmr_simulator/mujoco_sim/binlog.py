@@ -1,15 +1,8 @@
-"""Writer for the firmware's Compact Tagged Binary SD-card log.
+"""Writer for the firmware's Compact Tagged Binary SD-card log, the inverse of
+``pololu/decode_binary.py``.
 
-The deployment has to hand the pipeline a file that is indistinguishable from
-one pulled off the SD card, so this is the exact inverse of
-``pololu/decode_binary.py`` - which is why the magic header and the per-tag
-payload widths are imported from there rather than restated: one spec, two
-directions.
-
-Layout: the 4-byte magic, then records of ``<u32 t_ms><u8 tag><N x f32 LE>``
-(``sdlog.rs::log_event_compact``). The decoder buckets records by *exact*
-millisecond into CSV rows, in order of first appearance, so the caller's
-timestamps decide the row structure.
+Layout: the 4-byte magic, then records of ``<u32 t_ms><u8 tag><N x f32 LE>``.
+The decoder buckets records by exact millisecond into CSV rows.
 """
 
 from __future__ import annotations
@@ -37,11 +30,7 @@ class LogTag(IntEnum):
     IMU = 9
 
 
-# What the robot actually produces. EkfState and Odom exist in the firmware's
-# enum but nothing ever queues them, so a real log leaves the csv's x/y/yaw and
-# v_actual/w_actual columns empty - writing them here would make a deployment
-# log recognisable at a glance, and would hand identification a pose stream the
-# real pipeline never sees.
+# The tags the robot writes (EkfState and Odom are never queued by the firmware).
 WRITTEN_TAGS = frozenset(
     {LogTag.SETPOINT, LogTag.WHEEL_CMD, LogTag.TRACKING_ERROR, LogTag.MOTOR, LogTag.ENCODER, LogTag.MOCAP, LogTag.IMU}
 )
@@ -50,12 +39,8 @@ MAX_TIMESTAMP_MS = 2**32 - 1
 
 
 class BinaryLogWriter:
-    """Append records to one ``TRxx`` log file.
-
-    Use it as a context manager; the magic header is written on open. The
-    per-tag helpers take the payloads in the same shape the plant hands them
-    out, so the firmware port can pass sensor readings straight through.
-    """
+    """Append records to one ``TRxx`` log file (a context manager; the magic
+    header is written on open)."""
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
@@ -88,8 +73,7 @@ class BinaryLogWriter:
         if len(values) != expected:
             raise ValueError(f"{tag.name} takes {expected} floats, got {len(values)}")
         if not all(math.isfinite(value) for value in values):
-            # The decoder renders NaN as an empty csv cell, so a non-finite
-            # value would silently vanish instead of failing loudly.
+            # The decoder would render NaN as an empty cell.
             raise ValueError(f"{tag.name} payload must be finite, got {list(values)}")
         if not isinstance(t_ms, (int, float)) or not 0 <= t_ms <= MAX_TIMESTAMP_MS:
             raise ValueError(f"Timestamp {t_ms} is not a u32 millisecond count")

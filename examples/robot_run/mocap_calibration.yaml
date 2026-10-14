@@ -1,0 +1,36 @@
+yaw_offset_rad: -0.021130647725771803
+yaw_offset_deg: -1.2107
+offset_m:
+- -0.00046003920310161146
+- 0.0014471714578729485
+diagnostics:
+  samples: 4430
+  speed_scale: 1.0022
+  residual_rms_m_s: 0.00451
+  yaw_offset_standard_error_deg: 0.0194
+  offset_standard_error_mm:
+  - 0.046
+  - 0.046
+  per_log:
+  - log: TR00.csv
+    samples: 1476
+    yaw_offset_deg: -1.21
+    offset_mm:
+    - -0.57
+    - 1.56
+  - log: TR01.csv
+    samples: 1471
+    yaw_offset_deg: -1.225
+    offset_mm:
+    - -0.47
+    - 1.36
+  - log: TR02.csv
+    samples: 1483
+    yaw_offset_deg: -1.196
+    offset_mm:
+    - -0.33
+    - 1.42
+logs:
+- TR00.csv
+- TR01.csv
+- TR02.csv

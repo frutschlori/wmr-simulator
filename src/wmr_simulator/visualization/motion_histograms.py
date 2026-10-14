@@ -1,15 +1,6 @@
-"""Histograms of the motion a reference set or a recorded run actually asks for.
-
-The tuning trajectories and the fixed benchmark reference are optimized and
-scored on completely different criteria, so the gains that come out of the
-tuning set only transfer to the benchmark if the two cover the same part of the
-(v, omega, a, alpha) envelope. The 2x2 figure here is that comparison: linear
-and angular velocity on the top row, their time derivatives on the bottom, one
-overlaid step-histogram per dataset.
-
-Every channel is derived the same way for a designed reference and for a log --
-the velocities are read off, the accelerations are ``np.gradient`` of them on
-their own time base -- so two figures from different sources are comparable.
+"""Histograms of the motion (v, omega, a, alpha) of a reference set or a
+recorded run, one overlaid step histogram per dataset. Accelerations are
+``np.gradient`` of the velocities on their own time base for every source.
 """
 
 from __future__ import annotations
@@ -29,12 +20,8 @@ MOTION_CHANNELS = (
 
 
 def motion_channels(time_s, v, omega) -> dict[str, np.ndarray]:
-    """``{v, omega, a, alpha}`` from a forward-speed / yaw-rate pair.
-
-    ``time_s`` is either a scalar sample time or the sample timestamps; a log's
-    stream can carry repeated timestamps, and a zero interval would put an
-    infinity in the derivative, so those samples are dropped first.
-    """
+    """``{v, omega, a, alpha}`` from a forward-speed / yaw-rate pair;
+    ``time_s`` is a sample time or the timestamps (repeated ones are dropped)."""
     v = np.asarray(v, dtype=float).reshape(-1)
     omega = np.asarray(omega, dtype=float).reshape(-1)
     if len(v) == 0:
@@ -57,13 +44,8 @@ def motion_channels(time_s, v, omega) -> dict[str, np.ndarray]:
 
 
 def motion_channels_from_reference_states(reference_states, dt: float) -> dict[str, np.ndarray]:
-    """Channels of one or many designed reference trajectories.
-
-    ``reference_states`` is ``(S, 8)`` or ``(T, S, 8)`` of
-    ``[x, y, theta, vx, vy, omega, ax, ay]`` on a uniform ``dt`` grid; a stacked
-    set is pooled, each trajectory differentiated on its own before pooling so
-    no derivative is taken across the seam between two trajectories.
-    """
+    """Channels of one ``(S, 8)`` or several ``(T, S, 8)`` designed references
+    on a uniform ``dt`` grid (each differentiated on its own, then pooled)."""
     states = np.asarray(reference_states, dtype=float)
     if states.ndim == 2:
         states = states[None, ...]
@@ -71,9 +53,7 @@ def motion_channels_from_reference_states(reference_states, dt: float) -> dict[s
     for trajectory in states:
         heading = trajectory[:, 2]
         velocity = trajectory[:, 3:5]
-        # The reference is nonholonomic, so the velocity lies along the heading
-        # and its norm is the forward speed; the projection only supplies the
-        # sign (a reversing reference).
+        # Forward speed: the velocity norm, signed by its projection on the heading.
         forward = velocity[:, 0] * np.cos(heading) + velocity[:, 1] * np.sin(heading)
         speed = np.hypot(velocity[:, 0], velocity[:, 1]) * np.where(forward < 0.0, -1.0, 1.0)
         channels = motion_channels(dt, speed, trajectory[:, 5])
@@ -83,23 +63,14 @@ def motion_channels_from_reference_states(reference_states, dt: float) -> dict[s
 
 
 def reference_motion_channels_from_log(log) -> dict[str, np.ndarray]:
-    """Channels of the reference a recorded run was driving.
-
-    A Pololu log's reference carries the commanded forward speed and yaw rate
-    (``v_ff``/``w_ff``) rather than a global velocity vector, so the forward
-    speed is read straight off instead of being projected.
-    """
+    """Channels of the reference a recorded run was driving (``v_ff``/``w_ff``)."""
     states = np.asarray(log.reference.states, dtype=float)
     return motion_channels(np.asarray(log.reference.time_s, dtype=float), states[:, 3], states[:, 5])
 
 
 def measured_motion_channels_from_log(log) -> dict[str, np.ndarray]:
-    """Channels of what a recorded run actually drove.
-
-    Prefers the smoothed mocap body twist (the canonical measured velocity, see
-    pololu.measurement_smoothing) and falls back to the firmware's own
-    encoder-derived ``(v, omega)`` for logs without a pose twist.
-    """
+    """Channels of what a recorded run drove (smoothed mocap twist, else the
+    encoder-derived ``(v, omega)``)."""
     twists = getattr(log.pose, "twists", None)
     if twists is not None and len(twists):
         twists = np.asarray(twists, dtype=float)
@@ -120,12 +91,8 @@ def pool_motion_channels(channel_sets) -> dict[str, np.ndarray]:
 
 
 def _bin_edges(values, bins: int, limit=None) -> np.ndarray:
-    """Shared bin edges over the datasets' robust range.
-
-    The range spans every dataset's 0.5-99.5 percentile, always includes zero
-    (so the panels stay centred on standing still) and the motion limit when
-    there is one, so the dashed limit line is always in view.
-    """
+    """Shared bin edges over every dataset's 0.5-99.5 percentile range,
+    including zero and the motion limit."""
     low = min(float(np.percentile(value, 0.5)) for value in values)
     high = max(float(np.percentile(value, 99.5)) for value in values)
     low, high = min(low, 0.0), max(high, 0.0)
@@ -146,14 +113,9 @@ def plot_motion_histograms(
     robot_cfg: dict | None = None,
     bins: int = 60,
 ) -> Path | None:
-    """2x2 of linear/angular velocity and acceleration histograms.
-
-    ``datasets`` is a sequence of ``(label, channels)`` pairs as returned by the
-    ``*_motion_channels*`` helpers above; each is drawn as its own step
-    histogram, normalized to a density so sets of different length compare.
-    ``robot_cfg`` (a problem yaml ``robot`` block) adds the motion limits as
-    dashed lines -- the bar every one of these quantities is designed under.
-    """
+    """2x2 of linear/angular velocity and acceleration histograms of
+    ``datasets`` (``(label, channels)`` pairs), as densities; ``robot_cfg``
+    adds the motion limits as dashed lines."""
     import matplotlib
 
     matplotlib.use("Agg", force=False)
@@ -179,18 +141,14 @@ def plot_motion_histograms(
             magnitude = np.abs(value)
             outside += int(np.count_nonzero((value < edges[0]) | (value > edges[-1])))
             axis.hist(
-                # A diverged run puts a handful of samples decades out; binning
-                # over the full range would leave every panel a single spike, so
-                # the far tail is piled into the edge bins instead. The
-                # percentiles below are of the unclipped values.
+                # Pile the far tail into the edge bins.
                 np.clip(value, edges[0], edges[-1]),
                 bins=edges,
                 density=True,
                 histtype="step",
                 linewidth=1.4,
                 color=colors[index % len(colors)],
-                # The percentiles are of the *magnitude*: what is being compared
-                # is how hard a set drives each channel, not which way it turns.
+                # Percentiles of the magnitude.
                 label=(
                     f"{label} (|p50| {np.median(magnitude):.2f}, "
                     f"|p95| {np.percentile(magnitude, 95):.2f})"

@@ -1,8 +1,6 @@
 import os
 
 import matplotlib.pyplot as plt
-from matplotlib.lines import Line2D
-from matplotlib.ticker import FormatStrFormatter
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 import numpy as np
 
@@ -117,262 +115,6 @@ def plot_trajectory(
     plt.close(fig)
 
 
-def plot_tracking_error_frame(
-    pipeline,
-    wheel_radius_values,
-    base_diameter_values,
-    tracking_error_surface,
-    num_realizations,
-    seed,
-    out_path,
-    hidden_params=None,
-    init_params=None,
-    z_min=None,
-    z_max=None,
-    x_label="Wheel radius [m]",
-    y_label="Base diameter [m]",
-    surface_label="Identification Loss",
-    init_label="Initial parameter guess",
-    hidden_label="Hidden parameters",
-    min_label="Minimum sampled loss",
-    theta_arrow_stride=20,
-    theta_arrow_length=0.12,
-    trajectory_linewidth=1.0,
-    theta_arrow_width=0.0025,
-):
-    os.makedirs("visualize", exist_ok=True)
-
-    reference_states = np.asarray(pipeline.reference_states)
-    full_reference_states = np.asarray(getattr(pipeline, "full_reference_states", pipeline.reference_states))
-
-    def _draw_theta_arrows(ax, poses, color):
-        if poses is None or len(poses) == 0:
-            return
-
-        stride = max(1, int(theta_arrow_stride))
-        arrow_poses = poses[::stride]
-        if arrow_poses.shape[1] >= 5:
-            dx = theta_arrow_length * arrow_poses[:, 3]
-            dy = theta_arrow_length * arrow_poses[:, 4]
-        else:
-            dx = theta_arrow_length * np.cos(arrow_poses[:, 2])
-            dy = theta_arrow_length * np.sin(arrow_poses[:, 2])
-        ax.quiver(
-            arrow_poses[:, 0],
-            arrow_poses[:, 1],
-            dx,
-            dy,
-            angles="xy",
-            scale_units="xy",
-            scale=1.0,
-            color=color,
-            alpha=0.8,
-            width=theta_arrow_width,
-        )
-
-    wheel_radius_grid, base_diameter_grid = np.meshgrid(wheel_radius_values, base_diameter_values)
-    surface = np.asarray(tracking_error_surface)
-
-    def _surface_value(wheel_radius, base_diameter):
-        radius_idx = int(np.argmin(np.abs(np.asarray(wheel_radius_values) - wheel_radius)))
-        base_idx = int(np.argmin(np.abs(np.asarray(base_diameter_values) - base_diameter)))
-        return float(surface[base_idx, radius_idx])
-
-    fig = plt.figure(figsize=(10, 14))
-    grid = fig.add_gridspec(2, 1, height_ratios=[1, 1.15])
-    ax_traj = fig.add_subplot(grid[0, 0])
-    ax_surface = fig.add_subplot(grid[1, 0], projection="3d")
-
-    ax_traj.plot(
-        full_reference_states[:, 0],
-        full_reference_states[:, 1],
-        linestyle="--",
-        linewidth=0.8 * trajectory_linewidth,
-        color="red",
-        label="Complete",
-    )
-    _draw_theta_arrows(ax_traj, full_reference_states[:, :5], "red")
-    if len(reference_states) > 0 and not np.array_equal(reference_states, full_reference_states):
-        ax_traj.plot(
-            reference_states[:, 0],
-            reference_states[:, 1],
-            linestyle="-",
-            linewidth=1.5 * trajectory_linewidth,
-            color="blue",
-            label="Selected",
-        )
-        _draw_theta_arrows(ax_traj, reference_states, "blue")
-    ax_traj.set_xlabel("x [m]")
-    ax_traj.set_ylabel("y [m]")
-    ax_traj.set_title("Trajectory Comparison")
-    ax_traj.set_aspect("equal", adjustable="box")
-    ax_traj.grid(True)
-    ax_traj.legend()
-
-    surf = ax_surface.plot_surface(
-        wheel_radius_grid,
-        base_diameter_grid,
-        surface,
-        cmap="viridis",
-        linewidth=0,
-        alpha=0.75,
-    )
-
-    min_index = np.unravel_index(np.argmin(surface), surface.shape)
-    min_base = float(base_diameter_values[min_index[0]])
-    min_radius = float(wheel_radius_values[min_index[1]])
-    min_loss = float(surface[min_index])
-
-    if init_params is not None:
-        init_radius = float(init_params.wheel_radius)
-        init_base = float(init_params.base_diameter)
-        init_loss = _surface_value(init_radius, init_base)
-        ax_surface.scatter(
-            [init_radius],
-            [init_base],
-            [init_loss],
-            color="white",
-            edgecolors="black",
-            s=60,
-            depthshade=False,
-            alpha=1,
-            label=init_label,
-        )
-    if hidden_params is not None:
-        hidden_radius = float(hidden_params.wheel_radius)
-        hidden_base = float(hidden_params.base_diameter)
-        hidden_loss = _surface_value(hidden_radius, hidden_base)
-        ax_surface.scatter(
-            [hidden_radius],
-            [hidden_base],
-            [hidden_loss],
-            color="gold",
-            edgecolors="black",
-            marker="*",
-            s=180,
-            depthshade=False,
-            alpha=1,
-            label=hidden_label,
-        )
-    ax_surface.scatter(
-        [min_radius],
-        [min_base],
-        [min_loss],
-        color="red",
-        edgecolors="black",
-        marker="X",
-        s=100,
-        depthshade=False,
-        alpha=1,
-        label=min_label,
-    )
-
-    ax_surface.set_xlabel(x_label)
-    ax_surface.set_ylabel(y_label)
-    ax_surface.set_zlabel(surface_label)
-    if z_min is not None and z_max is not None:
-        ax_surface.set_zlim(z_min, z_max)
-    ax_surface.view_init(elev=25, azim=-50)
-    ax_surface.legend(loc="upper right")
-    fig.colorbar(
-        surf,
-        ax=ax_surface,
-        shrink=0.7,
-        pad=0.1,
-        label=surface_label,
-        format=FormatStrFormatter("%.1f"),
-    )
-
-    fig.tight_layout()
-    fig.savefig(out_path, bbox_inches="tight")
-    plt.close(fig)
-
-    print(f"Saved figure to: {out_path}")
-
-
-def plot_reference_trajectories(
-    training_reference_trajectories,
-    validation_reference_trajectories=None,
-    out_prefix="reference trajectories",
-    theta_arrow_stride=30,
-    theta_arrow_length=0.07,
-    trajectory_linewidth=1.0,
-    theta_arrow_width=0.0025,
-):
-    os.makedirs("visualize", exist_ok=True)
-    output_filename = os.path.join("visualize", f"{out_prefix}.pdf")
-
-    training_reference_trajectories = np.asarray(training_reference_trajectories)
-    validation_reference_trajectories = (
-        None if validation_reference_trajectories is None else np.asarray(validation_reference_trajectories)
-    )
-
-    def _draw_theta_arrows(ax, poses, color):
-        if poses is None or len(poses) == 0:
-            return
-
-        stride = max(1, int(theta_arrow_stride))
-        arrow_poses = poses[::stride]
-        dx = theta_arrow_length * np.cos(arrow_poses[:, 2])
-        dy = theta_arrow_length * np.sin(arrow_poses[:, 2])
-        ax.quiver(
-            arrow_poses[:, 0],
-            arrow_poses[:, 1],
-            dx,
-            dy,
-            angles="xy",
-            scale_units="xy",
-            scale=1.0,
-            color=color,
-            alpha=0.8,
-            width=theta_arrow_width,
-        )
-
-    colors = plt.rcParams["axes.prop_cycle"].by_key().get("color", ["C0", "C1", "C2", "C3", "C4"])
-
-    fig, ax = plt.subplots(1, 1, figsize=(8, 8))
-
-    for idx, reference_states in enumerate(training_reference_trajectories):
-        color = colors[idx % len(colors)]
-        ax.plot(
-            reference_states[:, 0],
-            reference_states[:, 1],
-            linestyle="-",
-            linewidth=trajectory_linewidth,
-            color=color,
-        )
-        _draw_theta_arrows(ax, reference_states[:, :3], color)
-
-    if validation_reference_trajectories is not None:
-        for idx, reference_states in enumerate(validation_reference_trajectories):
-            color = colors[(idx + len(training_reference_trajectories)) % len(colors)]
-            ax.plot(
-                reference_states[:, 0],
-                reference_states[:, 1],
-                linestyle="--",
-                linewidth=0.8 * trajectory_linewidth,
-                color=color,
-            )
-            _draw_theta_arrows(ax, reference_states[:, :3], color)
-
-    legend_handles = [
-        Line2D([0], [0], color="black", linewidth=trajectory_linewidth, linestyle="-", label="Training"),
-        Line2D([0], [0], color="black", linewidth=0.8 * trajectory_linewidth, linestyle="--", label="Validation"),
-    ]
-
-    ax.set_xlabel("x [m]")
-    ax.set_ylabel("y [m]")
-    ax.set_title("Reference Trajectories")
-    ax.set_aspect("equal", adjustable="box")
-    ax.grid(True)
-    ax.legend(handles=legend_handles)
-    fig.tight_layout()
-    fig.savefig(output_filename, bbox_inches="tight", transparent=True)
-    plt.close(fig)
-
-    print(f"Reference trajectories PDF saved at: {output_filename}")
-
-
 def plot_system_id(
     pipeline,
     init_target_log,
@@ -442,9 +184,7 @@ def plot_system_id(
 
     ax_vel_omega = ax_vel.twinx()
     ref_speed = np.linalg.norm(reference[:, 3:5], axis=1)
-    # Velocities as used by the identification: the Savitzky-Golay-smoothed body
-    # twists (pose.twists, pololu.measurement_smoothing) when the log carries them; finite
-    # differences of the poses remain the fallback for simulated logs.
+    # Smoothed body twists when the log has them, else finite differences.
     pose_twists = getattr(target_log.pose, "twists", None)
     if pose_twists is not None:
         twists = np.asarray(pose_twists, dtype=float)[:plot_len]
@@ -766,12 +506,7 @@ def _set_symmetric_ylim(ax, values: np.ndarray) -> None:
 
 
 def _summed_series(component_history, *names) -> np.ndarray:
-    """Several weighted loss-term histories added into one curve.
-
-    The objective splits pose tracking into position and heading and velocity
-    tracking into its linear and angular channels, each with its own weight;
-    this panel plots one tracking curve against one velocity curve, which is
-    what the two summed pairs give."""
+    """Several weighted loss-term histories added into one curve."""
 
     return sum(np.asarray(component_history[name], dtype=float) for name in names)
 
@@ -871,8 +606,7 @@ def plot_loss_history(
         ax.grid(True, alpha=0.3)
         ax.legend(handles=legend_handles, loc="best")
 
-        # Second subplot: complete objective (left) and the input-delta term
-        # (right) -- they live on different magnitudes than the tracking terms.
+        # Second subplot: complete objective (left) and the input-delta term (right).
         input_delta_ax = total_ax.twinx()
         total_handles = []
         line = total_ax.plot(steps, np.asarray(loss_history, dtype=float),
@@ -969,12 +703,8 @@ def plot_identification_log_parameters(
     out_prefix="identification_log_parameters",
     out_dir="visualize",
 ):
-    """Per-log identified parameters against the joint fit.
-
-    One panel per physical parameter plus the robust deviation score used to
-    exclude logs, so a flagged log can be checked against *which* parameter
-    made it disagree.
-    """
+    """Per-log identified parameters against the joint fit, plus the robust
+    deviation score used to exclude logs."""
     os.makedirs(out_dir, exist_ok=True)
     output_filename = os.path.join(out_dir, f"{out_prefix}.pdf")
 
@@ -1018,8 +748,7 @@ def plot_identification_log_parameters(
             ax.axhline(float(z_threshold), color="tab:red", linestyle="--", linewidth=1.2, label="threshold")
             ax.legend(loc="best", fontsize="small")
         if z_scores is not None:
-            # Which parameter drove the exclusion; the red marker above sits in
-            # every panel because the whole log is dropped, not one value.
+            # Which parameter drove the exclusion.
             driving = np.argmax(np.asarray(z_scores, dtype=float), axis=1)
             for position in np.flatnonzero(is_outlier):
                 ax.annotate(
@@ -1042,175 +771,3 @@ def plot_identification_log_parameters(
     plt.close(fig)
     print(f"Per-log identification parameters PDF saved at: {output_filename}")
     return output_filename
-
-
-def plot_system_id_realization_sweep(
-    num_realizations, tracking_losses, parameter_mse, out_prefix="si_realization_sweep", num_seeds=None):
-
-    os.makedirs("visualize", exist_ok=True)
-    output_filename = os.path.join("visualize", f"{out_prefix}.pdf")
-
-    x_values = np.asarray(num_realizations, dtype=float)
-    tracking_losses = np.asarray(tracking_losses)
-    parameter_mse = np.asarray(parameter_mse)
-
-    fig, ax1 = plt.subplots(1, 1, figsize=(8.5, 4.8))
-    ax2 = ax1.twinx()
-
-    line1 = ax1.plot(
-        x_values,
-        tracking_losses,
-        color="tab:blue",
-        marker="o",
-        linewidth=2,
-        label="Final tracking MSE",
-    )[0]
-    line2 = ax2.plot(
-        x_values,
-        parameter_mse,
-        color="tab:orange",
-        marker="s",
-        linewidth=2,
-        label="Final Parameter MSE [mm^2]",
-    )[0]
-
-    ax1.set_xscale("log")
-    ax1.set_xlabel("Number of replay realizations")
-    ax1.set_ylabel("Final tracking loss", color="tab:blue")
-    ax2.set_ylabel("Parameter MSE [mm^2]", color="tab:orange")
-    ax1.tick_params(axis="y", labelcolor="tab:blue")
-    ax2.tick_params(axis="y", labelcolor="tab:orange")
-    if num_seeds is None:
-        ax1.set_title("System ID Sensitivity to Replay Realizations")
-    else:
-        ax1.set_title(f"System ID Sensitivity to Replay Realizations ({num_seeds} seeds averaged)")
-    ax1.grid(True, which="both", alpha=0.3)
-    ax1.set_xlim(min(x_values), max(x_values))
-    ax1.set_xticks(x_values)
-    ax1.set_xticklabels([str(int(value)) if value.is_integer() else str(value) for value in x_values])
-    ax1.legend([line1, line2], [line1.get_label(), line2.get_label()], loc='center right')
-
-    fig.tight_layout()
-    fig.savefig(output_filename, bbox_inches="tight")
-    print(f"Saved figure to: {output_filename}")
-    plt.show()
-
-
-def plot_tracking_error_surface(
-    wheel_radius_values,
-    base_diameter_values,
-    tracking_error_surface,
-    num_realizations,
-    seed,
-    hidden_params=None,
-    init_params=None,
-    out_prefix="si_tracking_error_surface",
-    out_path=None,
-    z_min=None,
-    z_max=None,
-    x_label="Wheel radius [m]",
-    y_label="Base diameter [m]",
-    surface_label="Identification Loss",
-    title="Tracking Error Surface",
-    init_label="Initial parameter guess",
-    hidden_label="Hidden parameters",
-    min_label="Minimum sampled loss",
-    save_pdf: bool = True,
-    show_plot: bool = False,
-    elev: float = 10.0,
-    azim: float = -157.0,
-):
-    os.makedirs("visualize", exist_ok=True)
-    output_filename = out_path if out_path is not None else os.path.join("visualize", f"{out_prefix}.pdf")
-
-    wheel_radius_grid, base_diameter_grid = np.meshgrid(wheel_radius_values, base_diameter_values)
-    surface = np.asarray(tracking_error_surface)
-
-    def _surface_value(wheel_radius, base_diameter):
-        radius_idx = int(np.argmin(np.abs(np.asarray(wheel_radius_values) - wheel_radius)))
-        base_idx = int(np.argmin(np.abs(np.asarray(base_diameter_values) - base_diameter)))
-        return float(surface[base_idx, radius_idx])
-
-    fig = plt.figure(figsize=(10, 7))
-    ax = fig.add_subplot(111, projection="3d")
-
-    surf = ax.plot_surface(
-        wheel_radius_grid,
-        base_diameter_grid,
-        surface,
-        cmap="viridis",
-        linewidth=0,
-        alpha=0.75,
-    )
-
-    min_index = np.unravel_index(np.argmin(surface), surface.shape)
-    min_base = float(base_diameter_values[min_index[0]])
-    min_radius = float(wheel_radius_values[min_index[1]])
-    min_loss = float(surface[min_index])
-
-    if init_params is not None:
-        init_radius = float(init_params.wheel_radius)
-        init_base = float(init_params.base_diameter)
-        init_loss = _surface_value(init_radius, init_base)
-        ax.scatter(
-            [init_radius],
-            [init_base],
-            [init_loss],
-            color="white",
-            edgecolors="black",
-            s=60,
-            depthshade=False,
-            alpha=1,
-            label=init_label,
-        )
-    if hidden_params is not None:
-        hidden_radius = float(hidden_params.wheel_radius)
-        hidden_base = float(hidden_params.base_diameter)
-        true_loss = _surface_value(hidden_radius, hidden_base)
-        ax.scatter(
-            [hidden_radius],
-            [hidden_base],
-            [true_loss],
-            color="gold",
-            edgecolors="black",
-            marker="*",
-            s=180,
-            depthshade=False,
-            alpha=1,
-            label=hidden_label,
-        )
-    ax.scatter(
-        [min_radius],
-        [min_base],
-        [min_loss],
-        color="red",
-        edgecolors="black",
-        marker="X",
-        s=100, depthshade=False, alpha=1,
-        label=min_label,
-    )
-
-    ax.set_xlabel(x_label)
-    ax.set_ylabel(y_label)
-    ax.set_zlabel(surface_label)
-    if z_min is not None or z_max is not None:
-        ax.set_zlim(bottom=z_min, top=z_max)
-    ax.set_title(title)
-    ax.view_init(elev=elev, azim=azim)
-    ax.legend(loc="upper right")
-    fig.colorbar(
-        surf,
-        ax=ax,
-        shrink=0.7,
-        pad=0.1,
-        label=surface_label,
-        format=FormatStrFormatter("%.1f"),
-    )
-
-    fig.tight_layout()
-    if save_pdf:
-        fig.savefig(output_filename, bbox_inches="tight")
-        print(f"Saved figure to: {output_filename}")
-    if show_plot:
-        plt.show()
-    plt.close(fig)

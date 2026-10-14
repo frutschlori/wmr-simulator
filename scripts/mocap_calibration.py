@@ -3,8 +3,8 @@
     # 1. the calibration run, to drive once with no mocap_* keys in ROBOTCFG.CFG
     python scripts/mocap_calibration.py trajectory --out-dir trajectory_exports/mocap_calibration
     # 2. estimate from its logs (SD-card binaries are decoded next to themselves)
-    python scripts/mocap_calibration.py estimate "Pololu Data/mocap_calibration/robot2"/TR0? \\
-        --wheel-radius 0.0161 --out "Pololu Data/mocap_calibration/robot2/mocap_calibration.yaml"
+    python scripts/mocap_calibration.py estimate calibration_logs/TR0? \\
+        --wheel-radius 0.016 --out calibration_logs/mocap_calibration.yaml
 
 Point experiment.yaml's mocap_calibration at the yaml, and every exported
 ROBOTCFG.CFG carries the correction. Estimating again on logs recorded with the

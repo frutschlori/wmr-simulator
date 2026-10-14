@@ -12,18 +12,11 @@ def clip_controller_gains(gains: jax.Array):
 
 
 class Realizations(NamedTuple):
-    """The frozen stochastic conditions a rollout batch is scored under.
+    """The frozen noise keys and start offsets a rollout batch is scored under.
 
-    One root bundle per run, built once and shared by everything that rolls
-    out. For a set of tuning trajectories, each trajectory gets independent
-    child noise keys from these roots; the trajectory optimizer averages its
-    FIM over the corresponding root realizations. Sharing the roots is what
-    makes a trajectory designed to be informative about the gains informative
-    about them *as the tuner sees them* -- two independent draws would score
-    the two halves of the loop on different problems.
-
-    Held fixed for the whole run (common random numbers): both objectives then
-    stay deterministic functions of their decision variables.
+    Shared by the trajectory design and the gain tuner and held fixed for a
+    run, so both objectives are deterministic. Each tuning trajectory derives
+    its own child noise keys from these roots.
     """
 
     robot_keys: jax.Array       # (R, 2) plant/measurement-noise keys
@@ -38,11 +31,7 @@ def make_realizations(
     offset_radius: float,
     offset_angle: float,
 ) -> Realizations:
-    """Draw ``num_realizations`` noise-key pairs and start-pose offsets.
-
-    The offsets are folded off the robot key with their own tag so they do not
-    correlate with the measurement-noise draws.
-    """
+    """Draw ``num_realizations`` noise-key pairs and start-pose offsets."""
     return Realizations(
         robot_keys=jax.random.split(robot_key, num_realizations),
         estimator_keys=jax.random.split(estimator_key, num_realizations),
@@ -55,9 +44,7 @@ def make_realizations(
     )
 
 
-# ``namespace`` values for split_realization_keys_by_trajectory. Named because
-# the summary figures have to reproduce the objective's keys exactly, and a
-# literal 0/1 in two places is a silent way for them to drift apart.
+# ``namespace`` values for split_realization_keys_by_trajectory.
 TRAINING_KEY_NAMESPACE = 0
 VALIDATION_KEY_NAMESPACE = 1
 
@@ -67,14 +54,8 @@ def split_realization_keys_by_trajectory(
     num_trajectories: int,
     namespace: int = TRAINING_KEY_NAMESPACE,
 ) -> jax.Array:
-    """Derive frozen, independent noise keys for every trajectory.
-
-    ``realization_keys`` is the run-level ``(R, 2)`` bundle. The returned
-    ``(T, R, 2)`` array gives every trajectory a distinct child key for each
-    realization while remaining deterministic across objective evaluations.
-    ``namespace`` separates otherwise-independent sets such as training and
-    validation trajectories.
-    """
+    """``(T, R, 2)`` child noise keys per trajectory from the ``(R, 2)``
+    bundle; ``namespace`` separates training and validation sets."""
     realization_keys = jnp.asarray(realization_keys, dtype=jnp.uint32)
     namespaced_keys = jax.vmap(lambda key: jax.random.fold_in(key, namespace))(
         realization_keys
@@ -92,20 +73,12 @@ def _resolve_initial_pose_offsets(initial_pose_offsets, num_realizations: int) -
 
 
 def weighted_realization_mean(terms: jax.Array, realization_weights) -> jax.Array:
-    """Mean of the per-realization loss terms, optionally down-weighting some.
-
-    ``terms`` is ``(R, num_terms)``; ``realization_weights`` is ``(R,)`` or None
-    (all ones). The weights exist so a diverging rollout can be dropped from the
-    objective outright -- see ``optimizers.rollout_outlier_weights`` for why one
-    such rollout is enough to stall the whole solve. They are constants of the
-    run, never functions of the gains, so the objective stays smooth.
-    """
+    """Weighted mean of the per-realization loss terms ``(R, num_terms)``;
+    ``realization_weights`` ``(R,)`` (None: all ones) drop diverging rollouts."""
     if realization_weights is None:
         return jnp.mean(terms, axis=0)
     weights = jnp.asarray(realization_weights, dtype=jnp.float32)
-    # An all-zero weight vector would divide by zero; fall back to the plain mean
-    # rather than emit NaN, since dropping every rollout is a caller bug and the
-    # caller (rollout_outlier_weights) already refuses to produce it.
+    # All-zero weights fall back to the plain mean.
     total = jnp.sum(weights)
     return jnp.where(
         total > 0.0,
@@ -139,13 +112,8 @@ def pose_tracking_losses(
     predicted_poses: jax.Array,
     reference_poses: jax.Array,
 ) -> tuple[jax.Array, jax.Array]:
-    """The position and heading tracking losses, unweighted and separate.
-
-    Same two residuals as ``SimulationPipeline.pose_mse`` (squared position
-    error and the SO(2) heading error ``2 - 2cos``), returned individually so
-    each can carry its own weight and stay its own entry in the loss-term
-    vector -- they are different quantities in different units, and summing
-    them hides which of the two a controller traded away."""
+    """The position (squared error) and heading (``2 - 2cos``) tracking
+    losses, unweighted and separate."""
 
     pos_error = predicted_poses[:, :2] - reference_poses[:, :2]
     angle_error = predicted_poses[:, 2] - reference_poses[:, 2]
@@ -173,12 +141,7 @@ def _base_loss_terms(
         predicted_poses, reference_poses
     )
     predicted_velocity = predicted_log.wheel.vel_omega[reference_pose_indices]
-    # Normalize [v, omega] by their limits so the two channels are commensurate
-    # (raw omega ~10 would otherwise swamp v ~1) and the two velocity weights are
-    # interpretable relative weights rather than unit-reconciliation constants.
-    # The channels carry separate weights because they are separate tracking
-    # objectives: the linear one is what the along-track gain kx buys, the
-    # angular one what ky/kth and the inner loop buy.
+    # [v, omega] normalized by their limits.
     velocity_scale = jnp.asarray([pipeline.v_max, pipeline.omega_max], dtype=jnp.float32)
     velocity_error = (predicted_velocity - reference_velocity) / velocity_scale
     linear_velocity_tracking_loss = jnp.mean(velocity_error[:, 0] ** 2)
@@ -190,11 +153,7 @@ def _base_loss_terms(
     input_delta = jnp.diff(duty_cycle, axis=0)
     input_delta_loss = jnp.mean(jnp.sum(input_delta**2, axis=1))  # favor input smoothness
 
-    # Angular-rate chatter penalty: the step-to-step change in the robot's yaw
-    # rate over the full wheel-dt series (normalized by omega_max, like the
-    # velocity term). Aggressive motor gains that oscillate omega on the real
-    # robot cost here even when the pose/velocity tracking still looks good in
-    # sim, so the optimizer is pushed toward smoother, more transferable gains.
+    # Step-to-step change of the yaw rate, normalized by omega_max.
     omega = predicted_log.wheel.vel_omega[:, 1] / pipeline.omega_max
     omega_delta_loss = jnp.mean(jnp.diff(omega) ** 2)
     return jnp.asarray(
@@ -294,46 +253,6 @@ def closed_loop_objective_terms(
     return weighted_realization_mean(terms, realization_weights)
 
 
-def scheduled_closed_loop_objective(
-    pipeline,
-    nominal_gains: jax.Array,
-    schedule_params,
-    replay_robot_keys: jax.Array,
-    replay_estimator_keys: jax.Array,
-    position_tracking_weight: float = 1.0,
-    heading_tracking_weight: float = 1.0,
-    linear_velocity_tracking_weight: float = 0.0,
-    angular_velocity_tracking_weight: float = 0.0,
-    input_weight: float = 0.0,
-    input_delta_weight: float = 0.0,
-    omega_delta_weight: float = 0.0,
-    gain_delta_weight: float = 0.0,
-    reference_states: jax.Array | None = None,
-    initial_pose_offsets: jax.Array | None = None,
-    realization_weights: jax.Array | None = None,
-):
-    return jnp.sum(
-        scheduled_closed_loop_objective_terms(
-            pipeline,
-            nominal_gains,
-            schedule_params,
-            replay_robot_keys,
-            replay_estimator_keys,
-            position_tracking_weight=position_tracking_weight,
-            heading_tracking_weight=heading_tracking_weight,
-            linear_velocity_tracking_weight=linear_velocity_tracking_weight,
-            angular_velocity_tracking_weight=angular_velocity_tracking_weight,
-            input_weight=input_weight,
-            input_delta_weight=input_delta_weight,
-            omega_delta_weight=omega_delta_weight,
-            gain_delta_weight=gain_delta_weight,
-            reference_states=reference_states,
-            initial_pose_offsets=initial_pose_offsets,
-            realization_weights=realization_weights,
-        )
-    )
-
-
 def scheduled_closed_loop_objective_terms(
     pipeline,
     nominal_gains: jax.Array,
@@ -352,16 +271,8 @@ def scheduled_closed_loop_objective_terms(
     initial_pose_offsets: jax.Array | None = None,
     realization_weights: jax.Array | None = None,
 ):
-    """Loss terms for the scheduled controller.
-
-    Returns an 8-vector: the seven static terms (position_tracking,
-    heading_tracking, linear_velocity_tracking, angular_velocity_tracking,
-    input, input_delta, omega_delta) plus a rate-scaled gain-schedule
-    smoothness penalty. The penalty is a pure function of the reference trajectory
-    (independent of rollout noise). With ``gain_delta_weight = 0`` and an
-    identity schedule (theta = 0) this reproduces the static objective terms
-    padded with a trailing zero.
-    """
+    """Loss terms for the scheduled controller: the seven static terms plus
+    a gain-schedule smoothness penalty (``gain_delta``)."""
     reference_states = pipeline.reference_states if reference_states is None else reference_states
     reference_poses, reference_velocity, reference_pose_indices = _reference_targets(pipeline, reference_states)
     offsets = _resolve_initial_pose_offsets(initial_pose_offsets, replay_robot_keys.shape[0])

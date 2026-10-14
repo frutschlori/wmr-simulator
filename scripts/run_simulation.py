@@ -1,3 +1,12 @@
+"""Simulate one closed-loop run of a problem yaml and plot it.
+
+    python scripts/run_simulation.py --problem problems/pololu_gains.yaml
+    # with an iteration's tuned controller and residual model
+    python scripts/run_simulation.py --problem experiments/exp01/iteration_02/problem.yaml \
+        --tuned-gains experiments/exp01/iteration_01/results/gains.yaml \
+        --residual-model experiments/exp01/iteration_01/results/residual_model.pkl
+"""
+
 import argparse
 
 from wmr_simulator.simulation import SimulationPipeline
@@ -6,23 +15,18 @@ from wmr_simulator.visualization.simulation import visualize
 
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--problem", type=str, default="problems/pololu_gains.yaml")
-    #parser.add_argument("--reference-trajectories-dir", type=str, default="trajectory_exports")
-    parser.add_argument("--reference-trajectories-dir", type=str, default=None)
+    parser.add_argument("--reference-trajectories-dir", type=str, default=None,
+                        help="Directory of reference pickles (default: the problem's planner).")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output", type=str, default="simulation")
     parser.add_argument("--skip-pdf", action="store_true")
     parser.add_argument("--skip-ref-meshcat", action="store_true", default=True)
-    # Learned residual dynamics checkpoint (scripts/train_residual_model.py);
-    # the closed loop then runs the residual-augmented dynamics.
-    # parser.add_argument("--residual-model", type=str, default="models/residual_pololu.pkl")
-    parser.add_argument("--residual-model", type=str, default=None)
-    # Tuning result from run_gain_tuning.py (--out): the closed loop then runs
-    # its gains + gain parametrization, and the summary plot shows the applied
-    # gains over time.
-    # parser.add_argument("--tuned-gains", type=str, default="models/tuned_gains.yaml")
-    parser.add_argument("--tuned-gains", type=str, default=None)
+    parser.add_argument("--residual-model", type=str, default=None,
+                        help="Residual model checkpoint (results/residual_model.pkl of an iteration).")
+    parser.add_argument("--tuned-gains", type=str, default=None,
+                        help="Tuning result (results/gains.yaml of an iteration): gains and gain schedule.")
     args = parser.parse_args()
 
     residual_model = None

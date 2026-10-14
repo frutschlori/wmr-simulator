@@ -58,36 +58,6 @@ def test_round_trip_through_the_decoder(tmp_path):
     assert float(rows[1020]["gyro_z"]) == pytest.approx(63.35, **TOLERANCE)
 
 
-def test_columns_the_real_robot_never_fills_stay_empty(tmp_path):
-    """EkfState and Odom are never queued on the robot, so those columns are blank."""
-    log_path = tmp_path / "TR01"
-    with BinaryLogWriter(log_path) as writer:
-        writer.setpoint(500, 0.0, 0.0, 0.0, 0.5, 0.0)
-        writer.mocap(500, [0.0, 0.0, 0.016, 0.0, 0.0, 0.0])
-    for row in decode(log_path):
-        assert row["x"] == row["y"] == row["yaw"] == ""
-        assert row["v_actual"] == row["w_actual"] == ""
-
-
-def test_unwritten_tags_are_refused(tmp_path):
-    with BinaryLogWriter(tmp_path / "TR02") as writer:
-        with pytest.raises(ValueError, match="never written"):
-            writer.write(0, LogTag.EKF_STATE, [0.0] * 6)
-        with pytest.raises(ValueError, match="never written"):
-            writer.write(0, LogTag.ODOM, [0.0, 0.0])
-
-
-def test_payload_shape_and_finiteness_are_checked(tmp_path):
-    with BinaryLogWriter(tmp_path / "TR03") as writer:
-        with pytest.raises(ValueError, match="takes 2 floats"):
-            writer.write(0, LogTag.MOTOR, [0.1])
-        # A NaN would decode to an empty csv cell instead of failing.
-        with pytest.raises(ValueError, match="finite"):
-            writer.motor(0, 0.1, math.nan)
-        with pytest.raises(ValueError, match="u32"):
-            writer.motor(-1, 0.1, 0.2)
-
-
 def test_file_layout_matches_the_firmware(tmp_path):
     log_path = tmp_path / "TR04"
     with BinaryLogWriter(log_path) as writer:

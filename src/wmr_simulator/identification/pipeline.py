@@ -5,7 +5,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from wmr_simulator.identification.losses import window_replay_mse
-from wmr_simulator.identification.optimizers import bootstrap_identification_adam, optimize_physical_params_adam
+from wmr_simulator.identification.optimizers import optimize_physical_params_adam
 from wmr_simulator.simulation import (
     SimulationPipeline,
     make_replay_segment_plan,
@@ -14,8 +14,6 @@ from wmr_simulator.simulation import (
 from wmr_simulator.types import (
     PhysicalParams,
     SimulationLog,
-    clip_physical_params,
-    physical_params_from_array,
     physical_params_mse,
 )
 
@@ -53,16 +51,11 @@ class SystemIdentificationPipeline(SimulationPipeline):
             self.sim_time_grid = self.pose_time_grid
         self.replay_segment_plan = self.make_replay_segment_plan(self.target_log, self.window_length)
 
-    @staticmethod
-    def _clip_physical_params(params: PhysicalParams):
-        return clip_physical_params(params)
 
     @staticmethod
     def parameter_mse(params: PhysicalParams, target_params: PhysicalParams):
         return physical_params_mse(params, target_params)
 
-    def run_target_closed_loop(self, *args, **kwargs) -> SimulationLog:
-        return self.run_closed_loop(*args, **kwargs)
 
     def motor_wheel_speed_rollout(
         self,
@@ -161,13 +154,8 @@ def run_multi_log_identification(
     window_length: int | None = None,
     replay_wheel_speed_source: str = "estimated",
 ):
-    """Identify one parameter set jointly from several recorded logs.
-
-    One replay pipeline per log (they differ in length, so they cannot be
-    batched); the logs enter the fit through the mean of their normalized
-    losses, see optimizers.optimize_physical_params_adam. Passing a single log
-    reproduces a plain single-log identification.
-    """
+    """Identify one parameter set jointly from one or more recorded logs
+    (one replay pipeline per log; see optimizers.optimize_physical_params_adam)."""
     pipelines = [
         SystemIdentificationPipeline(
             problem_path=problem_path,
@@ -207,95 +195,4 @@ def run_multi_log_identification(
         "parameter_mse_history": parameter_mse_history,
         "init_replay_logs": init_replay_logs,
         "final_replay_logs": final_replay_logs,
-    }
-
-
-def run_single_experiment_identification(
-    problem_path: str,
-    initial_params: PhysicalParams,
-    num_steps: int,
-    learning_rate: float,
-    seed: int = 0,
-    reference_trajectories_dir: str | None = None,
-    window_length: int | None = None,
-    target_log: SimulationLog | None = None,
-    bootstrap_samples: int | None = None,
-    replay_wheel_speed_source: str = "estimated",
-):
-    pipeline = SystemIdentificationPipeline(
-        problem_path=problem_path,
-        initial_params=initial_params,
-        seed=seed,
-        reference_trajectories_dir=reference_trajectories_dir,
-        window_length=window_length,
-        target_log=target_log,
-        replay_wheel_speed_source=replay_wheel_speed_source,
-    )
-    init_target_log = pipeline.target_log
-    init_replay_log = pipeline.replay_rollout(initial_params, target_log=pipeline.target_log, window_length=window_length)
-    bootstrap = None
-    # TODO (2026-09-27): check the spread of max_wheel_speed and time_constant
-    # across bootstrap samples (bootstrap["parameter_samples"] /
-    # ["parameter_covariance"]). Thesis §4.3.4 claims both are identified
-    # reliably from any trajectory, which is why they are left out of the FIM
-    # design criterion; Chapter 5 needs a number for it. Note: this bootstrap
-    # re-simulates the hidden robot with fresh noise keys, so it only works in
-    # sim-to-sim. For hardware logs, use the spread across repeated runs /
-    # iterations of the same experiment instead.
-    if bootstrap_samples is not None and bootstrap_samples > 0:
-        if pipeline.uses_external_target_log:
-            raise ValueError("Bootstrap identification is only supported for simulated target logs.")
-        bootstrap = bootstrap_identification_adam(
-            pipeline=pipeline,
-            initial_params=initial_params,
-            num_steps=num_steps,
-            learning_rate=learning_rate,
-            bootstrap_samples=bootstrap_samples,
-            seed=seed,
-        )
-        estimated_params = physical_params_from_array(bootstrap["parameter_mean"])
-        loss_history = jnp.mean(bootstrap["loss_history"], axis=0)
-        motor_loss_history = jnp.mean(bootstrap["motor_loss_history"], axis=0)
-        parameter_mse_history = jnp.mean(bootstrap["parameter_mse_history"], axis=0)
-        pipeline.target_log = pipeline.run_target_closed_loop(
-            initial_params,
-            use_hidden_robot=True,
-            controller_gains=pipeline.gains,
-            robot_key=bootstrap["target_robot_key"],
-            estimator_key=bootstrap["target_estimator_key"],
-            wheel_speed_log_source=pipeline.replay_wheel_speed_source,
-        )
-        plot_params = physical_params_from_array(bootstrap["parameter_samples"][0])
-    else:
-        estimated_params, loss_history, motor_loss_history, parameter_mse_history = pipeline.optimize(
-            init_params=initial_params,
-            num_steps=num_steps,
-            learning_rate=learning_rate,
-        )
-        plot_params = estimated_params
-    if bootstrap is None and not pipeline.uses_external_target_log:
-        pipeline.target_log = pipeline.run_closed_loop(
-            estimated_params,
-            use_hidden_robot=True,
-            controller_gains=pipeline.gains,
-            wheel_speed_log_source=pipeline.replay_wheel_speed_source,
-        )
-    pipeline.estimated_params = estimated_params
-    if bootstrap is not None:
-        pipeline.estimated_params = plot_params
-    final_replay_log = pipeline.replay_rollout(
-        plot_params,
-        target_log=pipeline.target_log,
-        window_length=window_length,
-    )
-    return {
-        "pipeline": pipeline,
-        "init_target_log": init_target_log,
-        "init_replay_log": init_replay_log,
-        "estimated_params": estimated_params,
-        "loss_history": loss_history,
-        "motor_loss_history": motor_loss_history,
-        "parameter_mse_history": parameter_mse_history,
-        "bootstrap": bootstrap,
-        "final_replay_log": final_replay_log,
     }

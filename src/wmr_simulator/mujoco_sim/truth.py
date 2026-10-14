@@ -1,24 +1,8 @@
-"""Measure what the hidden plant actually is, for the identification benchmark.
+"""Measure the hidden plant's effective parameters (rolling radius, wheelbase,
+motor gain and time constant) by driving it open loop.
 
-The identification has to recover the plant's *effective* parameters, and
-those are emergent - contact penetration sets the rolling radius, tire scrub
-sets the wheelbase, and load sets the motor's steady-state gain and time
-constant. None of them is written down anywhere, so they have to be measured,
-and re-measured whenever ``pololu_calibrated.xml`` or ``pololu_hidden.yaml``
-changes.
-
-This module only ever looks at the plant, never at a log or a pipeline config.
-
-Two of the numbers need their regime stated to mean anything:
-
-- **The effective wheelbase grows with yaw rate** (scrub): 83.2 mm spinning
-  slowly in place, 84.0 mm spinning fast, 83.3 mm on the gentle arcs an
-  identification log actually contains. Score a fit against the regime its logs
-  cover.
-- **The motor time constant depends on where you measure it.** Mechanically the
-  loaded wheel rises with tau ~ 0.11 s; the *logged* ``omega_*_meas`` is behind
-  the firmware's 3 Hz low-pass and rises with tau ~ 0.18 s. Identification is
-  fitted to the logged signal, so that is the number to score it against.
+The effective wheelbase grows with yaw rate (tire scrub), and the motor time
+constant seen in the logs includes the firmware's 3 Hz low-pass.
 """
 
 from __future__ import annotations
@@ -29,24 +13,13 @@ import numpy as np
 
 from wmr_simulator.mujoco_sim.plant import MujocoPlant
 
-# Duties gentle enough to stay inside the plant's traction envelope; above
-# a_lat ~ 4 m/s^2 it slides and every measurement below becomes meaningless.
+# Duties that stay inside the plant's traction envelope.
 STRAIGHT_DUTIES = (0.2, 0.3, 0.4, 0.5, 0.6)
 SPIN_DUTIES = (0.10, 0.15)
 ARC_DUTIES = ((0.18, 0.22), (0.12, 0.18))
 
-# Every measurement here drives OPEN LOOP, and a rear-caster differential drive
-# is directionally unstable open loop: the CoM sits 11 mm BEHIND the drive axle,
-# so any yaw perturbation grows. Measured at duty 0.5, the robot tracks straight
-# to within 0.15 deg for 2.1 s and is then gone - 0.9 deg at 2.45 s, 5.8 at 2.8,
-# 44 at 3.15, spinning after that. The window has to close before that.
-#
-# This is not new physics, it was MASKED: at the old placeholder 0.150 N-m stall
-# torque the velocity servo was stiff enough to hold both wheel speeds equal
-# through the perturbation. At the datasheet 0.0245 N-m it cannot, and 4.0 s of
-# settling put every reading inside the divergence (wheel radius read 12.5 mm
-# against 16.0, the arc wheelbase 51 mm against 84, and the rise time constant
-# came out 0.000 s because `final` was averaged over a spinning tail).
+# Open-loop driving is directionally unstable (CoM behind the axle), so every
+# measurement window ends before the yaw drift grows.
 SETTLE_TIME = 1.5
 RISE_WINDOW_S = 1.5
 
@@ -113,13 +86,7 @@ def _steady_wheel_base(plant: MujocoPlant, duty_left: float, duty_right: float, 
 
 
 def _motor_gain(plant: MujocoPlant) -> float:
-    """Loaded steady-state wheel speed per unit duty, over the usable duty range.
-
-    Duty 1.0 is left out: the plant's ratio drops there, so including it drags a
-    through-origin fit ~2% low over the range a trajectory actually commands.
-    Duty 0.8 is left out too - the open-loop yaw divergence above reaches it
-    inside the settling window, and a diverged run reads as a low ratio.
-    """
+    """Loaded steady-state wheel speed per unit duty, over the usable duty range."""
     ratios = []
     for duty in (0.2, 0.4, 0.6):
         _drive(plant, duty, duty)
@@ -141,8 +108,6 @@ def _rise_time_constant(plant: MujocoPlant, logged: bool, duty: float = 0.6) -> 
     plant.reset()
     inner = None
     if logged:
-        # Only the low-pass is used here; the gains never touch the plant,
-        # because the duty is commanded directly.
         config = FirmwareConfig.from_mapping(
             robot_config_values(
                 physical_params=SimpleNamespace(wheel_radius=0.016, base_diameter=0.0825, max_wheel_speed=223.0),
@@ -165,11 +130,6 @@ def _rise_time_constant(plant: MujocoPlant, logged: bool, duty: float = 0.6) -> 
             speeds.append(float(np.mean(plant.wheel_speeds())))
 
     speeds = np.asarray(speeds)
-    # Last 0.5 s of the window: past 6 loaded time constants, before the yaw
-    # divergence. Averaging a longer tail would fold the divergence into `final`.
+    # Last 0.5 s of the window.
     final = speeds[-50:].mean()
     return float(INNER_PERIOD_S * int(np.argmax(speeds >= (1.0 - np.exp(-1.0)) * final)))
-
-
-if __name__ == "__main__":
-    print(measure_plant_truth())

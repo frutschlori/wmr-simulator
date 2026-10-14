@@ -1,88 +1,32 @@
-"""Render a video of one MuJoCo deployment of an active-learning trajectory.
+"""Render a video of one MuJoCo deployment of a trajectory.
 
-The run is the real thing, not a re-simulation for the camera: the hidden
-MuJoCo plant driven by the firmware port, exactly what the ``simulate-deployment``
-and ``benchmark`` stages put on the (simulated) SD card. The iteration the
-trajectory came from is found by walking up to its ``ROBOTCFG.CFG``, so the
-controller and the identified robot parameters are the ones that trajectory was
-actually deployed under.
+The run is the hidden MuJoCo plant driven by the firmware port, as in the
+``simulate-deployment`` and ``benchmark`` stages. The iteration a trajectory
+belongs to is found by walking up to its ``ROBOTCFG.CFG``; ``--config`` drives
+another config instead. ``--trajectory`` takes a reference pickle or a JSN.
 
-``--trajectory`` takes either a designed reference pickle or a Pololu ``.JSN``
-(bridged or not) -- a pickle is converted through the same exporter the robot's
-JSN is written by, so the two drive identically.
+``--gains both`` drives the iteration's static and parametrized controllers on
+the same seed; the static run is drawn as a marker beside the rendered robot.
 
-``--gains both`` puts the iteration's two controller options in one video, on
-the **same seed**, so the hand placement and the sensor noise are common random
-numbers and the difference between the two traces is the controller and nothing
-else. Both variants are independent closed-loop deployments -- own plant, own
-firmware, own EKF -- but a MuJoCo scene holds one robot, so only the
-parametrized run can be the rendered chassis; the static one is drawn beside it
-as a marker from its own recorded true pose. The traces keep their colours in
-single-variant videos too: parametrized orange, static pink.
-
-Two camera modes. ``--camera-mode static`` is the overhead shot: it looks down
-from ``--elevation`` degrees, framed once to fit the whole reference.
-``--camera-mode follow`` is a chase camera that rides at the robot's own height
-and keeps it in frame, which is the only view that shows the caster and both
-wheels at once -- ``--follow-angle`` swings it round the robot's *own heading*
-(0 directly behind, 90 abeam, 45 between the two), with ``--follow-distance``
-and ``--follow-height`` setting how far back and how high it rides. The camera
-lags the robot slightly rather than locking to it, so the robot moves within
-the frame instead of the world swinging around it.
-
-``--follow-elevation`` states the chase camera's angle outright instead of
-letting it follow from the height and stand-off: 0 is level with the robot,
-positive looks down on it, and **negative goes under the floor**. MuJoCo renders
-the ground plane one-sided, so a camera below it looks straight up through the
-floor at the caster ball, both tires and their contact patches -- there is no
-other way to watch the caster roll. ``--follow-distance`` is then the
-straight-line range rather than a distance along the floor.
-
-``--layout split`` puts several cameras on the *same* run in one frame: the
-overhead shot on the left, and one chase pane per ``--follow-angle`` stacked
-down the right. ``--follow-angle``, ``--follow-distance`` and
-``--follow-elevation`` are all per pane -- each takes one value that every
-chase pane shares, or one value per angle -- so a split screen can hold two
-genuinely different shots rather than the same shot at two bearings. One deployment, one video -- the panes are rendered together
-and tiled, not stitched afterwards, so they cannot drift out of step. The panes
-tile the frame exactly, which at the default 1920x1080 means a 960x1080
-overview beside two 960x540 chase views; one ``--follow-angle`` gives two
-960x1080 panes instead. It costs one render per pane, so a three-pane video
-takes about three times as long as a single one.
-
-``--slowmo-factor`` stretches the run out: the plant is sampled that many times
-more often and the frames are played at ``--fps``, so a 4x video is four times
-as long *and* four times as finely resolved -- which is what makes the wheel
-hops and the yaw wobble visible rather than just slower.
+Cameras: ``--camera-mode static`` looks down from ``--elevation`` on the whole
+reference; ``--camera-mode follow`` is a chase camera at ``--follow-angle``
+round the robot's heading (0 behind, 90 abeam), ``--follow-distance`` and
+``--follow-height`` away, or at ``--follow-elevation`` (negative: from under
+the floor). ``--layout split`` shows the overview on the left and one chase
+pane per ``--follow-angle`` on the right. ``--slowmo-factor`` samples the
+plant that many times more often at the same ``--fps``.
 
 Examples
 --------
-    # the iteration's identification trajectory, deployed controller
-    uv run python scripts/render_deployment_video.py \
-        --trajectory "Pololu Data/exp02/iteration_05/identification_trajectory/identification_trajectory_20260817_190841_bridge.JSN"
+    # a benchmark reference under an iteration's static controller
+    python scripts/render_deployment_video.py \
+        --trajectory experiments/exp01/iteration_03/benchmark/eight_fast.JSN --gains static
 
-    # a tuning trajectory under the static-gain baseline, flatter camera
-    uv run python scripts/render_deployment_video.py \
-        --trajectory "Pololu Data/exp02/iteration_05/tuning_trajectories/tuning_trajectory_00_20260817_190928.pkl" \
-        --gains static --elevation 65 --out visualize/tuning_00_static.mp4
-
-    # chase camera over the robot's shoulder, quarter speed to see it hop
-    uv run python scripts/render_deployment_video.py \
-        --trajectory "Pololu Data/exp02/iteration_05/identification_trajectory/identification_trajectory_20260817_190841_bridge.JSN" \
-        --camera-mode follow --follow-angle 45 --slowmo-factor 4
+    # chase camera, quarter speed
+    ... --layout single --camera-mode follow --follow-angle 45 --slowmo-factor 4
 
     # split screen: overview left, chase from behind and abeam stacked right
     ... --layout split --follow-angle 0 90
-
-    # split screen with one chase pane, looking up through the floor at the caster
-    ... --layout split --follow-angle 90 --follow-elevation -35
-
-    # two chase panes from genuinely different places: close in from behind,
-    # and abeam from under the floor
-    ... --layout split --follow-angle 0 90 --follow-elevation 10 -60 --follow-distance 0.12 0.20
-
-    # both controllers in one video, paired seed
-    ... --gains both
 
     # force software rendering if EGL is unavailable
     ... --gl osmesa
@@ -97,14 +41,14 @@ from pathlib import Path
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--trajectory", default="Pololu Data/test21/iteration_05/identification_trajectory/identification_trajectory_20260915_100448_bridge.JSN")
+    parser.add_argument("--trajectory", required=True, help="Reference pickle or Pololu JSN inside an iteration folder.")
     parser.add_argument(
         "--gains",
         choices=("parametrized", "static", "both"),
         default="static",
         help="Controller to drive it under: the iteration's deployed gain parametrization "
         "(ROBOTCFG.CFG + GAINMLP.JSN), its static-gain baseline (ROBOTCFG_static.CFG), or both in one "
-        "video on the same seed. Default both.",
+        "video on the same seed. Default static.",
     )
     parser.add_argument(
         "--config",
@@ -119,7 +63,7 @@ def main(argv: list[str] | None = None) -> int:
         default="split",
         help="single: one camera fills the frame, chosen by --camera-mode. split: a split screen of the "
         "same run -- the overhead shot on the left, one chase pane per --follow-angle stacked down the "
-        "right, tiling the frame exactly (default single)",
+        "right, tiling the frame exactly (default split)",
     )
     parser.add_argument(
         "--camera-mode",
@@ -181,8 +125,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--gl", default=None, help="MUJOCO_GL backend: egl | osmesa | glfw")
     args = parser.parse_args(argv)
 
-    # MUJOCO_GL is read when mujoco is first imported, so it has to be set
-    # before anything that pulls the plant in.
+    # MUJOCO_GL has to be set before mujoco is imported.
     os.environ.setdefault("MUJOCO_GL", args.gl or "egl")
     if args.gl:
         os.environ["MUJOCO_GL"] = args.gl
@@ -267,15 +210,8 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _build_views(args, View, split_screen_views) -> list:
-    """The cameras this run is rendered from, one per pane.
-
-    The three chase settings are per pane: each takes one value that every pane
-    shares, or one value per ``--follow-angle``. That is what lets a split
-    screen hold two genuinely different shots -- abeam from under the floor
-    beside close-in from behind -- rather than the same shot at two bearings.
-    A count that is neither 1 nor the number of angles is a typo, and is
-    refused rather than zipped short.
-    """
+    """The cameras this run is rendered from, one per pane (the chase
+    settings take one shared value or one per ``--follow-angle``)."""
     if args.layout == "split":
         try:
             return split_screen_views(
@@ -291,8 +227,7 @@ def _build_views(args, View, split_screen_views) -> list:
 
     if args.camera_mode == "static":
         return [View(camera_mode="static", elevation=args.elevation, azimuth=args.azimuth)]
-    # One camera fills the frame, so it takes the first of each list. Said out
-    # loud rather than dropped quietly, since the defaults are a split screen's.
+    # A single camera takes the first value of each list.
     extra = [
         flag
         for flag, values in (
@@ -324,8 +259,6 @@ def _print_written(out_path, num_frames: int, args, result) -> None:
 
 
 def _default_out_path(trajectory: Path, iteration_root: Path | None, gains: str, layout: str) -> Path:
-    # The layout is in the name so a split screen does not overwrite the
-    # single-camera video of the same run.
     suffix = "_split" if layout == "split" else ""
     if iteration_root is None:
         return Path("visualize") / f"{trajectory.stem}{suffix}.mp4"

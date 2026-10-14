@@ -1,31 +1,10 @@
 """Cross-iteration summary of a full active-learning pipeline run.
 
-One figure, a gain panel and a yaw-ringing panel over a 2x3 grid of loss
-panels:
-
-- the gain history (one line per gain: kx, ky, kth, kpmotor, kimotor, kdmotor),
-  x = iteration, styled like the joint-tuning gain-history plot
-  (``visualization.joint_tuning.plot_joint_tuning_history``, whose gain panel
-  it shares a helper with); gains are the *static* controller gains deployed to
-  record each iteration -- a gain parametrization scales them per sample, so
-  its base gains are not a number worth plotting (see ``_static_gains``);
-- one small panel per plotted loss term (``PLOTTED_TERMS``: every weighted term
-  of the objective except the input-energy one, six of them, which is what the
-  2x3 grid is sized from), evaluated on the fixed-baseline benchmark runs (one
-  point = run mean). A panel each rather than pairs sharing a twin axis: the
-  terms span orders of magnitude, so any two of them on one pair of axes leaves
-  the smaller unreadable. Solid = closed-loop sim of the recording controller,
-  dashed = the actual recorded run, one point per iteration, with a shaded band
-  over the individual runs behind the recorded mean -- the runs are chained, so one of them diverging is a result rather
-  than scatter an average may quietly absorb;
-- the yaw ringing of the recorded runs (``baseline_runs.run_yaw_ringing``), the
-  smoothness metric beside the tracking terms, as the worst shape's median run
-  with a band over the other shapes' medians. Worst shape rather than a pooled
-  mean because only the fast shapes ring. Recorded runs only: the JAX plant
-  cannot ring.
-
-The per-iteration records (gains + sim/real loss terms) are computed by
-``active_learning.progress.evaluate_pipeline_progress`` and only rendered here.
+One figure: the static gains per iteration, one panel per weighted loss term
+(``PLOTTED_TERMS``) on the benchmark runs (solid: simulation of the recording
+controller, dashed: the recorded runs, with a band over the runs), and the yaw
+ringing of the recorded runs (worst shape, with a band over the other
+shapes). The records come from ``active_learning.progress``.
 """
 
 import os
@@ -38,30 +17,28 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from wmr_simulator.active_learning.progress import TERM_NAMES
-from wmr_simulator.gain_tuning.optimizers import _GAIN_NAMES
-from wmr_simulator.visualization.joint_tuning import _plot_gain_lines
+from wmr_simulator.controller import GAIN_NAMES
 
-# Every loss term gets a panel except the input energy: it is a regularizer on
-# how hard the controller drives the motors, not a measure of how the iteration
-# did, and it is weighted 0 in the shipped defaults. The remaining six are what
-# the 2x3 grid below is sized for.
+# Every loss term except the input energy gets a panel (2x3 grid).
 PLOTTED_TERMS = tuple(name for name in TERM_NAMES if name != "input")
 
 
-def _plot_metric(ax, records, key, color, label):
-    """Plot one sim/real loss term on ``ax``, solid for sim and dashed for
-    real, one point per iteration.
+def _plot_gain_lines(ax, xs, gains, gain_names=GAIN_NAMES, marker=None):
+    """One line per gain vs ``xs`` on ``ax``."""
+    for index, name in enumerate(gain_names):
+        ax.plot(xs, gains[:, index], linewidth=1.2, label=name, marker=marker)
+    ax.set_ylabel("gain")
+    ax.legend(fontsize=7, ncol=2)
 
-    The recorded curve is the mean over an iteration's benchmark runs; the band
-    behind it spans the individual runs, so an iteration whose runs disagree
-    cannot pass for one whose runs agree.
-    """
+
+def _plot_metric(ax, records, key, color, label):
+    """Plot one sim/real loss term on ``ax`` (sim solid, recorded dashed with
+    a band over the runs), one point per iteration."""
     handles = []
     xs = [rec["index"] for rec in records]
     sim = [rec["sim"][key] for rec in records]
     real = [rec["real"][key] for rec in records]
-    # marker="o": a pipeline can be a single iteration, where a bare line draws
-    # nothing at all (the same reason the gain panel carries markers).
+    # Markers, so a single iteration is visible.
     handles.append(
         ax.plot(xs, sim, color=color, linestyle="-", marker="o", markersize=3.5, linewidth=1.9, label=f"Sim {label}")[0]
     )
@@ -98,9 +75,7 @@ def plot_pipeline_progress(records, experiment_root, out_path=None, out_prefix="
     else:
         os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
 
-    # Three rows: the gain history across the top, then the loss terms in a
-    # 2x3 grid below it. The panels are small on purpose -- the terms differ by
-    # orders of magnitude, so one axis each is what makes them readable at all.
+    # Gain history on top, the loss terms in a 2x3 grid below.
     fig = plt.figure(figsize=(16, 11))
     fig.suptitle(f"Pipeline Progress: {experiment_root.name} (baseline benchmark)", fontsize=16)
     ax_gains = plt.subplot2grid((3, 3), (0, 0), colspan=2, fig=fig)
@@ -114,10 +89,7 @@ def plot_pipeline_progress(records, experiment_root, out_path=None, out_prefix="
     if gain_records:
         indices = [rec["index"] for rec in gain_records]
         gains = np.vstack([rec["gains"] for rec in gain_records])
-        # marker="o": unlike the joint-tuning round history (hundreds of
-        # points), a pipeline has one point per iteration and can be as short
-        # as a single iteration, where a bare line draws nothing at all.
-        _plot_gain_lines(ax_gains, indices, gains, _GAIN_NAMES, marker="o")
+        _plot_gain_lines(ax_gains, indices, gains, marker="o")
         ax_gains.set_xlabel("iteration")
         ax_gains.set_xticks(indices)
         ax_gains.set_title("Static controller gains over iterations")

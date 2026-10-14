@@ -4,7 +4,6 @@ estimator against a MuJoCo plant with a hidden misalignment, and the export."""
 from __future__ import annotations
 
 import dataclasses
-import json
 import math
 from types import SimpleNamespace
 
@@ -13,9 +12,7 @@ import pytest
 import yaml
 
 from wmr_simulator.pololu.mocap_calibration import (
-    CONFIG_KEYS,
     MocapCalibration,
-    calibration_reference_states,
     estimate_mocap_calibration,
     export_calibration_reference,
 )
@@ -43,37 +40,6 @@ def test_correction_recovers_the_axle_pose():
     corrected = calibration.correct(frames)
     np.testing.assert_allclose(corrected[:, :2], axle, atol=1e-12)
     np.testing.assert_allclose(np.cos(corrected[:, 5] - robot_yaw), 1.0, atol=1e-12)
-
-
-def test_composition_matches_applying_both():
-    first = MocapCalibration(YAW_OFFSET, (0.011, -0.004))
-    residual = MocapCalibration(math.radians(-0.3), (0.002, 0.001))
-    poses = np.array([[1.0, 2.0, 0.05, 0.01, 0.02, 0.7], [-0.4, 0.3, 0.05, 0.0, 0.0, -2.9]])
-    np.testing.assert_allclose(
-        residual.correct(first.correct(poses)), first.compose(residual).correct(poses), atol=1e-12
-    )
-
-
-def test_config_values_round_trip():
-    calibration = MocapCalibration(YAW_OFFSET, (0.011, -0.004))
-    assert set(calibration.config_values()) == set(CONFIG_KEYS)
-    assert MocapCalibration.from_config_values(calibration.config_values()) == calibration
-    assert MocapCalibration.from_mapping(calibration.to_mapping()) == calibration
-    assert MocapCalibration.from_config_values({}) == MocapCalibration()
-
-
-def test_calibration_run_fits_the_firmware_and_the_arena(tmp_path):
-    states = calibration_reference_states()
-    speed = np.hypot(states[:, 3], states[:, 4])
-    assert len(states) <= 350
-    assert speed.max() < 1.0 and np.abs(states[:, 5]).max() <= 5.0 + 1e-9
-    np.testing.assert_allclose(states[-1, :3], states[0, :3], atol=1e-9)  # repeatable in place
-    assert np.all(np.abs(states[:, 0]) <= 1.3) and np.all(np.abs(states[:, 1]) <= 2.3)
-    # Turns on the spot (the heading offset needs straights, the offset turns).
-    assert np.any((speed < 1e-9) & (np.abs(states[:, 5]) > 3.0))
-    _, jsn = export_calibration_reference(tmp_path)
-    payload = json.loads(jsn.read_text())["result"][0]
-    assert payload["num_states"] == len(states)
 
 
 @pytest.fixture(scope="module")

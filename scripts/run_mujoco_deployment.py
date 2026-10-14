@@ -15,9 +15,9 @@ Examples
 --------
     # one run of the iteration's identification trajectory
     uv run python scripts/run_mujoco_deployment.py \
-        --config experiments/exp01/iteration_00/ROBOTCFG.CFG \
-        --trajectory experiments/exp01/iteration_00/identification_trajectory/identification_trajectory.JSN \
-        --output-dir experiments/exp01/iteration_00/data
+        --config experiments/exp01/iteration_01/ROBOTCFG.CFG \
+        --trajectory experiments/exp01/iteration_01/identification_trajectory/identification_trajectory_<stamp>.JSN \
+        --output-dir experiments/exp01/iteration_01/data
 
     # a second run with a different hand placement of the robot
     ... --seed 1
@@ -26,7 +26,6 @@ Examples
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 
 
 def main(argv: list[str] | None = None) -> int:

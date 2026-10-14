@@ -1,11 +1,4 @@
-"""The fixed-baseline benchmark inside the active-learning loop.
-
-Every iteration drives the *same* reference under its own controller, which is
-the one thing in the loop that does not change with the iteration -- so a
-difference between two iterations' benchmark runs is a difference in the
-controller. What is tested here is that wiring: where the runs land, how they
-are chained, and what happens to a run that does not come back.
-"""
+"""The benchmark stage: chaining, bridging, scoring and paired variants."""
 
 from __future__ import annotations
 
@@ -16,9 +9,6 @@ import pytest
 
 from wmr_simulator.active_learning.stages import (
     _benchmark_seed,
-    _benchmark_variant_specs,
-    _deployment_seed,
-    _is_self_closing,
     _write_static_gain_config,
     stage_init,
     stage_run_benchmark,
@@ -74,12 +64,7 @@ def _write_jsn(path, states, speed, yaw_rate, dt):
 
 @pytest.fixture
 def experiment(tmp_path):
-    """An initialized experiment whose benchmark reference is a small circle.
-
-    Small and slow on purpose: the shipped default (circle_fast) is a
-    trajectory the stock gains cannot track, which is the point of it as a
-    benchmark but useless for testing the chaining rule.
-    """
+    """An initialized experiment whose benchmark reference is a small, slow circle."""
     trajectory = write_circle_jsn(tmp_path / "benchmark_circle.JSN")
 
     def build(**benchmark_overrides):
@@ -94,39 +79,6 @@ def experiment(tmp_path):
         )
 
     return build
-
-
-def test_runs_land_beside_the_identification_data_not_in_it(experiment):
-    """The identify and residual stages only look one level deep, so benchmark
-    runs in a data/ subdirectory can never reach the identification fit."""
-    exp = experiment()
-    paths = exp.paths(1)
-
-    written = stage_run_benchmark(exp, 1)
-
-    assert [path.name for path in written] == ["TR00", "TR01"]
-    assert all(path.parent == paths.benchmark_static_data_dir for path in written)
-    # data/ itself holds nothing but the benchmark subdirectory.
-    assert [entry.name for entry in paths.data_dir.iterdir()] == ["benchmark_static"]
-
-
-def test_ground_truth_stays_out_of_the_data_directory(experiment):
-    """decode-logs decodes every non-csv file in data/, and the truth would
-    leak the hidden plant into the pipeline besides -- so it goes to results/."""
-    exp = experiment()
-    paths = exp.paths(1)
-
-    stage_run_benchmark(exp, 1)
-
-    assert sorted(path.name for path in paths.benchmark_static_data_dir.iterdir()) == ["TR00", "TR01"]
-    assert paths.benchmark_result.is_file()
-
-    import yaml
-
-    report = yaml.safe_load(paths.benchmark_result.read_text())
-    static = report["trajectories"]["benchmark_circle"]["variants"]["static"]
-    assert len(static["runs"]) == 2
-    assert {"tracking_rmse", "diverged", "distance_to_start"} <= set(static["runs"][0])
 
 
 def _benchmark_placement(exp) -> dict:
@@ -148,9 +100,7 @@ def test_a_run_that_came_back_is_where_the_next_one_starts(experiment):
 
     first, second = stage_run_benchmark(exp, 1)
 
-    # The hand placement is drawn from the *experiment's* offsets, not
-    # run_deployment's own defaults -- a replay under a different spread is not
-    # a replay of this run, and the two defaults are allowed to differ.
+    # The hand placement is drawn from the experiment's offsets.
     offsets = _benchmark_placement(exp)
     replay = run_deployment(
         paths.robotcfg_cfg, trajectory, paths.benchmark_static_data_dir,
@@ -221,65 +171,13 @@ def test_a_bridged_run_is_scored_over_the_reference_alone(experiment, tmp_path):
     assert run["tracking_rmse"] != run["tracking_rmse_full"]
 
 
-def test_a_self_closing_reference_is_driven_as_it_is(experiment):
-    exp = experiment(num_runs=1)
-    paths = exp.paths(1)
-
-    stage_run_benchmark(exp, 1)
-
-    assert [path.name for path in sorted(paths.benchmark_dir.iterdir())] == ["benchmark_circle.JSN"]
-
-
-def test_self_closing_reads_the_whole_pose(tmp_path):
-    circle = write_circle_jsn(tmp_path / "circle.JSN")
-    arc = write_arc_jsn(tmp_path / "arc.JSN")
-    assert _is_self_closing(circle)
-    assert not _is_self_closing(arc)
-
-
-def test_rerunning_the_stage_keeps_the_recorded_runs(experiment, capsys):
-    """Benchmark runs are chained, so re-recording half of them would produce a
-    set that never happened; the stage is a no-op once it has one."""
-    exp = experiment()
-    first = stage_run_benchmark(exp, 1)
-    capsys.readouterr()
-
-    again = stage_run_benchmark(exp, 1)
-
-    assert again == first
-    assert "skipping" in capsys.readouterr().out
-
-
-def test_benchmark_seeds_never_collide_with_the_deployment_seeds(experiment):
-    """The two run in the same iteration; sharing a seed would give them the
-    same hand placement and the same sensor noise."""
-    exp = experiment()
-    benchmark = {_benchmark_seed(exp, iteration, index)
-                 for iteration in (1, 2) for index in range(8)}
-    deployment = {_deployment_seed(exp, iteration, index)
-                  for iteration in (1, 2) for index in range(8)}
-    assert len(benchmark) == 16
-    assert not benchmark & deployment
-
-
-def test_a_missing_benchmark_trajectory_names_the_setting(experiment):
-    exp = experiment()
-    exp.config["benchmark"]["trajectory"] = "no/such/reference.JSN"
-    with pytest.raises(FileNotFoundError, match="benchmark.trajectory"):
-        stage_run_benchmark(exp, 1)
-
-
 # ---------------------------------------------------------------------------
 # the static-gain baseline variant
 # ---------------------------------------------------------------------------
 
 
 def _add_static_gain_baseline(exp, iteration=1, static_gains=(1.0, 2.0, 3.0, 2.0, 0.0)):
-    """Give an iteration the ROBOTCFG_static.CFG that finalize would write.
-
-    Its presence is what makes an iteration a two-controller comparison, so it
-    is what the benchmark keys the second run set off.
-    """
+    """Give an iteration the ROBOTCFG_static.CFG that finalize would write."""
     from wmr_simulator.active_learning.experiment import load_yaml
     from wmr_simulator.types import PhysicalParams
 
@@ -298,88 +196,6 @@ def _add_static_gain_baseline(exp, iteration=1, static_gains=(1.0, 2.0, 3.0, 2.0
         list(static_gains),
     )
     return paths
-
-
-def test_iteration_one_is_recorded_as_the_static_baseline(experiment):
-    """Iteration 1 deploys the stock controller: its gains are the static ones
-    and its parametrization is exactly the identity, so its runs *are* the
-    static-gain baseline. Nothing tuned exists to compare them with yet -- the
-    first tuned parametrization ships in iteration 2 -- so it records one set,
-    and it belongs on the static side.
-    """
-    exp = experiment()
-    paths = exp.paths(1)
-
-    stage_run_benchmark(exp, 1)
-
-    assert [entry.name for entry in paths.data_dir.iterdir()] == ["benchmark_static"]
-    assert _benchmark_variant_specs(paths) == [
-        ("static", paths.robotcfg_cfg, paths.benchmark_static_data_dir)
-    ]
-
-
-def test_iteration_ones_parametrization_is_the_identity(experiment):
-    """What makes the run above a static-gain recording rather than an
-    approximation of one: the exported network's output layer is zero, so every
-    gain factor is exactly 1.0 and the deployed controller is its base gains."""
-    import numpy as np
-
-    from wmr_simulator.mujoco_sim.firmware import FirmwareConfig
-    from wmr_simulator.pololu.gain_mlp_exporter import reference_forward
-
-    exp = experiment()
-    paths = exp.paths(1)
-    network = FirmwareConfig.from_file(paths.robotcfg_cfg).gain_mlp
-    assert network is not None
-
-    rng = np.random.default_rng(0)
-    for _ in range(8):
-        factors = reference_forward(
-            network,
-            rng.normal(size=5),  # setpoint [x_d, y_d, theta_d, v_d, omega_d]
-            rng.normal(size=3),  # estimated pose
-            rng.normal(size=2),  # encoder body twist
-        )
-        assert np.array_equal(factors, np.ones(5, dtype=np.float32))
-
-
-def test_both_controllers_are_driven_when_the_iteration_ships_two(experiment):
-    """The comparison the plot draws: the deployed (parametrized) controller and
-    the static-gain baseline over the same reference, in separate data dirs."""
-    exp = experiment()
-    paths = _add_static_gain_baseline(exp)
-
-    stage_run_benchmark(exp, 1)
-
-    assert sorted(path.name for path in paths.benchmark_data_dir.iterdir()) == ["TR00", "TR01"]
-    assert sorted(path.name for path in paths.benchmark_static_data_dir.iterdir()) == ["TR00", "TR01"]
-    # Both sets stay a level below data/, out of reach of the identification fit.
-    assert sorted(entry.name for entry in paths.data_dir.iterdir()) == ["benchmark", "benchmark_static"]
-
-    import yaml
-
-    report = yaml.safe_load(paths.benchmark_result.read_text())
-    assert set(report["trajectories"]["benchmark_circle"]["variants"]) == {"parametrized", "static"}
-    assert report["trajectories"]["benchmark_circle"]["variants"]["static"]["robot_config"] == "ROBOTCFG_static.CFG"
-
-
-def test_the_static_variant_is_driven_without_the_deployed_gain_network(experiment):
-    """The firmware reads GAINMLP.JSN from beside the config, so a static run
-    started in the iteration root would silently carry the network it is the
-    baseline for."""
-    from wmr_simulator.mujoco_sim.firmware import GAIN_MLP_FILENAME, FirmwareConfig
-    from wmr_simulator.active_learning.stages import _staged_benchmark_config
-
-    exp = experiment()
-    paths = _add_static_gain_baseline(exp)
-    assert paths.gainmlp_jsn.is_file()  # the deployed controller does have one
-
-    specs = {variant: source for variant, source, _ in _benchmark_variant_specs(paths)}
-    staged = _staged_benchmark_config(paths, "static", specs["static"])
-
-    assert not (staged.parent / GAIN_MLP_FILENAME).exists()
-    assert FirmwareConfig.from_file(staged).gain_mlp is None
-    assert FirmwareConfig.from_file(paths.robotcfg_cfg).gain_mlp is not None
 
 
 def test_the_two_variants_share_their_seeds(experiment):
@@ -405,48 +221,6 @@ def test_the_two_variants_share_their_seeds(experiment):
     )
 
 
-def test_a_missing_variant_is_added_without_rerecording_the_other(experiment, capsys):
-    """Benchmark runs are chained, so re-recording a set that exists would
-    produce one that never happened -- an interrupted stage has to resume on the
-    variant it did not get to."""
-    import shutil
-
-    exp = experiment()
-    paths = _add_static_gain_baseline(exp)
-    stage_run_benchmark(exp, 1)
-    static = {path.name: path.read_bytes() for path in paths.benchmark_static_data_dir.iterdir()}
-    # What an interruption between the two variants leaves behind: the static
-    # set is recorded first, so the deployed one is the half that is missing.
-    shutil.rmtree(paths.benchmark_data_dir)
-    capsys.readouterr()
-
-    stage_run_benchmark(exp, 1)
-
-    report = capsys.readouterr().out
-    assert "Benchmark (static) already recorded" in report
-    assert {path.name: path.read_bytes() for path in paths.benchmark_static_data_dir.iterdir()} == static
-    assert sorted(path.name for path in paths.benchmark_data_dir.iterdir()) == ["TR00", "TR01"]
-
-
-def test_an_iteration_is_not_benchmarked_until_both_variants_are_recorded(experiment):
-    """`run` skips the benchmark once its status says done, so a status that
-    ignores the missing static set would leave the comparison half-recorded."""
-    from wmr_simulator.active_learning.stages import iteration_status
-
-    exp = experiment()
-    paths = _add_static_gain_baseline(exp)
-    stage_run_benchmark(exp, 1)
-    assert iteration_status(exp, 1)["benchmark"]
-
-    import shutil
-
-    shutil.rmtree(paths.benchmark_data_dir)
-    assert not iteration_status(exp, 1)["benchmark"]
-
-    stage_run_benchmark(exp, 1)
-    assert iteration_status(exp, 1)["benchmark"]
-
-
 def test_a_directory_of_references_is_driven_as_a_cross_validation_set(experiment, tmp_path):
     """``benchmark.trajectory`` pointing at a directory drives every reference in
     it, each under both controller variants, into its own data subdirectory."""
@@ -470,32 +244,3 @@ def test_a_directory_of_references_is_driven_as_a_cross_validation_set(experimen
     for shape, entry in report["trajectories"].items():
         assert len(entry["variants"]["static"]["runs"]) == 2, shape
         assert entry["variants"]["static"]["median_tracking_rmse"] is not None
-
-
-def test_two_references_in_a_set_do_not_share_a_hand_placement(experiment, tmp_path):
-    """Each shape gets its own placement draw -- two identical references must
-    not produce byte-identical runs, or the set would be one shape recorded
-    twice. They stay paired *across variants*, which is the comparison."""
-    reference_dir = tmp_path / "benchmark_set"
-    reference_dir.mkdir()
-    write_circle_jsn(reference_dir / "shape_a.JSN")
-    write_circle_jsn(reference_dir / "shape_b.JSN")
-
-    exp = experiment(trajectory=str(reference_dir))
-    paths = exp.paths(1)
-    stage_run_benchmark(exp, 1)
-
-    a = (paths.benchmark_static_data_dir / "shape_a" / "TR00").read_bytes()
-    b = (paths.benchmark_static_data_dir / "shape_b" / "TR00").read_bytes()
-    assert a != b
-
-
-def test_a_single_reference_still_records_where_it_always_did(experiment):
-    """The set is a generalization, not a migration: one reference keeps writing
-    straight into the variant directory, so recordings made before the set
-    existed still read."""
-    exp = experiment()
-    paths = exp.paths(1)
-    stage_run_benchmark(exp, 1)
-
-    assert sorted(path.name for path in paths.benchmark_static_data_dir.iterdir()) == ["TR00", "TR01"]

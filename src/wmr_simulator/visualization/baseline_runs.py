@@ -1,19 +1,7 @@
-"""Every iteration's runs of one held-out baseline reference, in one figure.
-
-One panel per controller variant (static gains left, gain parametrization
-right), sharing axes so the two are read against each other, with one colour per
-iteration and every run of that iteration drawn as a thin line of it. The
-reference is the same dashed black curve in both panels -- that is the whole
-point of a baseline: it did not move, so a difference between two colours is a
-difference in the controller.
-
-The legend carries each iteration's mean position RMSE against the reference,
-because the eye cannot rank two overlapping bands of runs but that number can,
-and its mean yaw ringing (``baseline_runs.run_yaw_ringing``), because a run can
-track well on average while oscillating in yaw on the way to saturating.
-
-The records are collected by ``active_learning.baseline_runs`` and only rendered
-here.
+"""Every iteration's runs of one benchmark reference, in one figure: one panel
+per controller variant, one colour per iteration, the reference dashed. The
+legend gives each iteration's mean position RMSE and yaw ringing. The records
+come from ``active_learning.baseline_runs``.
 """
 
 import os
@@ -41,8 +29,7 @@ def _iteration_label(record, variant: str) -> str:
 
 
 def _plot_variant_panel(ax, records, variant, colors) -> None:
-    # The runs themselves are thin and translucent so an overlapping band stays
-    # readable, which makes them illegible as legend keys -- hence proxy handles.
+    # Proxy legend handles (the run lines are thin and translucent).
     handles = []
     reference = next((rec.reference for rec in records if rec.reference is not None), None)
     if reference is not None:

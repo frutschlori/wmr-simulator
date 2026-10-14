@@ -1,19 +1,10 @@
 """The hidden MuJoCo plant that stands in for the real robot.
 
-This module owns the ground truth: it is the only place
-``models/pololu_calibrated.xml`` and ``models/pololu_hidden.yaml`` are read.
-Everything downstream (the firmware port, the deployment driver) sees the plant
-exclusively through duty commands in and *sensor* readings out - integer
-encoder counts, a noisy mocap pose and a quantized IMU - the same interface the
-firmware has to the real robot.
-
-The true parameters are applied by patching the XML and compiling with
-``from_xml_string``: structural elements (the IMU site and its sensors, and the
-caster ``<pair>``) cannot be added to an already compiled ``MjModel``.
-
-Units at the boundary match the hardware, not MuJoCo: the accelerometer reports
-g and the gyro deg/s, because that is what the LSM6DSO driver returns and what
-the SD-card logs contain.
+The only module that reads ``models/pololu_calibrated.xml`` and
+``models/pololu_hidden.yaml``. Downstream code sees the plant through duty
+commands in and sensor readings out (encoder counts, a noisy mocap pose, an
+IMU in g and deg/s), like the firmware on the real robot. The hidden
+parameters are applied by patching the XML before compiling it.
 """
 
 from __future__ import annotations
@@ -26,9 +17,7 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
-# The hidden plant is a repo asset, not user config, so its two files resolve
-# against the repo root and not the caller's cwd: a deployment is driven from
-# wherever the experiment lives, which is rarely the checkout.
+# The hidden plant's files resolve against the repo root.
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_HIDDEN_CONFIG_PATH = REPO_ROOT / "models/pololu_hidden.yaml"
 
@@ -145,12 +134,8 @@ class HiddenPlantConfig:
 
 
 def _wheel_spin_inertia(geometry: "GeometrySpec") -> float:
-    """Spin inertia of one wheel COLLISION geom about its hinge axis, m*r^2/2.
-
-    The wheel's mass is declared, not derived from MuJoCo's default density: the
-    collision cylinder is deliberately narrower than the tire (see the yaml), so
-    a density-derived mass would be the mass of the wrong solid.
-    """
+    """Spin inertia of one wheel collision geom about its hinge axis, m*r^2/2
+    (with the declared wheel mass)."""
     return geometry.wheel_mass * geometry.wheel_radius**2 / 2.0
 
 
@@ -170,16 +155,10 @@ def load_hidden_plant_config(path: str | Path = DEFAULT_HIDDEN_CONFIG_PATH) -> H
 
 
 def build_plant_xml(config: HiddenPlantConfig) -> str:
-    """Apply the hidden parameters to the model XML and return the patched source.
-
-    The yaml is authoritative: every value it carries is written into the XML
-    here, so the two can never silently disagree.
-    """
+    """Apply the hidden parameters to the model XML and return the patched source."""
     root = ET.parse(config.model_path).getroot()
 
-    # `MjModel.from_xml_string` has no file to resolve <mesh file=...> against,
-    # so it would look in the process's working directory. Point it at the model
-    # file's own directory, which is where the meshes live.
+    # Resolve mesh files against the model's directory.
     _require(root, "./compiler", config.model_path).set("meshdir", str(Path(config.model_path).parent))
 
     motor = config.motor
@@ -193,11 +172,7 @@ def build_plant_xml(config: HiddenPlantConfig) -> str:
         body = _require(root, f".//body[@name='{side}_wheel']", config.model_path)
         body.set("pos", f"0 {sign * geometry.half_track} 0")
         joint = _require(root, f".//joint[@name='{side}_wheel_joint']", config.model_path)
-        # `armature` is EXTRA inertia on top of the wheel geom's own, so the
-        # spec's time constant only comes out right if the geom's share is
-        # subtracted. It used to be negligible (0.6% of the armature at the old
-        # 0.150 N-m stall torque); at the datasheet 0.0245 N-m the armature is
-        # 29x smaller and the geom carries 19% of it.
+        # The armature is inertia on top of the wheel geom's own.
         joint.set("armature", repr(max(motor.armature - _wheel_spin_inertia(geometry), 0.0)))
         geom = _require(root, f".//geom[@name='{side}_wheel_geom']", config.model_path)
         geom.set("size", f"{geometry.wheel_radius} {geometry.wheel_width}")
@@ -205,18 +180,14 @@ def build_plant_xml(config: HiddenPlantConfig) -> str:
         _set_sliding_friction(geom, config.friction.wheel)
 
     _set_sliding_friction(_require(root, ".//geom[@name='floor']", config.model_path), config.friction.floor)
-    # The caster's friction lives on the <pair>, which is the whole point of
-    # that block: MuJoCo otherwise combines geom friction as the elementwise
-    # maximum and the "frictionless" ball inherits the floor's.
+    # Caster and skid friction live on explicit <pair>s (MuJoCo would
+    # otherwise take the elementwise maximum of the geoms' friction).
     pair = _require(root, ".//pair[@geom2='caster_geom']", config.model_path)
     _set_sliding_friction(pair, config.friction.caster, num_sliding=2)
-    # Same story for the nose skid, the front lip the robot dives onto under
-    # braking: without a pair it would inherit mu = 1.0, higher than the wheels.
     pair = _require(root, ".//pair[@geom2='nose_skid']", config.model_path)
     _set_sliding_friction(pair, config.friction.nose, num_sliding=2)
 
-    # The IMU site and its sensors are not in the delivered model, and cannot be
-    # added after compilation - hence the XML-patch path.
+    # IMU site and sensors.
     chassis = _require(root, ".//body[@name='chassis']", config.model_path)
     ET.SubElement(
         chassis,
@@ -239,11 +210,8 @@ def build_plant_xml(config: HiddenPlantConfig) -> str:
 class MujocoPlant:
     """The robot as physics plus sensors: duty in, sensor readings out.
 
-    Nothing here reads a pipeline config. The only inputs are the two duty
-    values the firmware's inner loop produces, and the only outputs are what the
-    firmware can actually measure, plus explicitly-named ground-truth accessors
-    for validation (``pose``, ``twist``, ``wheel_speeds``) that the firmware port
-    must not use.
+    ``pose``, ``twist`` and ``wheel_speeds`` are ground truth for validation;
+    the firmware port must not use them.
     """
 
     def __init__(
@@ -290,12 +258,7 @@ class MujocoPlant:
     # ------------------------------------------------------------ actuation
 
     def reset(self, x: float = 0.0, y: float = 0.0, yaw: float = 0.0) -> None:
-        """Settle onto the caster, then place the robot at ``(x, y, yaw)`` at rest.
-
-        Settling first and placing afterwards keeps the contact penetration at
-        its steady value: dropping the chassis in at its nominal height and
-        driving away immediately would start every run with a bounce.
-        """
+        """Settle onto the caster, then place the robot at ``(x, y, yaw)`` at rest."""
         mujoco = self._mujoco
         mujoco.mj_resetData(self.model, self.data)
         self.data.ctrl[:] = 0.0
@@ -333,12 +296,7 @@ class MujocoPlant:
     # --------------------------------------------------------------- sensors
 
     def encoder_counts(self) -> tuple[int, int]:
-        """Integer quadrature counts, at the true CPR and in the wiring's sign.
-
-        The firmware turns count differences back into rad/s with the CPR from
-        its own config file; the two agree by construction (see the hidden
-        yaml), so this is a quantizer, not an unknown parameter.
-        """
+        """Integer quadrature counts, at the true CPR and in the wiring's sign."""
         scale = self.config.encoder.counts_per_revolution / (2.0 * math.pi)
         angles = self.wheel_angles()
         return (int(round(angles[0] * scale)), int(round(angles[1] * scale)))
@@ -356,11 +314,8 @@ class MujocoPlant:
         return pose + noise
 
     def read_imu(self) -> tuple[np.ndarray, np.ndarray]:
-        """Accelerometer in g and gyro in deg/s, biased, noisy and quantized.
-
-        Degrees, because the LSM6DSO driver returns dps and the logs carry it
-        raw - the rest of the codebase converts on load.
-        """
+        """Accelerometer in g and gyro in deg/s, biased, noisy and quantized
+        (the units of the robot's logs)."""
         spec = self.config.imu
         accel = np.array(self.data.sensordata[self._accel_adr]) / GRAVITY
         gyro = np.rad2deg(self.data.sensordata[self._gyro_adr])

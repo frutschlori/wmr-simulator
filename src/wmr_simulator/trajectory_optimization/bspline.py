@@ -19,42 +19,18 @@ from wmr_simulator.trajectory_optimization.parametrization import (
 
 HIGHEST_PRECISION = jax.lax.Precision.HIGHEST
 
-# Cubic: C^2, which is exactly what the reference state needs (position,
-# velocity, acceleration all continuous).
+# Cubic: C^2, so position, velocity and acceleration are continuous.
 DEFAULT_SPLINE_DEGREE = 3
 
 # Floor on |dpos/ds|^2, as a fraction of the curve's own mean, below which the
-# tangent is treated as numerically absent (see _reference_from_derivatives).
-# It has to be small enough not to bias the yaw rate of ordinary curves -- 1e-2
-# already cost 2.5% of omega on a plain circle -- and large enough to swallow
-# the singular neighbourhood. At 1e-4 a sample carrying the mean tangent is
-# damped by 0.01%, while the floor still dominates by two orders of magnitude at
-# the stalled configurations that produced the 1e4 gradient spikes.
+# tangent is treated as absent (see _reference_from_derivatives).
 TANGENT_FLOOR_FRACTION = 1e-4
 
-# The guard above, restated as the floor on ``|dpos/ds|`` itself: it fires at
-# ``sqrt(TANGENT_FLOOR_FRACTION) * rms(|dpos/ds|)``, i.e. at 1% of the curve's
-# own rms tangent. Named so the loss below can be defined against it.
+# The same guard as a fraction of the rms of ``|dpos/ds|``.
 GUARD_TANGENT_FRACTION = float(np.sqrt(TANGENT_FLOOR_FRACTION))
 
 # Floor on |dpos/ds| that ``tangent_floor_loss`` holds the curve above, as a
-# fraction of the curve's own rms tangent; <= 0 disables the term. Below the
-# floor the curve has effectively stalled: heading and yaw rate are read off the
-# tangent, so a vanishing one is not a slow robot, it is an undefined pose.
-#
-# Relative, and to the same quantity the guard scales by, for two reasons. It
-# makes the margin over the guard a constant of the code rather than of the
-# problem -- 0.025 against GUARD_TANGENT_FRACTION's 0.01 is 2.5x at every scale,
-# so a larger environment or a longer path never quietly lets the optimizer
-# reach the fallback tangent. And it is the more faithful statement of the
-# pathology: what breaks the reference is one stretch of curve being far slower
-# than the rest, not the curve being slow in absolute metres. (A uniformly tiny
-# curve is scale-invariant to this term and is left to the FIM, which hates it.)
-#
-# 0.025 reproduces the absolute 0.15 that was tuned by eye on
-# ``problems/pololu_gains.yaml``, whose designs sit at rms |dpos/ds| ~ 6.3
-# (spread 3.2-9.3 over ten trajectories, so the effective floor is now
-# 0.08-0.23 per design rather than one number for all of them).
+# fraction of its rms; <= 0 disables the term.
 DEFAULT_MIN_TANGENT_FRACTION = 0.03
 
 
@@ -69,22 +45,9 @@ def _reference_from_derivatives(
     velocity = dpos_ds * s_dot[:, None]
     acceleration = dpos_ds * s_ddot[:, None] + d2pos_ds2 * (s_dot[:, None] ** 2)
 
-    # Heading and yaw rate come from the tangent, and both are singular where
-    # the tangent vanishes: arctan2(0, 0) has a NaN derivative, and
-    # dtheta/ds = cross / |dpos/ds|^2 differentiates like 1/|dpos/ds|^3. Taking
-    # the derivative w.r.t. s rather than t already removed the s_dot -> 0 half
-    # of this (the s-curve's endpoints), but the |dpos/ds| -> 0 half is still
-    # reachable: every control point is free in gain-tuning mode, and the
-    # environment clip can collapse neighbouring ones onto the same box edge.
-    # Measured on a stalled curve, |dpos/ds| = 4e-3 turned a typical gradient of
-    # 1e-2 into 2.3e2, and an exactly coincident pair produced NaN.
-    #
-    # So: floor the denominator at a fraction of the curve's own mean tangent
-    # (absolute epsilons cannot work -- |dpos/ds| carries the curve's length in
-    # metres per unit s), and hand arctan2 a fixed unit tangent wherever the
-    # real one is below that floor. The substitution has to happen on the
-    # *input*: a jnp.where on the output still evaluates arctan2 at the singular
-    # point and leaks its NaN back through the cotangent.
+    # Heading and yaw rate are singular where the tangent vanishes. Floor the
+    # denominator at a fraction of the mean tangent and give arctan2 a fixed
+    # unit tangent below that floor (on the input, so no NaN gradient leaks).
     tangent_norm_sq = jnp.sum(dpos_ds**2, axis=1)
     tangent_floor = TANGENT_FLOOR_FRACTION * jnp.mean(tangent_norm_sq) + 1e-12
     fallback_tangent = jnp.array([1.0, 0.0], dtype=dpos_ds.dtype)
@@ -113,13 +76,8 @@ def _reference_from_derivatives(
 
 
 def clamped_uniform_knots(num_control_points: int, degree: int = DEFAULT_SPLINE_DEGREE) -> np.ndarray:
-    """Knot vector on [0, 1] with ``degree + 1`` repeats at each end.
-
-    The repeats are what make the spline *clamped*: the curve then starts
-    exactly at the first control point and ends exactly at the last, which is
-    how a start/goal pin is expressed (fix those two control points) and why
-    the start tangent is simply along ``P1 - P0``.
-    """
+    """Knot vector on [0, 1] with ``degree + 1`` repeats at each end (clamped:
+    the curve starts at the first control point and ends at the last)."""
     if degree < 1:
         raise ValueError("degree must be >= 1.")
     if num_control_points < degree + 1:
@@ -141,11 +99,7 @@ def bspline_basis_matrices(
     s: np.ndarray, num_control_points: int, degree: int = DEFAULT_SPLINE_DEGREE
 ):
     """Constant ``[len(s), num_control_points]`` matrices mapping control points
-    to curve value / d/ds / d2/ds2 at each sample (float64).
-
-    Column ``i`` is the ``i``-th basis function sampled on ``s``, so the whole
-    curve is ``B0 @ control_points`` -- one matmul, no per-segment bookkeeping.
-    """
+    to curve value / d/ds / d2/ds2 at each sample (float64)."""
     knots = clamped_uniform_knots(num_control_points, degree)
     s = np.clip(np.asarray(s, dtype=np.float64), 0.0, 1.0)
     matrices = []
@@ -158,12 +112,7 @@ def bspline_basis_matrices(
 
 
 def initial_line_control_points(problem, num_control_points: int) -> jnp.ndarray:
-    """``num_control_points`` points evenly spaced along the start-goal line.
-
-    Because the basis is a partition of unity and the spline is clamped, control
-    points on a straight line reproduce that straight line exactly, so this is a
-    zero-curvature initialization.
-    """
+    """``num_control_points`` points evenly spaced along the start-goal line."""
     line_samples = np.linspace(0.0, 1.0, num_control_points)[:, None]
     start = problem.start[:2][None, :]
     goal = problem.goal[:2][None, :]
@@ -187,14 +136,8 @@ def max_start_heading_distance(problem) -> jnp.ndarray:
 
 
 def _start_heading_control_point(problem, control_point: jnp.ndarray) -> jnp.ndarray:
-    """Projection of the second control point onto the start-heading ray.
-
-    A clamped spline's tangent at ``s = 0`` is along ``P1 - P0``, so pinning the
-    start heading is exactly "keep P1 on the ray from the start pose". The
-    projection keeps the along-ray distance as the free (and differentiable)
-    coordinate and discards the perpendicular one; it is clipped to the
-    environment box along that ray so it cannot push the curve straight out.
-    """
+    """Projection of the second control point onto the start-heading ray
+    (clipped to the environment box), which pins the start heading."""
     start = jnp.asarray(problem.start[:2], dtype=jnp.float32)
     heading = start_heading_unit(problem)
     raw_distance = jnp.dot(jnp.asarray(control_point, dtype=jnp.float32) - start, heading)
@@ -208,18 +151,11 @@ def clamp_control_points(
     pinned_positions=None,
     pin_start_heading: bool = False,
 ) -> jnp.ndarray:
-    """Clip control points to the environment box, then write the pinned ones
-    back over the result.
+    """Clip control points to the environment box (which keeps the curve
+    inside it) and write the pinned ones back.
 
-    ``pinned_positions`` maps a control-point index to its fixed ``[x, y]``.
-    Writing the values in here (rather than baking them into the basis) keeps
-    the basis independent of the problem's start/goal, and makes the pin
-    gradient-safe: ``.at[i].set(constant)`` under ``jax.grad`` zeroes the
-    incoming gradient, so a pinned control point can never be optimized even
-    though it travels in the same array as the free ones.
-
-    A B-spline lies in the convex hull of its control points, so control
-    points inside the box put the whole curve inside the box.
+    ``pinned_positions`` maps a control-point index to its fixed ``[x, y]``;
+    pinned points receive no gradient.
     """
     control_points = jnp.asarray(control_points, dtype=jnp.float32)[:, :2]
     env_min = jnp.asarray(problem.environment_min, dtype=jnp.float32)
@@ -233,9 +169,7 @@ def clamp_control_points(
 
 
 def rms_tangent_norm(reference_basis: jnp.ndarray, control_points: jnp.ndarray) -> jnp.ndarray:
-    """``sqrt(mean(|dpos/ds|^2))`` -- the curve's own scale, and exactly the
-    quantity ``_reference_from_derivatives`` floors against, so a floor stated
-    as a fraction of it keeps a fixed ratio to the guard at any problem size."""
+    """``sqrt(mean(|dpos/ds|^2))``, the curve's own scale."""
     tangent = jnp.matmul(reference_basis, control_points, precision=HIGHEST_PRECISION)
     return jnp.sqrt(jnp.mean(jnp.sum(tangent**2, axis=1)) + 1e-12)
 
@@ -247,40 +181,12 @@ def tangent_floor_loss(
     min_tangent_fraction: float = DEFAULT_MIN_TANGENT_FRACTION,
     smooth_max_beta: float = 20.0,
 ) -> jnp.ndarray:
-    """Squared smooth-max *fractional* shortfall of ``|dpos/ds|`` below
-    ``min_tangent_fraction * rms(|dpos/ds|)`` -- the same
-    ``smooth_positive_max(g)**2`` form as every motion limit in
-    ``constraints.py``, because this is one: the curve has to keep moving.
+    """Squared smooth-max fractional shortfall of ``|dpos/ds|`` below
+    ``min_tangent_fraction * rms(|dpos/ds|)`` (same form as the motion limits).
 
-    Writing it that way (rather than as a mean over samples) is what makes it
-    commensurable with the rest of the objective, and it is what gives the term
-    any authority. A stall occupies ~20 of 101 samples, so a mean dilutes a
-    93% shortfall to a loss of 0.11 -- against a FIM term that pays 2.0 log
-    units for the stall (measured, 6cp design 0: ``trace(FIM^-1)`` 7.4e-5
-    stalled against 5.6e-4 for the same route spread out). The smooth max keeps
-    the 0.93, and the pipeline then divides by the same
-    ``constraint_violation_tolerance`` as the limits, so a fractional tangent
-    shortfall costs exactly what an equal fractional over-limit costs.
-
-    The shortfall is measured against the floor itself, so the term saturates at
-    ~1 for a fully stalled curve and one fraction keeps its meaning across
-    problems.
-
-    The floor is ``stop_gradient``-wrapped: it sets the bar, and must not become
-    something the optimizer can push on. Without that, lowering the whole
-    curve's rms tangent -- a shorter, duller path -- would satisfy the term as
-    readily as fixing the stall, which is the opposite of the intent.
-
-    ``tangent_basis`` must be sampled uniformly in ``s``, *not* on the time
-    grid: under the s-curve scaling the time samples cluster at ``s = 0`` and
-    ``s = 1``, which is exactly where a stall does not happen.
-    ``reference_basis`` is the time-grid one, because the guard's own mean is
-    taken there.
-
-    This is complementary to ``TANGENT_FLOOR_FRACTION`` in
-    :func:`_reference_from_derivatives`: that guard keeps the gradient finite at
-    a stalled curve, while this loss keeps the optimizer 2.5x away from ever
-    reaching it.
+    The floor is ``stop_gradient``-wrapped. ``tangent_basis`` is sampled
+    uniformly in ``s``; ``reference_basis`` is the time-grid basis the rms is
+    taken on.
     """
     if min_tangent_fraction <= 0.0:
         return jnp.asarray(0.0, dtype=jnp.float32)
@@ -290,25 +196,14 @@ def tangent_floor_loss(
     floor = jax.lax.stop_gradient(
         min_tangent_fraction * rms_tangent_norm(reference_basis, control_points)
     )
-    # A degenerate curve has no scale to be relative to, so the floor collapses
-    # with it; the clamp only keeps 0/0 out of the gradient. Such a curve is not
-    # a *stall* -- nothing about it is slower than the rest of it -- and it is
-    # the FIM's problem, not this term's.
+    # Keep 0/0 out of the gradient for a degenerate curve.
     shortfall = (floor - tangent_norm) / jnp.maximum(floor, 1e-6)
     return smooth_positive_max(shortfall, beta=smooth_max_beta) ** 2
 
 
 class BSplinePlan:
-    """Precomputed, control-point-independent evaluation matrices for a clamped
-    uniform B-spline on a given time grid and time scaling.
-
-    Construction samples the basis once in float64; ``evaluate`` is then one
-    matmul per derivative order. Nothing about the problem's start/goal enters,
-    so one plan serves any of them.
-
-    ``problem`` is read only for its time grid; everything else about the curve
-    comes from the arguments and, at evaluation time, the control points.
-    """
+    """Precomputed evaluation matrices of a clamped uniform B-spline on the
+    problem's time grid and time scaling (one matmul per derivative order)."""
 
     def __init__(self, problem, num_control_points: int, time_scaling: str,
                  degree: int = DEFAULT_SPLINE_DEGREE, phase_breaks=()):
@@ -330,11 +225,7 @@ class BSplinePlan:
         self.B1 = jnp.asarray(B1, dtype=jnp.float32)
         self.B2 = jnp.asarray(B2, dtype=jnp.float32)
 
-        # Second d/ds basis, on a *uniform* s grid, for the tangent-floor loss
-        # only: the time grid above is warped by the time scaling, and the
-        # s-curve puts most of its samples at the two ends, leaving the middle
-        # of the curve -- where the control points bunch and stall it -- barely
-        # observed. Same sample count, so the term costs one more matmul.
+        # d/ds basis on a uniform s grid, for the tangent-floor loss.
         _, tangent_B1, _ = bspline_basis_matrices(
             np.linspace(0.0, 1.0, int(self.B0.shape[0])), num_control_points, degree
         )
@@ -346,12 +237,7 @@ class BSplinePlan:
         min_tangent_fraction: float = DEFAULT_MIN_TANGENT_FRACTION,
         smooth_max_beta: float = 20.0,
     ) -> jnp.ndarray:
-        """The basis's own well-posedness term; see :func:`tangent_floor_loss`.
-
-        The fraction is an argument rather than plan state because the plan is
-        cached per ``(num_control_points, time_scaling)`` and it is a property
-        of the run, not of the basis.
-        """
+        """The tangent-floor penalty; see :func:`tangent_floor_loss`."""
         return tangent_floor_loss(
             self.tangent_B1,
             self.B1,
@@ -361,13 +247,8 @@ class BSplinePlan:
         )
 
     def tangent_diagnostics(self, control_points: jnp.ndarray) -> dict:
-        """Where this curve sits relative to the guard, in plain numbers.
-
-        Reported on the *time* grid -- the samples that actually become the
-        exported reference states, and the grid the guard's own mean is taken
-        on -- so ``guarded_samples`` is the count of exported poses whose
-        heading is the fallback tangent rather than the curve's.
-        """
+        """Tangent statistics on the time grid; ``guarded_samples`` counts the
+        samples whose heading is the fallback tangent."""
         control_points = jnp.asarray(control_points, dtype=jnp.float32)
         tangent = jnp.matmul(self.B1, control_points, precision=HIGHEST_PRECISION)
         tangent_norm = jnp.sqrt(jnp.sum(tangent**2, axis=1) + 1e-12)
@@ -382,11 +263,7 @@ class BSplinePlan:
         }
 
     def evaluate(self, control_points: jnp.ndarray):
-        # precision=HIGHEST: XLA's default lowers these matmuls to a reduced
-        # -mantissa path, which costs ~2^-13 relative here. That is far too
-        # coarse -- it left 3.9e-3 rad/s of phantom yaw rate on a dead-straight
-        # control polygon, pushed the curve outside its own convex hull, and
-        # fed noise straight into a FIM that is sensitive to it.
+        # precision=HIGHEST: the default reduced-precision matmul is too coarse.
         control_points = jnp.asarray(control_points, dtype=jnp.float32)
         matmul = lambda basis: jnp.matmul(basis, control_points, precision=HIGHEST_PRECISION)
         return matmul(self.B0), matmul(self.B1), matmul(self.B2)
@@ -416,13 +293,7 @@ def sampled_arc_length(position_basis, control_points) -> float:
 
 
 def sampled_motion_peaks(position_basis, control_points, dt: float) -> dict[str, float]:
-    """Peak speed / yaw rate / yaw acceleration of the sampled curve.
-
-    Finite differences on the sampled positions rather than the analytic
-    derivative bases: this is only used to keep an *initialization* inside the
-    motion limits, and the constraint term the optimizer actually minimizes
-    reads the same quantities off the same time grid.
-    """
+    """Peak speed / yaw rate / yaw acceleration of the sampled curve (finite differences)."""
     positions = np.asarray(position_basis, dtype=float) @ np.asarray(control_points, dtype=float)
     velocity = np.gradient(positions, dt, axis=0)
     speed = np.linalg.norm(velocity, axis=1)
@@ -447,32 +318,9 @@ def stretch_control_points_to_arc(
 ):
     """Bow the interior control points out until the curve is ``target_arc`` long.
 
-    A minimum *mean* speed is a minimum arc length -- ``sim_time`` is fixed, so
-    mean speed is arc / sim_time and nothing else. Started on the straight line
-    between two random points the optimizer therefore has to grow the path by a
-    factor of several before the penalty stops dominating, and Adam walks the
-    control points there one small step at a time: measured, that is what the
-    design's step budget was being spent on, not on shaping the curve.
-
-    Folding a bow of the right size in first makes the initial design roughly
-    feasible instead, so the steps go to the FIM. The displacement is one half
-    period of a sine along the control index, zero at both ends so the start and
-    goal stay put -- the smoothest shape that adds length -- and the amplitude
-    is bisected on the *sampled* curve rather than on the control polygon, since
-    an approximating basis pulls the curve well inside its polygon.
-
-    ``limits`` (with ``dt``) caps the bow at the largest one whose sampled curve
-    still respects ``v_max``/``omega_max``/``alpha_max``, and that cap is not
-    optional in practice: arc length and curvature both grow with the amplitude,
-    so a target the box cannot hold straight-line-wise is reached by a curve the
-    robot cannot turn. Measured without it, an initialization stretched to a
-    1.1 m/s target came out at **8.3x alpha_max** and the optimizer spent its
-    whole budget undoing it -- the same cost as before, moved.
-
-    Both bounds are one-sided in the amplitude, so the answer is the smaller of
-    the two bisections; the points are clipped into the environment box on every
-    trial, so a target the box cannot hold simply saturates rather than pushing
-    the curve outside it.
+    The displacement is a half sine along the control index (zero at both
+    ends); its amplitude is bisected on the sampled curve, capped by ``limits``
+    (``v_max``/``omega_max``/``alpha_max``, with ``dt``) and clipped to the box.
     """
     control_points = np.asarray(control_points, dtype=float)
     environment_min = np.asarray(environment_min, dtype=float)

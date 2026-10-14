@@ -1,24 +1,11 @@
-"""Where a rollout starts: every way a start-pose offset comes into being.
+"""Start-pose offsets of the tuning rollouts.
 
-Sampled at random (:func:`sample_initial_pose_offsets`), spread
-deterministically (:func:`static_start_offsets`), left out (``none``: every
-rollout starts on the reference, the ablation that shows what the offsets buy),
-or made a decision variable of the design (:func:`squash_start_offsets` and
-the ``optimize*`` modes) -- one enum, one code path, a 3-element boolean mask
-over ``[dx, dy, dtheta]``.
-
-This is a trajectory-design concern, which is why it lives here: the offsets
-are part of the *experiment* being designed, alongside the curve, and both
-designers optimize them against the same FIM -- the standalone run
-(``pipeline.py``, offsets appended to the control points' decision vector) and
-the alternating ``joint_tuning`` loop. The gain tuner is downstream of that: it
-either reads the designed offsets off the trajectory pickles or, with no design
-to read, calls the sampler here for its own draw.
-
-The *trajectory* side owns them, never the gain side: minimizing the gain loss
-over the offsets would drive them to zero and destroy exactly the excitation
-they exist to provide, while minimizing the FIM loss maximizes information,
-which is the only self-consistent choice.
+Offsets are sampled at random (:func:`sample_initial_pose_offsets`), spread
+deterministically (:func:`static_start_offsets`), left out (``none``), or made
+decision variables of the trajectory design (:func:`squash_start_offsets` and
+the ``optimize*`` modes), selected by a boolean mask over ``[dx, dy, dtheta]``.
+The gain tuner reads the designed offsets from the trajectory pickles, or
+draws its own with the sampler here.
 """
 
 import jax
@@ -32,9 +19,7 @@ START_OFFSET_MODE_OPTIMIZE = "optimize"
 START_OFFSET_MODE_OPTIMIZE_HEADING = "optimize-heading"
 START_OFFSET_MODE_OPTIMIZE_DISPLACEMENT = "optimize-displacement"
 
-# Which of [dx, dy, dtheta] are decision variables; the rest keep their frozen
-# value, and the ``jnp.where`` below zeroes their gradient the same way
-# ``bspline.clamp_control_points`` zeroes a pinned control point's.
+# Which of [dx, dy, dtheta] are decision variables; the rest keep their frozen value.
 START_OFFSET_MODE_MASKS = {
     START_OFFSET_MODE_RANDOM: (False, False, False),
     START_OFFSET_MODE_STATIC: (False, False, False),
@@ -62,12 +47,7 @@ def start_offset_mask(start_offset_mode: str) -> jnp.ndarray:
 
 def static_start_offsets(num_realizations: int, offset_radius: float, offset_angle: float) -> jnp.ndarray:
     """Deterministic spread: bearings evenly spaced on the circle of
-    ``offset_radius``, headings alternating +/-``offset_angle``.
-
-    The point of this mode is to remove the draw from the comparison entirely --
-    every seed sees the same conditions, so a difference between runs is the
-    optimizer's, not the sampler's.
-    """
+    ``offset_radius``, headings alternating +/-``offset_angle``."""
     bearings = jnp.linspace(0.0, 2.0 * jnp.pi, num_realizations, endpoint=False)
     signs = jnp.where(jnp.arange(num_realizations) % 2 == 0, 1.0, -1.0)
     return jnp.stack(
@@ -77,14 +57,9 @@ def static_start_offsets(num_realizations: int, offset_radius: float, offset_ang
 
 
 def squash_start_offsets(free_offsets: jnp.ndarray, offset_radius: float, offset_angle: float) -> jnp.ndarray:
-    """Map unconstrained ``u in R^{R x 3}`` smoothly into the feasible offset set.
-
-    Squash, not clip: FIM-optimized offsets *will* be driven to the boundary of
-    the disk, and a clip there would reproduce the constraint-wall pathology
-    that makes the trajectory objective choppy (a zero-then-jump derivative Adam
-    bounces off). ``u = 0`` gives exactly zero offset with a finite gradient, so
-    starting from "no offset" is not a singular point either.
-    """
+    """Map unconstrained ``u in R^{R x 3}`` smoothly into the feasible offset
+    set (a squash rather than a clip, so the gradient stays smooth at the
+    boundary; ``u = 0`` is zero offset)."""
     displacement = free_offsets[:, :2]
     scale = offset_radius / jnp.sqrt(1.0 + jnp.sum(displacement**2, axis=1, keepdims=True))
     heading = offset_angle * jnp.tanh(free_offsets[:, 2])
@@ -94,13 +69,8 @@ def squash_start_offsets(free_offsets: jnp.ndarray, offset_radius: float, offset
 def inverse_squash_start_offsets(
     offsets: jnp.ndarray, offset_radius: float, offset_angle: float
 ) -> jnp.ndarray:
-    """The inverse of :func:`squash_start_offsets`, for initializing the free
-    variables *at* a given offset set (so an optimizing mode starts from the
-    same conditions the frozen modes use, rather than from zero offset).
-
-    Inputs are pulled just inside the boundary first: the map sends the boundary
-    to infinity.
-    """
+    """The inverse of :func:`squash_start_offsets` (inputs pulled just inside
+    the boundary, which maps to infinity)."""
     radius_fraction = jnp.clip(
         jnp.sqrt(jnp.sum(offsets[:, :2] ** 2, axis=1, keepdims=True)) / offset_radius, 0.0, 0.99
     )
@@ -127,20 +97,9 @@ def sample_initial_pose_offsets(
     offset_radius: float,
     offset_angle: float,
 ) -> jax.Array:
-    """Draw one start-pose offset ``[dx, dy, dtheta]`` per noise realization.
-
-    Starting every rollout exactly on the reference leaves only the error the
-    plant fails to track (~1 cm), which is why the tuning loss is nearly flat in
-    kx and ky: those gains act on tracking error, and there is almost none to
-    act on. Placing the robot off the reference start injects the transient that
-    makes them observable -- and matches deployment, where the robot is placed
-    by hand (31-100 mm and up to 9.5 deg across the exp04/exp05 logs).
-
-    Positions are uniform over the disk of ``offset_radius`` (the sqrt keeps
-    them uniform by area rather than clustered at the center); headings are
-    uniform over +/-``offset_angle``. Both 0 returns zeros, i.e. the reference
-    start, exactly as before.
-    """
+    """Draw one start-pose offset ``[dx, dy, dtheta]`` per noise realization:
+    positions uniform over the disk of ``offset_radius`` (by area), headings
+    uniform over +/-``offset_angle``."""
     if offset_radius <= 0.0 and offset_angle <= 0.0:
         return jnp.zeros((num_realizations, 3), dtype=jnp.float32)
     radius_key, bearing_key, heading_key = jax.random.split(key, 3)
@@ -159,13 +118,7 @@ def sample_initial_pose_offset_batch(
     offset_radius: float,
     offset_angle: float,
 ) -> jax.Array:
-    """Draw independent frozen start-pose bundles for a trajectory batch.
-
-    The result has shape ``(T, R, 3)``.  Each trajectory receives its own
-    ``R`` realization starts; every bundle is nevertheless fixed for the
-    entire optimization, preserving common random numbers within that
-    trajectory's objective.
-    """
+    """Draw an independent ``(R, 3)`` offset bundle per trajectory, shape ``(T, R, 3)``."""
     trajectory_keys = jax.random.split(key, num_trajectories)
     return jax.vmap(
         lambda trajectory_key: sample_initial_pose_offsets(

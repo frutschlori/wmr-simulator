@@ -1,15 +1,9 @@
 """Save/load residual dynamics models.
 
-A checkpoint is a single pickle holding the model config (so the module
-skeleton can be rebuilt), the array leaves (expert weights + gate + normalization
-stats, as numpy), the nominal plant parameters the residual was trained against,
-and free-form training metadata. Loading is explicit: rebuild the skeleton from
-the config, then swap in the saved leaves.
-
-A residual is a correction *of* one nominal model -- its targets are measured
-minus that model's prediction -- so it is only meaningful added to that same
-model. Loading therefore takes the robot block of the plant it is about to be
-added to and refuses a checkpoint trained against different parameters.
+A checkpoint is a pickle with the model config, the array leaves, the nominal
+plant parameters the residual was trained against, and training metadata.
+Loading refuses a checkpoint whose plant parameters differ from the plant it
+is added to.
 """
 
 import pickle

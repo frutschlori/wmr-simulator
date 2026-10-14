@@ -1,42 +1,21 @@
-"""Fixed (not designed) reference sets: the fixed-trajectory side of the evaluation.
+"""Fixed (not designed) reference sets for the fixed-trajectory configurations.
 
-The active-learning loop designs its identification trajectory and its tuning
-set every iteration. The fixed alternatives replace one or both with references
-that are chosen once, before any data exists, and reused unchanged by every
-iteration and every experiment. They reach an experiment as
-``baseline_identification_trajectory`` (one pickle) and
-``baseline_tuning_trajectories_dir`` (a directory of pickles);
-scripts/generate_fixed_trajectory_sets.py writes them.
-
-Tuning-set families:
+Written once by ``scripts/generate_fixed_trajectory_sets.py`` and passed to an
+experiment as ``baseline_identification_trajectory`` and
+``baseline_tuning_trajectories_dir``. Tuning-set families:
 
 - ``matched``: analytic shapes (circles, arcs, slaloms, lines) with the designed
-  set's count, duration and motion limits, graded over the speed and turning
-  range the designed sets reach. What an engineer would pick by hand. None of
-  them is a benchmark shape: the benchmark circles have radius 1.0 at 5-6 s and
-  its lemniscates run 7 s.
-- ``benchmark``: the benchmark set itself, converted to pickles. Training on the
-  test set, so an optimistic bound for a fixed set, not a fair competitor. Its
-  references run 5-7.3 s, so the tuning horizon has to be raised to hold them.
-- ``random_bspline``: the designer's own curve family (clamped B-spline, s-curve
-  time scaling, same control-point count, limits and speed floors) with the
-  information criterion taken out. Random-walk control points are projected onto
-  the limits by a short constraint-only Adam run, and whatever still violates a
-  limit is redrawn. Against the designed set it isolates the FIM.
-- ``random_twist``: smooth random forward-speed / yaw-rate profiles (the twist
-  is a fixed linear map of the two wheel speeds), scaled into the limits and
-  integrated to a path. Classic system-identification excitation, in a
-  different curve family from the designer's.
+  set's count, duration and motion limits;
+- ``benchmark``: the benchmark set converted to pickles (needs a longer tuning
+  horizon);
+- ``random_bspline``: the designer's own curve family (clamped B-spline,
+  s-curve, same control points, limits and speed floors) without the FIM;
+- ``random_twist``: smooth random forward-speed / yaw-rate profiles scaled into
+  the limits and integrated to a path.
 
-The fixed identification reference mirrors the designed one's phases: a slow
-left arc, a stop and a right arc inside the ``identify`` phase's limits, a rest,
-then a fast arc inside the fast phase's limits. ``identified_duration`` is written
-into the pickle, so the identify stage cuts the logs exactly as it does for a
-designed trajectory.
-
-Fixed tuning pickles carry no start offsets, so the gain tuner draws its own
-from ``init_offset_radius``/``init_offset_angle`` (a designed set ships the
-offsets it was optimized under).
+The fixed identification reference has the designed one's phases (two slow
+arcs, then a fast arc) and records ``identified_duration``. Fixed tuning
+pickles carry no start offsets, so the gain tuner draws its own.
 """
 
 from __future__ import annotations
@@ -63,13 +42,8 @@ LIMIT_SUMMARY_KEYS = {
     "alpha_max": "alpha_peak",
 }
 
-# The matched tuning set: (name, generator, parameters). Every entry is drawn
-# over the set's duration and then placed in the environment, and all of them
-# stay inside the problem's limits (v 2.5, a 5, a_lat 7, omega 10, alpha 20) at
-# 4 s. Measured at 4 s: mean speed 0.49-1.03 m/s, mean |a_lat| up to 1.74 m/s^2,
-# alpha up to 16 rad/s^2 -- the range iteration 1's designed set covers (test31:
-# mean speed 0.55-1.04, mean |a_lat| 0.37-1.74, alpha 13-19). Mirrored pairs keep
-# the set symmetric in turning direction.
+# The matched tuning set: (name, generator, parameters), drawn over the set's
+# duration and placed in the environment, inside the problem's limits.
 MATCHED_SET_SHAPES = (
     ("circle_r035_ccw", "circle", {"radius": 0.35}),
     ("circle_r035_cw", "circle", {"radius": 0.35, "clockwise": True}),
@@ -88,18 +62,8 @@ MATCHED_SET_SHAPES = (
     ("line_short", "sine", {"length": 2.0, "amplitude": 0.0}),
 )
 
-# Fixed identification reference, per phase of
-# identification_trajectory.phases. The identified phase is two arcs, left then
-# right with a stop between (each half the phase), inside its limits (v 1.2,
-# a 2, a_lat 2, omega 6, alpha 10; worst ratio 0.98, total acceleration): mean
-# speed 0.49 m/s, 3.0 rad of heading travel, mean |omega| 0.98 rad/s. The
-# designed one reaches 0.54 m/s, 3.59 rad and 1.18 rad/s (test31); a single
-# slalom over the whole phase cannot turn that much under a_lat 2 (best 2.0 rad),
-# which is what makes the wheelbase observable. The fast arc sits inside the
-# fast phase's limits (v 2.5, a 4.5, a_lat 5, omega 10, alpha 15) at 1.04 m/s
-# and mean |a_lat| 1.73 m/s^2, against the designed 1.06 / 1.82: the floors
-# 1.3 m/s and 2.0 m/s^2 cannot both be met under a_max 4.5 by an s-curve arc,
-# and the designer misses them too.
+# Fixed identification reference per phase of identification_trajectory.phases:
+# two arcs (left, stop, right) in the identified phase, one fast arc after it.
 IDENTIFICATION_SLOW_ARC = {"radius": 0.5, "sweep": 1.5}
 IDENTIFICATION_FAST_ARC = {"radius": 0.9, "sweep": 4.67}
 
@@ -173,12 +137,8 @@ def export_reference_set(
     control_points: dict[str, np.ndarray] | None = None,
     **metadata,
 ) -> list[Path]:
-    """One ``<name>.pkl`` per reference in the designed-trajectory pickle format.
-
-    Refuses to write into a directory that already holds pickles: a fixed set
-    is an input shared by every experiment that names it, and regenerating it
-    in place would silently change what those experiments were run on.
-    """
+    """One ``<name>.pkl`` per reference in the designed-trajectory pickle
+    format; refuses a directory that already holds pickles."""
     from wmr_simulator.trajectory_optimization.pipeline import reference_states_export_payload
 
     out_dir = Path(out_dir)
@@ -235,11 +195,8 @@ def matched_reference_set(
 
 
 def benchmark_reference_set(directory: str | Path, dt: float) -> dict[str, np.ndarray]:
-    """Every ``.JSN``/``.pkl`` of a benchmark directory as reference states.
-
-    Goes through pololu.reference_importer, the same reader the benchmark stage
-    drives them with, so the tuner sees what the benchmark scores.
-    """
+    """Every ``.JSN``/``.pkl`` of a benchmark directory as reference states
+    (read like the benchmark stage reads them)."""
     from wmr_simulator.pololu.reference_importer import load_reference, reference_states_from_pololu_reference
 
     paths = sorted(
@@ -263,12 +220,9 @@ def fixed_identification_reference(
     environment_min,
     environment_max,
 ) -> tuple[np.ndarray, float]:
-    """The fixed identification reference and its identified duration [s].
-
-    ``phases`` is ``identification_trajectory.phases``: exactly one identify
-    phase followed by one fast phase, as the designed trajectory has. Each part
-    is checked against its own phase's limits.
-    """
+    """The fixed identification reference and its identified duration [s];
+    ``phases`` is ``identification_trajectory.phases`` (one identify phase, one
+    fast phase)."""
     if len(phases) != 2 or not phases[0].get("identify", True) or phases[1].get("identify", True):
         raise ValueError("The fixed identification reference expects one identify phase, then one fast phase.")
     slow_phase, fast_phase = phases
@@ -306,16 +260,9 @@ def random_identification_reference(
     """A random identification reference from the designer's own curve family:
     ``(reference_states, identified_duration, control_points)``.
 
-    ``pipeline`` is the identification design's ``TrajectoryOptimizationPipeline``
-    (identification mode, ``motion_phases``), so the curve has the designed
-    trajectory's basis, pinned start, phases and per-phase limits and floors.
-    A random-walk control polygon as long as a random mean speed per phase asks
-    for is projected into the limits by Adam on the constraint and tangent-floor
-    terms alone -- the design objective without the FIM -- and kept as soon as
-    every phase is inside its true limits and reaches ``floor_fraction`` of its
-    floors. At the end of the budget a draw inside the limits is kept even if
-    short of its floors (the designer keeps such designs too); one still over a
-    limit is redrawn.
+    A random-walk control polygon is projected into the per-phase limits by
+    Adam on the constraint and tangent-floor terms alone (the design objective
+    without the FIM). A draw still over a limit after the budget is redrawn.
     """
     import jax
     import jax.numpy as jnp
@@ -415,13 +362,8 @@ def _twist_peaks(v, omega, dt_fine):
 
 
 def _scale_twist_into_limits(v, omega, dt_fine, limits, iterations: int = 50):
-    """Shrink the speed and yaw-rate profiles until every limit holds.
-
-    Speed alone sets v and the tangential acceleration, the yaw rate alone sets
-    omega and alpha, and the two together set the lateral (and so the total)
-    acceleration, so each is scaled by its own worst ratio first and both by
-    the square root of the shared one after.
-    """
+    """Shrink the speed and yaw-rate profiles until every limit holds (each
+    by its own worst ratio, then both by the root of the shared one)."""
     for _ in range(iterations):
         peaks = _twist_peaks(v, omega, dt_fine)
         ratios = {name: peaks[name] / limits[name] for name in limits}
@@ -433,7 +375,6 @@ def _scale_twist_into_limits(v, omega, dt_fine, limits, iterations: int = 50):
         shared = max(ratios["a_max"], ratios["a_max_lateral"])
         if shared <= 1.0:
             return v, omega
-        # Slightly past the square root so the loop cannot creep up on 1.
         factor = 1.001 * np.sqrt(shared)
         v, omega = v / factor, omega / factor
     raise RuntimeError("Twist scaling did not converge.")
@@ -451,15 +392,9 @@ def random_twist_reference(
     ramp_time: float = 0.6,
     oversample: int = 20,
 ) -> np.ndarray:
-    """One random reference from smooth random forward-speed / yaw-rate profiles.
-
-    Both profiles are natural cubic splines through ``num_knots`` random values
-    (speed in ``[min_speed_fraction, 1] x`` a random peak, so it never stops in
-    the interior and there is no turning on the spot; yaw rate in ``+/-`` a
-    random peak), faded in and out over ``ramp_time`` so the reference starts
-    and ends at rest, then scaled into ``limits`` and integrated on a grid
-    ``oversample`` times finer than ``dt``.
-    """
+    """One random reference from smooth random forward-speed / yaw-rate
+    profiles (natural cubic splines through ``num_knots`` random values, faded
+    in and out over ``ramp_time``), scaled into ``limits`` and integrated."""
     from scipy.interpolate import CubicSpline
 
     num_steps = int(round(total_time / dt))
@@ -496,12 +431,7 @@ def random_twist_reference_set(
     max_attempts_per_reference: int = 200,
     **profile_options,
 ) -> dict[str, np.ndarray]:
-    """``num_references`` feasible random-twist references placed in the box.
-
-    A draw that no rotation fits into the box is redrawn; a sampled reference
-    that exceeds a limit after the ``dt`` subsampling (the scaling works on the
-    fine grid) is redrawn too.
-    """
+    """``num_references`` feasible random-twist references placed in the box."""
     rng = np.random.default_rng(seed)
     references = {}
     for index in range(num_references):
@@ -533,14 +463,8 @@ def random_walk_control_points(
     margin: float = 0.1,
     max_attempts: int = 1000,
 ) -> np.ndarray:
-    """A random control polygon whose B-spline is ``curve_length`` long, inside the box.
-
-    The polygon walks in a random direction, turning by up to ``max_turn`` at
-    every control point, and is then scaled about its centroid until the curve
-    ``position_basis`` draws from it has the requested length (a curve that
-    folds back is much shorter than its polygon, so the polygon length alone
-    does not set the speed). A polygon that then does not fit the box is redrawn.
-    """
+    """A random-walk control polygon (turning by up to ``max_turn``), scaled
+    until its B-spline is ``curve_length`` long, inside the box."""
     from wmr_simulator.trajectory_optimization.bspline import sampled_arc_length
 
     env_min = np.asarray(environment_min, dtype=float) + margin
@@ -583,24 +507,12 @@ def random_bspline_reference_set(
 ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray], dict]:
     """Random designer-family references: ``(references, control_points, report)``.
 
-    ``problem`` is a pipeline.ProblemDefinition whose ``sim_time`` is the set's
-    duration. Each slot gets the designer's speed floors for its index
-    (constraints.motion_floors_for_batch), a random-walk control polygon whose curve
-    is as long as a random mean speed in ``mean_speed_range`` (or its floor, if
-    higher) needs, and then up to ``num_steps`` of Adam on the constraint and
-    tangent-floor terms alone -- the design objective minus the FIM, and no
-    rollout. The limits in that loss are shrunk by ``limit_margin`` so the
-    projection ends inside them.
-
-    A slot stops moving as soon as it is inside the true limits, has no stalled
-    tangent and reaches ``floor_fraction`` of its floors (checked every
-    ``check_every`` steps), and a draw that already does is not optimized at
-    all. Without that the projection shrinks every curve: the smooth max is
-    slightly positive even inside the limits, and Adam's normalized steps walk
-    down that gradient at full size for the whole budget (measured: mean speeds
-    down to 0.07 m/s from a 0.4 m/s draw). A slot still over a true limit or
-    stalled after the budget is redrawn, up to ``max_rounds`` times; one that
-    is only short of its floors is kept, as the designer keeps its designs.
+    Each slot gets the designer's speed floors for its index, a random-walk
+    control polygon as long as a random mean speed in ``mean_speed_range``
+    needs, and up to ``num_steps`` of Adam on the constraint and tangent-floor
+    terms (limits shrunk by ``limit_margin``). A slot stops once it is inside
+    the limits and reaches ``floor_fraction`` of its floors; one still over a
+    limit is redrawn, up to ``max_rounds`` times.
     """
     import jax
     import jax.numpy as jnp
@@ -736,8 +648,7 @@ def random_bspline_reference_set(
 
 
 def load_reference_set(directory: str | Path) -> dict[str, np.ndarray]:
-    """``{stem: reference states}`` of every pickle in ``directory``; unlike
-    pipeline.load_reference_states_exports the lengths may differ."""
+    """``{stem: reference states}`` of every pickle in ``directory``."""
     references = {}
     for path in sorted(Path(directory).glob("*.pkl")):
         with path.open("rb") as file:

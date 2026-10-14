@@ -1,55 +1,21 @@
 """Port of the Pololu firmware's trajectory-following control stack.
 
-This is the robot's *belief* about itself: everything here is driven by
-``ROBOTCFG.CFG`` / ``robot_config.yaml`` and by sensor readings, never by the
-hidden plant. The gap between the config's ``wheel_radius``/``wheel_base`` and
-the plant's true geometry is exactly what the system identification has to
-close.
+Everything here runs on ``ROBOTCFG.CFG`` / ``robot_config.yaml`` and sensor
+readings, never on the hidden plant. Ported from the pololu-rs firmware:
 
-Ported one-to-one from the sibling firmware repo (`~/…/pololu-rs/firmware`),
-branch **`experimental_gain_mlp`** — which is what the robot runs, and which
-differs from `main` in ways that matter here (feedforward, integral limit,
-where the odometry twist comes from):
+- ``inner_controller.rs``: 100 Hz, counts -> rad/s -> 3 Hz low-pass ->
+  feedforward + PI(D) -> duty. The low-passed speed is fed back and logged.
+- ``odometry.rs``: 100 Hz body twist from the raw (unfiltered) wheel speeds,
+  which the EKF predicts on.
+- ``ekf.rs``: 3-state EKF with ``Q``/``R``/``P0`` from ``default_at_origin``.
+- ``trajectory_control.rs``: 20 Hz, predict -> mocap update if fresh ->
+  setpoint lookup -> gain-MLP factors -> Kanayama law -> wheel speeds.
+- ``gain_mlp_store.rs``: the outer loop scales ``kx/ky/ktheta`` for its own
+  tick and publishes the motor-gain factors to the inner loop.
 
-- ``inner_controller.rs`` — 100 Hz: counts → rad/s → 3 Hz low-pass →
-  feedforward + PI → duty. The *low-passed* speed is what the PI closes on and
-  what gets logged as ``omega_*_meas``.
-- ``odometry.rs`` — 100 Hz: the same counters, but the body twist ``(v, w)``
-  the EKF predicts on is built from the **raw** speeds, with no low-pass. The
-  two sources are deliberately separate: filtering the EKF's input puts the
-  53 ms encoder lag into the pose the outer tracking law closes around, and it
-  makes the firmware disagree with ``estimator.py``, which predicts on the raw
-  wheel speeds. (The task was folded into the inner loop for a while, which is
-  what introduced that lag; it was restored.) Sampling the counters twice is
-  what the robot does — here one tick reads them once, which is the same
-  numbers, so the two speeds are computed side by side in ``InnerLoop``.
-- ``ekf.rs`` — 3-state EKF, ``Q``/``R``/``P0`` copied from ``default_at_origin``.
-- ``trajectory_control.rs`` — 20 Hz: predict → mocap update if fresh →
-  setpoint lookup → gain-MLP factors → Kanayama law → wheel speeds. No
-  clipping of the wheel command; the only saturation is the duty clamp inside
-  the inner loop.
-- ``gain_mlp_store.rs`` — the outer loop overrides ``kx/ky/ktheta`` for its own
-  tick and *publishes* the two motor-gain factors, which the inner loop then
-  applies at 100 Hz until the next outer tick replaces them. They start at 1.0,
-  so the first 50 ms of a run is unscaled.
-
-Deviations from the firmware, all deliberate:
-
-- **float64, not float32.** The differences are far below the plant's own
-  noise, and f32 everywhere would obscure the control logic.
-- **The clock is exact.** Real logs show ±5 ms of scheduler jitter on the
-  100 Hz streams and 39–62 ms on the outer loop; here every task is on its
-  nominal period. The firmware's ``dt_sample`` (measured elapsed time, with a
-  guard that skips intervals under half a period) therefore always equals its
-  nominal ``dt`` here, and the guard never fires. The robot is nevertheless
-  always a hair *late*, and one place cares: see ``TICK_EPSILON_S``.
-- **The gain MLP is evaluated by the pipeline's own numpy replica.** The
-  firmware runs ``libs/gain_mlp``; ``pololu.gain_mlp_exporter.reference_forward``
-  is the numpy mirror of that crate's ``factors``, and it is what the crate's
-  golden test is generated from, so a third implementation here would only add
-  a way for the three to disagree. It reads ``GAINMLP.JSN`` itself -- the same
-  SD-card file the robot parses -- so the port still learns nothing the card
-  does not carry.
+Deviations: float64 instead of float32, an exact clock (see
+``TICK_EPSILON_S``), and the gain MLP is evaluated with
+``pololu.gain_mlp_exporter.reference_forward`` from ``GAINMLP.JSN``.
 """
 
 from __future__ import annotations
@@ -67,9 +33,7 @@ INNER_PERIOD_S = 0.010
 MOCAP_PERIOD_S = 0.010
 IMU_PERIOD_S = 0.010
 
-# The inner ticker is deliberately started half a period late so it never
-# collides with the outer one (inner_controller.rs, "Shift inner controller
-# ticker half a period").
+# The inner ticker starts half a period late (inner_controller.rs).
 INNER_PHASE_S = 0.005
 
 WHEEL_LP_CUTOFF_HZ = 3.0
@@ -81,15 +45,11 @@ EKF_INITIAL_COVARIANCE = (1.0, 1.0, 1.0)
 EKF_PROCESS_NOISE = (0.001, 0.001, 0.01)
 EKF_MEASUREMENT_NOISE = (0.0001, 0.0001, 0.001)
 
-# Measured off real logs: the outer loop's WheelCmd/TrackingError records are
-# stamped ~2 ms after its Setpoint, because that is how long its body takes.
+# Delay of the outer loop's records after its Setpoint record [s].
 OUTER_OUTPUT_STAMP_DELAY_MS = 2
 
-# How far past its nominal deadline a task's time is taken to be. The robot is
-# always a little late (>= 1 ms of Ticker/scheduler latency is enough); this
-# port's clock is exact, so a deadline landing on an exact multiple of a period
-# must resolve *forward*, not backwards by a float epsilon. Far below the
-# 1 ms log stamp resolution, so nothing else can see it.
+# Small delay added to every task time, so that a deadline on an exact multiple
+# of a period resolves forward (the robot is always slightly late).
 TICK_EPSILON_S = 1e-9
 
 
@@ -112,16 +72,11 @@ class FirmwareConfig:
     motor_direction_left: float
     motor_direction_right: float
     traj_following_dt_s: float
-    # The feedforward's motor gain, and the wheel-speed limit the firmware
-    # carries on its cascade. The exporter writes the identified
-    # `max_wheel_speed` here, so on an exported config the two coincide; a
-    # hand-written CFG can still disagree, and the firmware believes the file.
+    # Motor gain of the feedforward (the identified max_wheel_speed on export).
     wheel_max: float
-    # The parsed GAINMLP.JSN, when one sat next to the config on the card.
-    # Not a scalar like the rest, so it is excluded from the mapping parsing.
+    # The parsed GAINMLP.JSN next to the config, if any.
     gain_mlp: dict | None = None
-    # Mocap calibration (pololu.mocap_calibration; trajectory_uart.rs applies it
-    # to every frame). Optional keys: absent means no correction.
+    # Mocap calibration applied to every frame (absent: no correction).
     mocap_yaw_offset: float = 0.0
     mocap_offset_x: float = 0.0
     mocap_offset_y: float = 0.0
@@ -155,12 +110,8 @@ class FirmwareConfig:
     def from_file(cls, path: str | Path) -> "FirmwareConfig":
         """Read a ``ROBOTCFG.CFG`` or a simulator ``robot_config.yaml`` (by extension).
 
-        A ``GAINMLP.JSN`` sitting next to it is picked up the same way the
-        firmware picks it up off the SD card (``sdlog.rs``): present means the
-        gains are scheduled, absent means static. A robot_config.yaml that
-        *enables* a parametrization without the exported network next to it is
-        refused - on the robot that combination silently runs static gains, and
-        reproducing that silently here would be worse.
+        A ``GAINMLP.JSN`` next to it schedules the gains. A robot_config.yaml
+        that enables a parametrization without the network next to it is refused.
         """
         path = Path(path)
         gain_mlp = load_gain_mlp(path.parent / GAIN_MLP_FILENAME)
@@ -173,12 +124,7 @@ class FirmwareConfig:
 
 
 def load_gain_mlp(path: str | Path) -> dict | None:
-    """Parse a ``GAINMLP.JSN``; ``None`` when the card does not carry one.
-
-    Only the fields ``reference_forward`` needs are checked, and only for
-    presence: the file is written by ``pololu.gain_mlp_exporter``, which is also
-    what validates it against the firmware's capacity limits.
-    """
+    """Parse a ``GAINMLP.JSN`` (None when there is none)."""
     import json
 
     path = Path(path)
@@ -207,11 +153,8 @@ class Tick:
 class FirmwareClock:
     """The multi-rate schedule, in physics steps.
 
-    Every task is an embassy ``Ticker``, so each fires first after one full
-    period, not at t = 0. The inner loop additionally starts half a period late
-    so it never lands on the same instant as the outer loop; the wheel command
-    the outer loop produces therefore reaches the motors on the next inner tick,
-    5 ms later - the actuation latency the channel gives on the robot.
+    Every task fires first after one full period; the inner loop starts half a
+    period late, so a wheel command reaches the motors 5 ms after the outer tick.
     """
 
     def __init__(self, timestep: float, outer_period_s: float, boot_time_ms: int = 0) -> None:
@@ -223,8 +166,7 @@ class FirmwareClock:
         periods = (INNER_PERIOD_S, self.outer_period_s, MOCAP_PERIOD_S, IMU_PERIOD_S)
         deadlines = [INNER_PHASE_S + INNER_PERIOD_S, self.outer_period_s, MOCAP_PERIOD_S, IMU_PERIOD_S]
         index = 0
-        # Half a step of slack, so a deadline landing exactly on a step boundary
-        # fires on that step rather than on the next one by floating-point luck.
+        # Half a step of slack against floating-point rounding.
         slack = 0.5 * self.timestep
         while True:
             index += 1
@@ -251,10 +193,7 @@ class FirmwareClock:
 class InnerLoop:
     """``inner_controller.rs``: counts -> rad/s -> low-pass -> feedforward + PI -> duty.
 
-    It also carries ``odometry.rs``'s job, which on the robot is a separate
-    100 Hz task over the same counters: the body twist the EKF predicts from,
-    built from the **raw** count differences and the config's geometry, with
-    no low-pass. Only the PI feedback and the log see the filtered speeds.
+    Also computes ``odometry.rs``'s body twist from the raw (unfiltered) speeds.
     """
 
     def __init__(self, config: FirmwareConfig, dt: float = INNER_PERIOD_S) -> None:
@@ -271,16 +210,11 @@ class InnerLoop:
         self.integral = np.zeros(2)
         self.previous_error = np.zeros(2)
         self.twist = (0.0, 0.0)
-        # gain_mlp_store::reset_inner_gain_scales - 1.0 until the first outer
-        # tick publishes factors, and again once the trajectory ends.
+        # gain_mlp_store::reset_inner_gain_scales
         self.gain_scales = (1.0, 1.0)
 
     def set_gain_scales(self, kp_scale: float, ki_scale: float) -> None:
-        """``gain_mlp_store::set_inner_gain_scales``, published by the outer loop.
-
-        They stay in force for the ~5 inner ticks until the next outer tick, so
-        the inner loop runs a piecewise-constant gain, exactly as on the robot.
-        """
+        """``gain_mlp_store::set_inner_gain_scales``, published by the outer loop."""
         self.gain_scales = (float(kp_scale), float(ki_scale))
 
     def set_command(self, omega_left: float, omega_right: float) -> None:
@@ -302,9 +236,7 @@ class InnerLoop:
         derivative = (error - self.previous_error) / self.dt
         self.previous_error = error
 
-        # The feedforward divides by the config's `wheel_max` - whatever the
-        # card says, not the simulator's own parameters. When the two disagree
-        # the deficit shows up as a standing offset on the integral term.
+        # Feedforward with the config's wheel_max.
         feedforward = self.command / config.wheel_max
         # Only kp and ki are scheduled; kd is not one of the five gains.
         output = np.clip(
@@ -313,8 +245,7 @@ class InnerLoop:
             DUTY_LIMIT,
         )
 
-        # `odometry.rs`: the EKF's twist comes off the *raw* speeds, not the
-        # filtered ones the PI term above closed on.
+        # odometry.rs: twist from the raw speeds.
         left, right = float(omega_raw[0]), float(omega_raw[1])
         self.twist = (
             config.wheel_radius * (right + left) / 2.0,
@@ -404,20 +335,10 @@ class TrajectoryFollower:
         return self.states.shape[0] * self.dt
 
     def setpoint(self, t: float) -> Setpoint:
-        """``idx = floor(t/dt)``, pose from ``states[idx + 1]`` and feedforward from ``actions[idx]``.
-
-        The floor is nudged by ``TICK_EPSILON_S``. On the robot ``t`` is measured
-        elapsed time, so an outer tick lands at or just *after* its deadline; here
-        the clock is exact, and an exact multiple of ``dt`` floors down by a
-        float epsilon (``0.15 / 0.05 = 2.9999999999999996``). Without the nudge
-        every fifth tick re-issues the previous setpoint and the next one jumps
-        two states - 46 repeats and 46 double-steps per 340 outer ticks, against
-        the 0.4-1% of repeats measured across the real exp logs.
-        """
+        """``idx = floor(t/dt)`` (nudged by ``TICK_EPSILON_S``), pose from
+        ``states[idx + 1]`` and feedforward from ``actions[idx]``."""
         index = int(math.floor(t / self.dt + TICK_EPSILON_S / self.dt))
-        # The firmware clamps to len(actions) - 1 only. Exports carry N-1
-        # actions for N states so the two agree, but a file with N actions
-        # would index states out of bounds there; clamp on both here.
+        # Clamp to both arrays.
         index = max(0, min(index, self.actions.shape[0] - 1, self.states.shape[0] - 2))
         pose = self.states[index + 1]
         action = self.actions[index]
@@ -429,12 +350,7 @@ class TrajectoryFollower:
         setpoint: Setpoint,
         gains: Sequence[float] | None = None,
     ) -> OuterOutputs:
-        """``gains`` is ``(kx, ky, ktheta)`` for this tick; None uses the config's.
-
-        The firmware overwrites ``controller.k*`` in place every tick when a
-        gain MLP is loaded, so the scheduled values are what the law below runs
-        on - not a correction applied afterwards.
-        """
+        """``gains`` is ``(kx, ky, ktheta)`` for this tick; None uses the config's."""
         config = self.config
         kx_traj, ky_traj, ktheta_traj = (
             (config.kx_traj, config.ky_traj, config.ktheta_traj) if gains is None else
@@ -477,8 +393,7 @@ class Firmware:
         self.ekf = Ekf(initial_pose)
         self.mocap_pose: np.ndarray | None = None
         self.mocap_fresh = False
-        # Last factors the gain MLP produced, for diagnostics; the firmware
-        # only logs them to defmt, so nothing downstream may read them.
+        # Last gain-MLP factors, for diagnostics only.
         self.gain_factors = np.ones(5)
 
     def reset_encoders(self, counts: Sequence[int]) -> None:
@@ -527,12 +442,8 @@ class Firmware:
         return outputs
 
     def _gain_factors(self, setpoint: Setpoint, pose: Sequence[float], twist: Sequence[float]) -> np.ndarray:
-        """The five multiplicative gain factors for this tick, all 1.0 without a network.
-
-        Inputs are the firmware's: the setpoint it just wrote, the EKF pose and
-        the *odometry* twist of this same tick - the one the EKF predicted from,
-        which on this branch comes off the low-passed wheel speeds.
-        """
+        """The five multiplicative gain factors for this tick (all 1.0 without
+        a network), from the setpoint, the EKF pose and the odometry twist."""
         if self.config.gain_mlp is None:
             return np.ones(5)
         from wmr_simulator.pololu.gain_mlp_exporter import reference_forward
@@ -554,11 +465,8 @@ def wrap_angle(angle: float) -> float:
 
 
 def _firmware_values_from_robot_config_yaml(path: Path, has_gain_mlp: bool = False) -> dict[str, float]:
-    """Convert a simulator ``robot_config.yaml`` into firmware config values.
-
-    The unit conversion (inner gains are duty/(rad/s) on the robot, wheel-speed
-    feedback in the simulator) is the exporter's, reused rather than restated.
-    """
+    """Convert a simulator ``robot_config.yaml`` into firmware config values
+    (with the exporter's unit conversion)."""
     from types import SimpleNamespace
 
     import yaml

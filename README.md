@@ -1,620 +1,185 @@
-# Wheeled Robot Simulator
+# Active Learning for Tuning Controller Parameters
 
-A modular differential-drive robot simulator designed for **control**, **estimation**,  
-and **active-learning gain tuning** research.
+A differentiable simulator and an active-learning pipeline that tunes the
+trajectory-tracking controller of a small differential-drive robot (Pololu 3pi+
+2040) automatically, from a deliberately wrong model and uninformed gains to a
+controller that runs unchanged on the robot.
 
-This README explains:
+This repository is the code of the Master's thesis *Active Learning for Tuning
+Controller Parameters* (Florian Rutsch, Technische Universität Berlin, 2026). The
+robot firmware, including the gain-schedule network, lives in a fork of
+[pololu-rs](https://github.com/frutschlori/pololu-rs/tree/experimental_gain_mlp)
+(branch `experimental_gain_mlp`).
+The experiment data of the thesis is available at [tubcloud](https://tubcloud.tu-berlin.de/s/wskaMEgtcJETtK2).
 
-0. Installation
-1. What each subsystem does  
-2. Which YAML fields configure it  
-3. The equations used in every module  
-4. How all components interact in the simulation loop  
-5. The planner, controller, robot model, estimator, and visualization
----
+![Robot and motion-capture arena](docs/media/robot_setup.jpg)
 
-# 0. Installation
+## The pipeline
+
+<table>
+<tr>
+<td width="50%">
+
+Every iteration of the loop:
+
+1. **Trajectory optimization for identification.** A B-spline reference is
+   optimized for the Fisher information about the robot's wheel radius and
+   wheelbase (A-optimality), within the robot's motion limits.
+2. **Data collection.** The reference and the current controller are copied
+   to the robot's SD card and driven under motion capture. In simulation, a
+   MuJoCo model of the robot with a port of the firmware control stack stands
+   in for the robot.
+3. **System identification** of the physical parameters (wheel radius,
+   wheelbase, motor gain and time constant) from all logs, with per-log
+   outlier screening.
+4. **Residual model.** A small mixture-of-experts network on the body twist,
+   trained on closed-loop windows of all logs so far, corrects what the
+   nominal model misses.
+5. **Trajectory optimization for controller tuning.** A set of tuning
+   trajectories and their start offsets is optimized for the Fisher
+   information about the controller gains, in the identified model.
+6. **Controller tuning in simulation.** The gains of the Kanayama tracking
+   controller and the wheel-speed PID are optimized with BFGS through the
+   differentiable closed-loop rollout. Optionally, a gated MLP schedules the
+   gains on the tracking state.
+
+</td>
+<td width="50%"><img src="docs/media/pipeline.svg" alt="Pipeline overview"></td>
+</tr>
+</table>
+
+## Main Results
+
+Every controller was evaluated on six held-out references (two circles and two
+figure-eights at two speeds, two free-form curves), five chained runs each.
+Configurations combine static (S) or state-dependent (D) gains, learned (A) or
+fixed (F) trajectories, and the nominal plant (N) or the residual extended model (R). Position RMSE in mm, mean over the six references and
+the tuned controller generations (MuJoCo: generations 1-5, median over 10
+seeds; robot: generations 1-2, mean over 3 seeds):
+
+| Configuration | MuJoCo | Robot |
+|---|---:|---:|
+| S-F-N (fixed trajectories) | 52.3 | 67.8 |
+| S-A-N (learned trajectories) | **44.0** | 60.1 |
+| S-F-R (fixed, with residual) | 53.3 | 67.0 |
+| S-A-R (learned, with residual) | 44.6 | **58.4** |
+| Hand-tuned stock gains | 80.9 | 124.6 |
+
+- **The model is identified within one iteration.** From a deliberately wrong
+  initial model and unit gains, the first identification corrects the four
+  physical parameters, in MuJoCo and on the robot alike. The controller tuned
+  on the initial model tracks at about 100 mm; after the first round of data
+  the tuned gains track at 58-68 mm on the robot, without any manual
+  adjustment, against 124.6 mm for the hand-tuned stock gains.
+- **Learning the tuning trajectories is the one switch with a clear effect.**
+  It improves the tracking by about 16 % in MuJoCo and 12 % on the robot, on
+  every seed in both settings. In MuJoCo, a fixed random set of the same curve
+  family that is ten times as large does not close the gap. Without start
+  offsets, the tuning set carries 10 to 25 times less information about the
+  gains `kx` and `ky`.
+- **Learned identification trajectories, the residual model and the
+  state-dependent gains show no measurable benefit on this robot.** Any
+  sufficiently varied trajectory determines the four physical parameters. The
+  residual changes the tracking by less than the spread between seeds. The
+  gain schedule (evaluated in MuJoCo) reduces the yaw ringing, but changes the
+  tracking by only about 1 mm and diverges more often.
+
+Tracking of the six evaluation references on the robot (S-F-N against S-A-N):
+
+![Robot tracking on the evaluation references](docs/media/robot_tracks.png)
+
+A tuned controller on the fast figure-eight in the MuJoCo plant:
+
+<img src="docs/media/mujoco_eight_fast.gif" alt="MuJoCo deployment" width="400">
+
+## Installation
+
+Python 3.11 or 3.12 and [uv](https://docs.astral.sh/uv/):
 
 ```bash
-# Clone repo
-git clone git@github.com:IMRCLab/wmr-simulator.git
-
-# Create and activate a virtual env (using Python >=3.11,<3.13)
+git clone https://github.com/frutschlori/wmr-simulator
 cd wmr-simulator
-python3.11 -m venv .venv
-source .venv/bin/activate
-
-# Install dependecies
-# uv must be installed, see https://docs.astral.sh/uv/getting-started/installation/
 uv sync
-uv pip install -e . # Current package in editable mode
+uv run pytest -q
 ```
 
----
+Everything runs on the CPU. `JAX_PLATFORMS=gpu` moves the optimizations to the
+GPU, which is rarely faster for these small problems.
 
-# 1. Problem YAML Overview
+## Usage
 
-The simulator is driven by a YAML file such as **`empty.yaml`**.
-
-```yaml
-sim_time: 5.0
-time_step: 0.01
-
-environment:
-  min: [-5, -5]
-  max: [5, 5]
-  obstacles: []
-
-start: [0.0, 0.0, 0.0]
-goal:  [2.0, 1.0, 1.57]
-
-planner:
-  waypoints:
-    - [0.5, 0.0, -1.57]
-    - [1.0, 0.5,  1.57]
-  time: 4.0
-
-controller:
-  gains: [5.0, 5.0, 3.0, 0.4, 0.4, 0.2, 0.2]
-
-robot:
-  wheel_radius: 0.016
-  base_diameter: 0.089
-  max_wheel_speed: 40.0
-  slip_r: 0.4
-  slip_l: 0.5
-
-estimator:
-  type: "kf"
-  wheel_radius: 0.015
-  base_diameter: 0.09
-  noise_pos: 0.0001
-  noise_angle: 0.07
-  enc_angle_noise: 0.01
-  proc_pos_std: 0.7
-  proc_theta_std: 0.7
-  start: [0.0, 0.0, 0.0]
-```
-
-### YAML → Subsystems
-
-| Subsystem | YAML fields | What it configures |
-|----------|-------------|--------------------|
-| Planner | `planner.waypoints`, `planner.time` | Path & time scaling |
-| Controller | `controller.gains` | Geometric gains + PI wheel controllers |
-| Robot | `robot.wheel_radius`, `robot.base_diameter`, `robot.slip_r`, `robot.slip_l`, `robot.max_wheel_speed` | True simulation dynamics |
-| Estimator | `estimator.type`, noise params | DR or EKF |
-| Simulation | `sim_time`, `time_step`, start/goal | Integration horizon & boundary conditions |
-
----
-
-
-# 2. Running the Simulator
-
-To run a complete simulation using NumPy:
+**The loop in MuJoCo**, unattended for five iterations:
 
 ```bash
-python3 scripts/simulator.py --problem problems/empty.yaml --output simulation_visualization
+uv run python scripts/run_active_learning.py init --experiment experiments/exp01 --mujoco --iterations 5
+uv run python scripts/run_active_learning.py run  --experiment experiments/exp01
 ```
-To run a complete simulation using JAX:
+
+Every iteration writes its own folder (`experiments/exp01/iteration_XX/`) with
+the designed references, logs, identified parameters, residual model, tuned
+gains, firmware exports (`ROBOTCFG.CFG`, `GAINMLP.JSN`) and plots. All
+hyperparameters are in `experiments/exp01/experiment.yaml`.
+
+**The loop on the robot.** Without `--mujoco`, `run` stops whenever robot data
+is needed and prints what to copy to the SD card:
 
 ```bash
-python3 scripts/simulator_jax.py --problem problems/empty.yaml --output simulation_visualization_jax
+uv run python scripts/run_active_learning.py init   --experiment experiments/robot01
+uv run python scripts/run_active_learning.py run    --experiment experiments/robot01
+# drive the robot, copy the SD-card logs into iteration_XX/data/, then
+uv run python scripts/run_active_learning.py run    --experiment experiments/robot01
+uv run python scripts/run_active_learning.py status --experiment experiments/robot01
 ```
 
-
-Outputs:
-
-- PDF of plots  
-- MeshCat 3D animation  
-- Logs in `results/`  
-
----
-
-# 3. Visualization (`visualize.py`)
-
-Produces:
-
-- Multi-page PDF  
-- MeshCat 3D animation  
-- True, estimated, and reference trajectories  
-
----
-
-# 4. Robot Model (`robot.py`)
-
-## YAML fields
-
-- `wheel_radius`
-- `base_diameter`
-- `slip_r`, `slip_l`
-- `max_wheel_speed`
-
-## State
-
-$$
-\mathbf{x} = (x,y,\theta)
-$$
-
-## Inputs
-
-$$
-u_r, u_l
-$$
-
-## Kinematics
-
-$$
-v = \frac{r}{2}(u_r + u_l),
-\qquad
-\omega = \frac{r}{L}(u_r - u_l)
-$$
-
-State evolution:
-
-$$
-\begin{aligned}
-x_{k+1} &= x_k + v\cos\theta_k  \Delta t \\
-y_{k+1} &= y_k + v\sin\theta_k  \Delta t \\
-\theta_{k+1} &= \theta_k + \omega  \Delta t
-\end{aligned}
-$$
-
-## Slip
-
-$$
-u_r^{\text{eff}} = u_r(1-\varepsilon_r),\qquad
-u_l^{\text{eff}} = u_l(1-\varepsilon_l)
-$$
-
-$$
-\varepsilon_r \sim U[-s_r,s_r],\qquad
-\varepsilon_l \sim U[-s_l,s_l]
-$$
-
-Robot state update uses the **effective** speeds.
-
-
-## Motor dynamics and time constant
-
-In addition to the kinematic mapping from wheel speeds to \((v,\omega)\), the robot model includes a simple **first-order motor dynamics** model that smooths the wheel commands and approximates actuator delay.
-
-The relevant YAML field is:
-
-```yaml
-robot:
-  wheel_radius: 0.016
-  base_diameter: 0.089
-  max_wheel_speed: 40.0
-  time_constant: 0.05   # [s] motor time constant
-  slip_r: 0.4
-  slip_l: 0.5
-```
-
-The continuous-time motor dynamics for each wheel are modeled as:
-
-$$
-\tau \dot{u}_r^{eff}(t) = -u_r^{eff}(t) + u_r^{cmd}(t),
-\qquad
-\tau \dot{u}_l^{eff}(t) = -u_l^{eff}(t) + u_l^{cmd}(t),
-$$
-
-where
-
-* $u_r^{cmd}, u_l^{cmd}$ are the **commanded** wheel speeds from the PI controllers,
-* $u_r^{eff}, u_l^{eff}$ are the **effective** wheel speeds seen by the kinematics,
-* $\tau =$ `robot.time_constant` is the motor time constant.
-
-In discrete time with simulator timestep $\Delta t$, the implementation uses:
-
-$$
-\alpha = e^{-\Delta t / \tau},
-$$
-
-and updates:
-
-$$
-u_r^{eff}[k+1] = \alpha u_r^{eff}[k] + (1-\alpha) u_r^{cmd}[k],
-$$
-$$
-u_l^{eff}[k+1] = \alpha u_l^{eff}[k] + (1-\alpha) u_l^{cmd}[k].
-$$
-
-If $\tau < 10^{-3}$ (as a special case), the code sets
-
-$$
-\alpha = 0,
-$$
-
-which reduces to
-
-$$
-u_r^{eff}[k+1] = u_r^{cmd}[k],\qquad
-u_l^{eff}[k+1] = u_l^{cmd}[k],
-$$
-
-i.e. **no motor lag** (instantaneous response).
-
-These effective wheel speeds are then used in the kinematics (and slip model):
-
-1. First apply motor dynamics to get $u_r^{eff}, u_l^{eff}$.  
-2. Then apply slip:
-
-$$
-u_r^{slip} = u_r^{eff}(1-\varepsilon_r),\qquad
-u_l^{slip} = u_l^{eff}(1-\varepsilon_l),
-$$
-
-3. Finally compute
-
-$$
-v = \frac{r}{2}(u_r^{slip}+u_l^{slip}),
-\qquad
-\omega = \frac{r}{L}(u_r^{slip}-u_l^{slip}).
-$$
-
----
-
-
-# 5. Planner (`planner.py`)
-
-The planner produces the reference trajectory:
-
-$$
-[x_d, y_d, \theta_d, \dot{x}_d, \dot{y}_d, \omega_d,\ddot{x}_d,\ddot{y}_d]
-$$
-
-It performs:
-
-1. Quintic spline fitting in space  
-2. Time-scaling to match total duration  
-3. Trajectory sampling  
-
-## YAML fields
-
-```yaml
-planner:
-  waypoints:
-    - [...]
-    - [...]
-  time: 4.0
-```
-
----
-
-## Waypoints (position-only or pose)
-
-Waypoints can be:
-
-### Position-only (θ free)
-
-```yaml
-[x, y]
-```
-
-### Pose waypoint (θ constrained)
-
-```yaml
-[x, y, theta]
-```
-
-Length of the waypoint determines whether heading is enforced.
-
-## Tangent constraint (when θ is provided)
-
-$$
-\frac{1}{\|\mathbf{t}(u_i)\|}\mathbf{t}(u_i)=
-\begin{bmatrix}
-\cos\theta_i\\
-\sin\theta_i
-\end{bmatrix}
-$$
-
-where
-
-$$
-\mathbf{t}(u_i)=\begin{bmatrix}
-x'(u_i)\\
-y'(u_i)
-\end{bmatrix}
-$$
-
----
-
-## Time parameterization
-
-$$
-x_d(t)=x(u(t)),\qquad y_d(t)=y(u(t))
-$$
-
-Velocities:
-
-$$
-\dot{x}_d=x'(u)\dot{u},\qquad
-\dot{y}_d=y'(u)\dot{u}
-$$
-
-Heading:
-
-$$
-\theta_d=\text{atan2}(\dot{y}_d,\dot{x}_d)
-$$
-
-Curvature:
-
-$$
-\kappa(u)=
-\frac{x'(u)y''(u)-y'(u)x''(u)}
-{(x'(u)^2+y'(u)^2)^{3/2}}
-$$
-
-Angular velocity:
-
-$$
-\omega_d = \kappa(u)  v_d
-$$
-
----
-
-## Running the Planner Directly
-
-To debug waypoints without running the simulator:
+The mocap rigid body is calibrated against the wheel axle once per robot with
+`scripts/mocap_calibration.py`. Benchmark runs on the robot go into
+`iteration_XX/data/benchmark_static/<reference>/`; the open references have
+bridged versions (`*_bridge.JSN`) that return to their start.
+`examples/robot_run/` is a complete run of the loop on the robot
+(configuration S-A-R, iterations 0 to 4) with its SD-card logs and the plots
+of every stage (`iteration_XX/visualize/`):
 
 ```bash
-python3 planner.py
+uv run python scripts/run_active_learning.py status        --experiment examples/robot_run
+uv run python scripts/run_active_learning.py plot-run-logs --experiment examples/robot_run
 ```
 
-Modify the `__main__` block inside `planner.py`:
+**Studies.** `scripts/run_study.py` runs several configurations over several
+seeds in MuJoCo and `scripts/summarize_study.py` tabulates them, as in the
+thesis evaluation:
 
-```python
-intermediate_waypoints = [
-    [x1, y1],           # no θ constraint
-    [x2, y2, theta2],   # θ constrained
-]
+```bash
+uv run python scripts/generate_fixed_trajectory_sets.py   # fixed sets for the F configurations
+uv run python scripts/run_study.py examples/study_static.yaml --max-parallel 2
+uv run python scripts/run_study.py examples/study_state_dependent.yaml
+uv run python scripts/summarize_study.py experiments/static_matrix
 ```
 
-Running the module plots:
+**Other scripts:** `run_simulation.py` (one closed-loop simulation),
+`run_mujoco_deployment.py` (one run on the MuJoCo plant),
+`render_deployment_video.py` (videos like the one above),
+`generate_baseline_reference.py` (circles, figure-eights and other analytic
+references), `pololu_append_bridge_reference.py` and `export_gain_mlp.py`
+(firmware exports).
 
-- spline path  
-- heading  
-- curvature  
-- velocities  
+## Repository layout
 
----
-
-
-# 6. Controller (`controller.py`)
-
-## YAML field
-
-```yaml
-controller:
-  gains: [k_x, k_y, k_θ, k_pr, k_pl, k_ir, k_il]
 ```
-
----
-
-## 6.1 Geometric Pose Control
-
-Inputs:
-
-- Reference: $(x_d,y_d,\theta_d,v_d,\omega_d)$
-- Estimate: $(\hat{x},\hat{y},\hat{\theta})$
-
-Pose errors in robot frame:
-
-$$
-\begin{aligned}
-x_e &= (x_d-\hat{x})\cos\hat{\theta} + (y_d-\hat{y})\sin\hat{\theta},\\
-y_e &= -(x_d-\hat{x})\sin\hat{\theta} + (y_d-\hat{y})\cos\hat{\theta},\\
-\theta_e &= \text{dist}_{SO2}(\theta_d - \hat{\theta})
-\end{aligned}
-$$
-
-Control law:
-
-$$
-v^{ref} = v_d \cos\theta_e + k_x x_e
-$$
-
-$$
-\omega^{ref} = \omega_d + v_d(k_y y_e + k_\theta\sin\theta_e)
-$$
-
----
-
-## 6.2 Wheel-Speed Mapping
-
-$$
-u_r^{ref} = \frac{2v^{ref} + L\omega^{ref}}{2r},
-\qquad
-u_l^{ref} = \frac{2v^{ref} - L\omega^{ref}}{2r}
-$$
-
----
-
-## 6.3 PI Wheel-Speed Control
-
-Errors:
-
-$$
-e_r = u_r^{ref} - u_r^{meas},\qquad
-e_l = u_l^{ref} - u_l^{meas}
-$$
-
-Commands:
-
-$$
-\tilde{u}_r = u_r^{ref} + k_{pr}e_r + k_{ir}\int e_r dt
-$$
-
-$$
-\tilde{u}_l = u_l^{ref} + k_{pl}e_l + k_{il}\int e_l dt
-$$
-
-Outputs $\tilde{u}_r,\tilde{u}_l$ go to the robot.
-
----
-
-# 7. Estimator (`estimator.py`)
-
-## YAML fields
-
-- `type`: `"dr"` or `"kf"`
-- `wheel_radius`, `base_diameter`
-- sensor noise: `noise_pos`, `noise_angle`
-- encoder noise: `enc_angle_noise`
-- process noise: `proc_pos_std`, `proc_theta_std`
-- initial estimate: `start`
-
----
-
-## 7.1 Wheel-speed measurement model
-
-$$
-\begin{aligned}
-\Delta\phi_r^{true} &= u_r^{eff}\Delta t,
-&\Delta\phi_l^{true} &= u_l^{eff}\Delta t, \\
-\Delta\hat{\phi}_r &= u_r^{eff}\Delta t+n_r,
-&\Delta\hat{\phi}_l &= u_l^{eff}\Delta t+n_l, \\
-\hat{u}_r &= \Delta\hat{\phi}_r / \Delta t, 
-&\hat{u}_l &= \Delta\hat{\phi}_l / \Delta t
-\end{aligned}
-$$
-
----
-
-## 7.2 Prediction
-
-Speeds:
-
-$$
-v_{hat}=\frac{r}{2}(\hat{u}_r+\hat{u}_l),\qquad
-\omega_{hat}=\frac{r}{L}(\hat{u}_r-\hat{u}_l)
-$$
-
-State prediction:
-
-$$
-\begin{aligned}
-\hat{x}_{k+1}^- &= \hat{x}_k + v_{hat}\cos\hat{\theta}_k \Delta t \\
-\hat{y}_{k+1}^- &= \hat{y}_k + v_{hat}\sin\hat{\theta}_k \Delta t \\
-\hat{\theta}_{k+1}^- &= \hat{\theta}_k + \omega_{hat}\Delta t
-\end{aligned}
-$$
-
-Jacobian:
-
-$$
-F_k=
-\begin{bmatrix}
-1 & 0 & -v_{hat}\sin\hat{\theta}\Delta t\\
-0 & 1 & v_{hat}\cos\hat{\theta}\Delta t\\
-0 & 0 & 1
-\end{bmatrix}
-$$
-
-Input Jacobian:
-
-$$
-L_k = \frac{\partial f}{\partial \Delta\phi} = 
-\begin{bmatrix}
-\frac{r}{2}\cos(\hat{\theta}_k) & \frac{r}{2}\cos(\hat{\theta}_k) \\
-\frac{r}{2}\sin(\hat{\theta}_k) & \frac{r}{2}\sin(\hat{\theta}_k) \\
-\frac{r}{L} & -\frac{r}{L}
-\end{bmatrix}
-$$
-
-Predicted State Covariance:
-
-$$
-P^- = FP F^\top + LML^\top + Q,
-$$
-
-where $M$ is the sum of slip-induced and encoder angle noise covariance:
-
-$$
-M = M_{slip} + M_{enc}= 
-\begin{bmatrix}
-\Delta\phi_r^2\sigma_{\epsilon_r}^2 & 0 \\ 
-0 & \Delta\phi_l^2\sigma_{\epsilon_l}^2
-\end{bmatrix} + 
-\begin{bmatrix}
-\sigma_{enc_r}^2 & 0 \\ 
-0 & \sigma_{enc_l}^2
-\end{bmatrix}
-$$
-
----
-
-## 7.3 Measurement model
-
-$$
-h(x)=
-\begin{bmatrix}
-x\\
-y\\
-\theta
-\end{bmatrix},\qquad H=I_3
-$$
-
-Measurements:
-
-$$
-z_k=
-\begin{bmatrix}
-p_x\\
-p_y\\
-\theta_m
-\end{bmatrix}
-$$
-
-Angle wrapping:
-
-$$
-\text{wrap}(\alpha)=\text{atan2}(\sin\alpha,\cos\alpha)
-$$
-
-Residual:
-
-$$
-y_k=
-\begin{bmatrix}
-p_x-\hat{x}^-\\
-p_y-\hat{y}^-\\
-\text{wrap}(\theta_m-\hat{\theta}^-)
-\end{bmatrix}
-$$
-
-Update:
-
-$$
-S=HP^-H^\top + R
-$$
-$$
-K=P^-H^\top S^{-1}
-$$
-$$
-\hat{x}=\hat{x}^- + Ky
-$$
-$$
-P=(I-KH)P^-
-$$
-
----
-
-# 8. Full System Architecture
-
-Subsystems:
-
-1. Planner → smooth reference trajectory  
-2. Trajectory sampler  
-3. Estimator → produces $(\hat{x}, \hat{y}, \hat{\theta})$  
-4. Controller  
-   - geometric pose control  
-   - wheel-speed PI loops  
-5. Robot  
-   - slip  
-   - differential-drive kinematics  
-6. Visualization and logging  
-
+src/wmr_simulator/
+  simulation.py, robot.py, controller.py, estimator.py   differentiable closed loop (JAX)
+  identification/          parameter identification from logs
+  residual_model/          residual dynamics model
+  trajectory_optimization/ FIM-based trajectory design (B-splines, start offsets)
+  gain_tuning/             closed-loop tuning objective and optimizers
+  gain_parametrization/    state-dependent gain schedule (gated MLP)
+  active_learning/         the iteration loop, benchmark and studies
+  mujoco_sim/              MuJoCo plant, firmware port and video rendering
+  pololu/                  log decoding, smoothing and firmware exports
+  visualization/           plots
+scripts/                   command-line entry points
+problems/pololu_gains.yaml robot, controller and estimator configuration
+models/                    MuJoCo model of the robot
+trajectory_exports/        evaluation references and the mocap calibration run
+examples/                  a robot run and study specifications
+tests/
+```

@@ -1,0 +1,157 @@
+problem: problems/pololu_gains.yaml
+seed: 2
+num_iterations: 3
+use_residual_model: true
+use_gain_parametrization: false
+prior_tuning: true
+initial_robot_params:
+  wheel_radius: 0.02
+  base_diameter: 0.09
+  max_wheel_speed: 250.0
+  time_constant: 0.25
+optimize_identification_trajectory: true
+optimize_tuning_trajectories: true
+use_standalone_gain_tuning_defaults: false
+baseline_identification_trajectory: trajectory_exports/fixed_sets/identification_random
+baseline_tuning_trajectories_dir: trajectory_exports/fixed_sets/matched
+robotcfg_template: null
+mocap_calibration: examples/robot_run/mocap_calibration.yaml
+log_loading:
+  clip_after_first_trajectory: true
+mujoco_deployment:
+  enabled: false
+  num_logs: 5
+  divergence_radius: 0.25
+  start_offset_radius: 0.15
+  start_offset_angle: 0.2
+benchmark:
+  trajectory: trajectory_exports/benchmark_set
+  num_runs: 5
+  divergence_radius: 0.25
+  start_offset_radius: 0.15
+  start_offset_angle: 0.2
+  bridge_wait_time: 1.5
+  bridge_time: 8.5
+  max_workers: 4
+identification_trajectory:
+  use_residual_model: false
+  opt_steps: 750
+  learning_rate: 0.005
+  num_control_points: 12
+  time_scaling: s-curve
+  window_length: 10
+  phases:
+  - duration: 3.0
+    identify: true
+    motion_limits:
+      v_max: 1.2
+      a_max: 2.0
+      a_max_lateral: 2.0
+      omega_max: 6.0
+      alpha_max: 10.0
+    min_speed: 0.6
+  - duration: 4.0
+    identify: false
+    motion_limits:
+      v_max: 2.5
+      a_max: 4.5
+      a_max_lateral: 5.0
+      omega_max: 10.0
+      alpha_max: 15.0
+    min_speed: 1.3
+    min_lateral_acceleration: 2.0
+  bridge_wait_time: 1.5
+  bridge_time: 8.5
+  append_tuning_trajectories: 2
+  append_tuning_trajectories_from: null
+  appended_max_traction_usage: 1.1
+  appended_bridge_wait_time: 0.25
+  appended_turn_radius: 0.25
+  appended_turn_lateral_acceleration: 3.0
+  appended_min_piece_duration: 0.75
+  appended_box_margin: 0.15
+  appended_return_max_line_speed: 2.5
+identification:
+  steps: 600
+  learning_rate: 0.001
+  window_length: 10
+  outlier_z_threshold: 3.5
+residual:
+  num_experts: 4
+  hidden_sizes:
+  - 16
+  - 16
+  spectral_norm_cap: 1.5
+  gate_bandwidth_scale: 1.0
+  ood_sigma: 3.0
+  epochs: 1500
+  batch_size: 16384
+  learning_rate: 0.0002
+  validation_split: 0.2
+  output_reg_weight: 0.01
+  resample_uniform: true
+  training: closed_loop
+  closed_loop_window_s: 1.0
+  closed_loop_stride_s: 1.0
+  closed_loop_steps: 400
+  closed_loop_learning_rate: 0.001
+  pool_previous_iterations: true
+  max_position_error: 0.25
+tuning_trajectories:
+  use_residual_model: true
+  num_trajectories: 15
+  opt_steps: 250
+  learning_rate: 0.01
+  num_control_points: 7
+  stretch_initialization: false
+  time_scaling: s-curve
+  constraint_weight_jitter: 0.4
+  sim_time: 4.0
+  min_start_goal_distance: 1.0
+  min_speed: 1.1
+  min_speed_fraction: 0.5
+  min_lateral_acceleration: 2.0
+  min_lateral_acceleration_fraction: 0.25
+  motion_limits: {}
+  window_length: 50
+  kimotor_fim_scale: 5.0
+  kdmotor_fim_scale: 0.01
+  start_offset_mode: optimize
+  constraint_component_weights:
+    v: 1.0
+    a: 1.0
+    lateral: 1.0
+    omega: 1.0
+    alpha: 0.5
+    v_min: 0.5
+    a_lat_min: 0.5
+  constraint_smooth_max_beta: 10.0
+gain_tuning:
+  steps: 160
+  learning_rate: 0.0003
+  num_realizations: 4
+  init_offset_radius: 0.2
+  init_offset_angle: 0.3
+  num_lhs_points: 0
+  optimizer: bfgs
+  num_adam_optimizations: 3
+  validation_split: 0.2
+  outlier_loss_factor: 10.0
+  position_tracking_weight: 1.0
+  heading_tracking_weight: 1.0
+  linear_velocity_tracking_weight: 0.25
+  angular_velocity_tracking_weight: 1.0
+  input_weight: 0.0
+  input_delta_weight: 1.0
+  omega_delta_weight: 0.0
+  gain_delta_weight: 0.0
+  k_min_stab: 0.001
+  k_max_stab: 20.0
+  k_max_rest: 20.0
+  gain_parametrization: null
+  static_tune: true
+  static_tune_steps: 160
+  static_tune_learning_rate: 0.0003
+  presearch_relative_range: 0.3
+  warm_start_schedule: true
+  use_residual_model: true

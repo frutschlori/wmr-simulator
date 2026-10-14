@@ -1,50 +1,22 @@
 """Tuning trajectories appended to the identification reference.
 
-The residual is trained on the identification logs, and a residual is only
-accurate where its data lies; what it has to be accurate for is the gain
-tuner, which rolls out the tuning set. Driving the tuning set on the robot
-costs an SD-card swap per trajectory, so instead the identification reference
-carries some of it: its identified phase, then trajectories of the previous
-iteration's tuning set, moved rigidly to start where the identified phase ends
-(both rest at the joint). Measured in MuJoCo (2026-10-02, 5 seeds), two
-appended trajectories -- the most demanding and the medoid of the set -- made
-a closed-loop-trained residual predict held-out runs 2.4 % better and the gains
-retuned on it track 1.1 mm better (5/5 seeds), as much as driving all fifteen;
-one trajectory was not consistent, and the identification logs as they were
-(fast phase far outside the tuning regime) made the residual 16 % worse.
+The identification reference is its identified phase followed by trajectories
+of the previous iteration's tuning set, so the residual model is trained on
+data from the regime the gain tuner rolls out in. The segments are moved
+rigidly to start where the previous piece ends (all rest at the joints).
 
-Reference states are ``[x, y, theta, vx, vy, omega, ax, ay]`` with *world-frame*
-velocity and acceleration, so a rigid motion rotates columns 3-4 and 6-7 along
-with the path; omega is invariant.
+Reference states are ``[x, y, theta, vx, vy, omega, ax, ay]`` with world-frame
+velocity and acceleration, so a rigid motion rotates columns 3-4 and 6-7.
 
-Attached end to end, the segments carry on in whatever direction they happen to
-end, and two tuning trajectories easily take the reference 5-8 m from its start
--- far outside the arena the robot is tracked in. Placement therefore has two
-dynamically clean degrees of freedom, both at a point where the robot rests: a
-segment may be *mirrored* about its start heading (the same motion with the yaw
-rate negated), and a short rest-to-rest *arc turn* may re-aim it. A small search
-over the segments' order, mirrors and turn angles keeps the whole reference
-inside the environment box, preferring no turns and an end near the start (a
-short return).
-
-Re-aiming turns are driven forward on an arc, never on the spot: the Kanayama
-law's heading feedback is ``v_ref * kth * sin(theta_e)``, so a turn in place
-(v_ref = 0) is open loop in heading and lands wherever the controller's
-wheelbase belief puts it. With turns in place, 119 of 159 iteration-2
-identification repeats (Phase 2 v6) started more than 0.5 rad off heading,
-because iteration 1 identified the wheelbase 10-50 % too large.
-
-Only trajectories the robot can follow are worth appending (``traction_usage``):
-on the real robot (2026-10-06, thesis_ch5/real_robot) 9 of 16 designed tuning
-trajectories appended in iterations 2-3 lost grip (sideslip up to 1.6 m/s),
-at the reference instant where one wheel has to accelerate or brake at 3-4
-m/s^2 while the robot turns. The whole-log residual screen then dropped those
-logs, and with them every clean piece.
+To keep the reference inside the environment box, a segment may be mirrored
+about its start heading (yaw rate negated) and re-aimed by a rest-to-rest arc
+turn, driven forward (the Kanayama law has no heading feedback at v_ref = 0).
+A small search over order, mirrors and turns picks the placement.
+Trajectories above a traction-usage limit (``traction_usage``) can be skipped.
 """
 
 from __future__ import annotations
 
-import itertools
 import math
 import pickle
 from pathlib import Path
@@ -52,11 +24,7 @@ from pathlib import Path
 import numpy as np
 
 # Semi-axes [m/s^2] of the friction ellipse ``traction_usage`` normalizes by:
-# longitudinal at a wheel, lateral of the body. Fitted to the real robot's
-# identification logs (2026-10-07): slip followed the per-wheel longitudinal
-# demand, while 4.3 m/s^2 of steady lateral acceleration (circle_r050) never
-# slipped; a lateral semi-axis about three times the longitudinal one ranked the
-# pieces best, the lateral term only breaking near-ties.
+# longitudinal at a wheel, lateral of the body.
 TRACTION_LONGITUDINAL_LIMIT = 3.0
 TRACTION_LATERAL_LIMIT = 9.0
 
@@ -90,12 +58,7 @@ def traction_usage(states: np.ndarray, dt: float, base_diameter: float) -> float
     """Peak friction-ellipse usage of a reference: the largest, over time and
     both wheels, of sqrt((a_long / TRACTION_LONGITUDINAL_LIMIT)^2 +
     (a_lat / TRACTION_LATERAL_LIMIT)^2), with a_long = |a_tan +- (L / 2) alpha|
-    the longitudinal acceleration at a wheel and a_lat = |v * omega|.
-
-    Measured on the real robot (2026-10-07): designed appended trajectories at
-    usage <= 1.1 lost grip in 1 of 4, at 1.2-1.4 in 7 of 11; the fixed curves
-    (0.45-0.48) never did. On the benchmark set, lemniscate_big_fast (1.36)
-    slipped in 54 % of runs, designed_fast (0.88) in 8 %."""
+    the longitudinal acceleration at a wheel and a_lat = |v * omega|."""
     speed = np.hypot(states[:, 3], states[:, 4])
     omega = states[:, 5]
     tangential = np.gradient(speed, dt)
@@ -114,16 +77,12 @@ def representative_trajectories(
     base_diameter: float | None = None,
 ) -> list[Path]:
     """``count`` trajectories of a tuning set: the most demanding one (largest
-    mean lateral acceleration |v * omega|, the fast-turning regime), then the
-    medoid (closest to the set's mean motion in units of its spread), then the
-    remaining ones in decreasing demand. Trajectories in ``exclude`` (e.g. ones
-    that do not fit the workspace) are skipped; the ranking is still the whole
-    set's, so the medoid falls back to the next closest to the set's mean.
+    mean |v * omega|), then the medoid (closest to the set's mean motion), then
+    the rest in decreasing demand. Trajectories in ``exclude`` are skipped.
 
-    ``max_traction_usage`` > 0 also skips trajectories whose ``traction_usage``
-    (at ``base_diameter``) exceeds it. When fewer than ``count`` of the rest stay
-    below it, the ones over it are admitted in increasing usage until there are
-    ``count``, so the residual keeps as much data as without the limit."""
+    ``max_traction_usage`` > 0 also skips trajectories above that
+    ``traction_usage`` (at ``base_diameter``), unless fewer than ``count``
+    remain; then the lowest-usage ones over it are admitted."""
     pickles = sorted(Path(p) for p in pickles)
     if count <= 0 or not pickles:
         return []
@@ -316,17 +275,13 @@ def extend_identification_reference(
                           "box_violation": None, "pieces": pieces}
 
     variants = [(segment, mirror(segment)) for segment in segments]
-    # (angle, radius) per joint; a turn may also use half the radius, which the
-    # box often needs (a forward arc sweeps up to 2 radii off the joint).
+    # (angle, radius) per joint; a turn may also use half the radius.
     turn_options = [(0.0, 0.0)] + [
         (angle, radius) for angle in TURN_ANGLES if angle != 0.0 for radius in (turn_radius, 0.5 * turn_radius)
     ]
-    # Depth-first over (segment, mirror, turn) per joint. The score's first three
-    # entries (box violation, number of turns, total turn angle) can only grow
-    # as segments are added, so a prefix already worse in them than the best
-    # complete placement is cut; ties go to the first placement in the order
-    # (permutation, mirrors, turns) a full enumeration would visit. Exhaustive
-    # enumeration grows as 6 x 8 x 15^3 = 162000 placements for three segments.
+    # Depth-first over (segment, mirror, turn) per joint, pruning prefixes
+    # already worse than the best complete placement in (box violation, number
+    # of turns, total turn angle); ties keep the enumeration order.
     best = None
 
     def visit(extended, violation, order, flips, turns, turn_indices, pieces):

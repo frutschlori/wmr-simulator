@@ -7,8 +7,7 @@ import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 import numpy as np
 
-# The summary figures reproduce the objective's noise keys exactly, so they take
-# the namespaces from the objective rather than restating them.
+# The figures use the objective's own noise keys.
 from wmr_simulator.gain_tuning.objectives import (
     TRAINING_KEY_NAMESPACE,
     VALIDATION_KEY_NAMESPACE,
@@ -22,14 +21,7 @@ from wmr_simulator.visualization.trajectories import (
 
 def realization_keys_for_set(realizations, num_trajectories, key_namespace):
     """The ``(T, R, 2)`` noise-key pairs the objective scored a trajectory set
-    under, as ``(robot_keys, estimator_keys)``.
-
-    Exactly the split ``optimizers._make_terms_for_values`` does, so a summary
-    figure draws the rollouts that were actually scored rather than a fresh
-    draw: every (trajectory, realization) pair gets its own key, and
-    ``key_namespace`` keeps the training set (0) independent of the validation
-    set (1).
-    """
+    under, as ``(robot_keys, estimator_keys)``."""
     from wmr_simulator.gain_tuning.objectives import split_realization_keys_by_trajectory
 
     return (
@@ -52,24 +44,8 @@ def rollout_realizations(
     controller_gains=None,
     schedule_params=None,
 ):
-    """Roll out every (trajectory, start offset) pair: ``(T, R, S, 3)`` poses.
-
-    ``robot_keys`` / ``estimator_keys`` are the ``(T, R, 2)`` noise draws the
-    objective scored these rollouts under (see ``realization_keys_for_set``).
-    They are required: letting ``run_closed_loop`` fall back to the pipeline's
-    single ``target_*_key`` puts the whole family on *one* noise realization,
-    so the figure shows a draw the tuner never scored and the realizations
-    differ only in their start pose. Measured on an active-learning tuning set
-    at the stock gains, one shared key against the objective's own keys: pose
-    RMSE 0.0352 vs 0.0386 m, max deviation 0.103 vs 0.161 m, max heading error
-    0.285 vs 0.476 rad -- i.e. the shared-key figure reads as a controller that
-    tracks visibly better than the one being tuned.
-
-    The tuning objective is an average over the start offsets, so a figure that
-    draws one rollout per trajectory shows a single sample of what was scored.
-    Rolling out the whole family under one jitted double vmap costs one compile
-    instead of T*R eager ones.
-    """
+    """Roll out every (trajectory, realization) pair under the objective's
+    noise keys (``realization_keys_for_set``): ``(T, R, S, 3)`` poses."""
     import jax
     import jax.numpy as jnp
 
@@ -108,16 +84,12 @@ def plot_gain_tuning_summary(
     static_realization_poses=None,
     out_prefix="gain_tuning_summary",
 ):
-    """The one-run summary. The logs are realization 0 of trajectory 0, started
-    at *its* offset rather than on the reference; the optional
-    ``*_realization_poses`` ``(R, S, 3)`` batches add the remaining realizations
-    to the trajectory panel, which is the spread the loss was averaged over."""
+    """The one-run summary of realization 0 of trajectory 0 (from its start
+    offset); ``*_realization_poses`` ``(R, S, 3)`` add the other realizations."""
     os.makedirs("visualize", exist_ok=True)
     pdf_filename = os.path.join("visualize", f"{out_prefix}.pdf")
 
-    # When a static-tune rollout is supplied, the main tuned line is the
-    # parametrized (MLP) result; label it "tuned (param)" and overlay the
-    # static-gain rollout as "tuned (static)". Without one, keep the plain "Tuned".
+    # With a static-tune rollout, label the main line "tuned (param)" and add "tuned (static)".
     tuned_label = "tuned (param)" if static_log is not None else "Tuned"
     static_color = "tab:green"
 
@@ -137,8 +109,6 @@ def plot_gain_tuning_summary(
 
     fig = plt.figure(figsize=(24, 10))
     fig.suptitle(f"Gain Tuning Summary ({out_prefix})", fontsize=16)
-    # The trajectory panel gets two columns: it now carries every realization
-    # and its start arrow, which is unreadable in one.
     ax_traj = plt.subplot2grid((2, 12), (0, 0), colspan=2, fig=fig)
     ax_vel = plt.subplot2grid((2, 12), (0, 2), colspan=4, fig=fig)
     ax_wheels = plt.subplot2grid((2, 12), (0, 6), colspan=3, fig=fig)
@@ -170,9 +140,7 @@ def plot_gain_tuning_summary(
     if static_pose is not None:
         ax_traj.plot(static_pose[:, 0], static_pose[:, 1], color=static_color, linewidth=1.0, label="tuned (static)")
     ax_traj.plot(tuned_pose[:, 0], tuned_pose[:, 1], color="tab:orange", linewidth=1.2, label=tuned_label)
-    # Only the highlighted run gets an arrow: the panel's time series are that
-    # one realization, and an arrow per realization reads as several starts for
-    # a single plotted run.
+    # Only the highlighted run gets a start arrow.
     draw_start_pose_arrow(
         ax_traj,
         tuned_pose[0, :3],
@@ -273,9 +241,8 @@ def plot_gain_tuning_summary(
     ax_wheels.grid(True)
     wheel_legend_handles = [line_cmd_right, line_meas_right, line_cmd_left, line_meas_left]
 
-    # Applied controller gains along the tuned rollout (time-varying under a
-    # gain parametrization): motor PI gains on the wheel-speeds subplot, the
-    # outer gains on their state subplots below.
+    # Applied gains along the tuned rollout: motor gains with the wheel speeds,
+    # outer gains with the states.
     tuned_gains_log = None if tuned_log.pose.gains is None else np.asarray(tuned_log.pose.gains, dtype=float)
     if tuned_gains_log is not None:
         ax_wheel_gains = ax_wheels.twinx()
@@ -355,15 +322,8 @@ def plot_trajectory_set_summary(
     title: str = "Trajectories",
     out_prefix="trajectory_summary",
 ):
-    """Every trajectory rolled out under *every* realization it was tuned on --
-    its own start offset (``start_offsets`` is (T, R, 3)) *and* its own noise
-    draw (from ``realizations`` + ``key_namespace``) -- initial gains against
-    tuned.
-
-    Drawing one rollout per trajectory would show one draw out of the R the loss
-    averages over, and would start it on the reference -- where the tracking
-    gains have almost nothing to act on and the run is not the one that was
-    scored."""
+    """Every trajectory rolled out under every realization it was tuned on
+    (start offsets ``(T, R, 3)`` and noise keys), initial against tuned gains."""
     os.makedirs("visualize", exist_ok=True)
     pdf_filename = os.path.join("visualize", f"{out_prefix}.pdf")
 
@@ -376,28 +336,18 @@ def plot_trajectory_set_summary(
         num_trajectories = min(max_trajectories, num_trajectories)
     colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
 
-    # The main tuned rollout applies the parametrization (MLP) schedule; when a
-    # static-tune result is supplied it is overlaid (dash-dot) as
-    # "tuned (static)" and the main line is relabeled "tuned (param)".
     tuned_label = "tuned (param)" if static_gains is not None else "Tuned"
 
-    # All rollouts for the figure run as one vmapped, jitted batch per gain set
-    # -- eager per-trajectory calls pay a fresh XLA compile each.
+    # One vmapped, jitted batch per gain set.
     plotted_references = reference_trajectories[:num_trajectories]
     plotted_offsets = np.asarray(start_offsets, dtype=float)[:num_trajectories]
-    # Split over the whole set before slicing: the keys a trajectory was scored
-    # under depend on how many trajectories the set has, so a `max_trajectories`
-    # figure has to take the first few of the full split, not a fresh split of
-    # the first few.
+    # Split the keys over the whole set before slicing to max_trajectories.
     robot_keys, estimator_keys = realization_keys_for_set(
         realizations, reference_trajectories.shape[0], key_namespace
     )
     plotted_robot_keys = robot_keys[:num_trajectories]
     plotted_estimator_keys = estimator_keys[:num_trajectories]
-    # ``init_gains`` / ``init_schedule_params`` name the controller the run
-    # started from (run_gain_tuning_experiment's ``init_gains``); None falls
-    # back to the problem's bare gains, which under a trained parametrization
-    # is not a controller anybody ran.
+    # The controller the run started from (None: the problem's gains).
     init_poses = rollout_realizations(
         pipeline,
         robot_params,
@@ -433,10 +383,7 @@ def plot_trajectory_set_summary(
     )
     num_realizations = init_poses.shape[1]
     arrow_length = start_arrow_length(tuned_poses[..., :2])
-    # Same rollout weight as the trajectory designer's batch summary
-    # (visualization.trajectories.plot_trajectory_set): with several
-    # realizations per trajectory the lines overlap, and thin, slightly
-    # transparent strokes read far better than solid ones.
+    # Thin, slightly transparent rollout lines.
     rollout_width = 0.9 if num_realizations == 1 else 0.6
     rollout_alpha = 1.0 if num_realizations == 1 else 0.75
 
@@ -545,15 +492,8 @@ def plot_validation_trajectory_summary(
 
 
 def plot_tuning_trajectory_histograms(pipeline, out_prefix="tuning_trajectory_histograms"):
-    """Velocity/acceleration histograms of the tuning trajectory set.
-
-    The gains a run ships are only as transferable as the motion they were tuned
-    on, so this is the set's own envelope -- what a held-out benchmark's
-    histogram (visualization.motion_histograms, written beside its logs) is read
-    against. Training and validation are separate datasets: they are a random
-    split of one design batch, so a difference between them is a sampling
-    accident worth seeing rather than a design decision.
-    """
+    """Velocity/acceleration histograms of the tuning trajectory set
+    (training and validation as separate datasets)."""
     from wmr_simulator.visualization.motion_histograms import (
         motion_channels_from_reference_states,
         plot_motion_histograms,

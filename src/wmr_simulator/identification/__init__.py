@@ -1,32 +1,9 @@
-__all__ = [
-    "SystemIdentificationPipeline",
-    "run_multi_experiment_identification",
-    "run_multi_log_identification",
-    "run_single_experiment_identification",
-    "run_validation_identification",
-    "run_window_replay_identification",
-]
+__all__ = ["SystemIdentificationPipeline", "run_multi_log_identification"]
 
 
 def __getattr__(name):
-    if name == "SystemIdentificationPipeline":
-        from wmr_simulator.identification.pipeline import SystemIdentificationPipeline
+    if name in __all__:
+        from wmr_simulator.identification import pipeline
 
-        return SystemIdentificationPipeline
-    if name == "run_single_experiment_identification":
-        from wmr_simulator.identification.pipeline import run_single_experiment_identification
-
-        return run_single_experiment_identification
-    if name == "run_multi_log_identification":
-        from wmr_simulator.identification.pipeline import run_multi_log_identification
-
-        return run_multi_log_identification
-    if name in {
-        "run_multi_experiment_identification",
-        "run_validation_identification",
-        "run_window_replay_identification",
-    }:
-        from wmr_simulator.identification import variants
-
-        return getattr(variants, name)
+        return getattr(pipeline, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

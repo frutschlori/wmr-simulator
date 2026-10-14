@@ -1,0 +1,44 @@
+train:
+  samples: 4986
+  target_rms:
+  - 0.01794
+  - 0.12641
+  residual_rmse:
+  - 0.03909
+  - 0.17623
+  explained_fraction:
+  - -3.7489
+  - -0.9435
+validation:
+  samples: 1249
+  target_rms:
+  - 0.01686
+  - 0.11827
+  residual_rmse:
+  - 0.03911
+  - 0.16908
+  explained_fraction:
+  - -4.3783
+  - -1.0437
+input_std:
+  v_nom: 0.45164
+  omega_nom: 1.54671
+  v_cmd: 0.41002
+  omega_cmd: 1.34658
+gate_weight_train:
+  p1: 0.9404
+  p50: 0.9889
+  p99: 0.9924
+max_abs_prediction:
+- 0.06926
+- 0.44341
+num_logs: 5
+closed_loop:
+  window_s: 1.0
+  train_windows: 46
+  train_loss_nominal: 5.889161109924316
+  train_loss: 1.4659545421600342
+  validation_windows: 12
+  validation_loss_nominal: 6.075126647949219
+  validation_loss: 1.4217579364776611
+excluded_diverged_logs: {}

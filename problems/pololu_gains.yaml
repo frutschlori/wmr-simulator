@@ -13,23 +13,16 @@ planner:
     - [1.0, 0.5]
   time: 5.0 # seconds
 controller:
-  # Motor gains are dimensionless here, but in duty / (rad/s) in pololu firmware -> divide gains by motor gain for conversion
   # [kx, ky, kth, kpmotor, kimotor, kdmotor]; a five-entry list means kdmotor = 0.
-  # kdmotor (kd_inner = kdmotor / max_wheel_speed on the robot) is 0 in the stock
-  # firmware; it starts at 0.01 here because the tuner searches it in sqrt space,
-  # where a gain at exactly 0 has no gradient and would never move.
-  # gains: [4.5, 6.0, 12.0, 2.5, 5.0, 0.0] # stock pololu firmware gains
-  gains: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0] # stock pololu firmware gains
-  # gains: [2.0, 6.0, 8.0, 2.5, 0.0] # 1 round tuned gains
-  # gains: [5.0, 5.0, 3.0, 0.4, 0.2] # stock wmr simulator gains
+  # The motor gains are in wheel-speed units here and divided by max_wheel_speed
+  # for the firmware. Unit gains are the uninformed initial controller (the
+  # stock firmware gains are [4.5, 6.0, 12.0, 2.5, 5.0, 0.0]); kdmotor starts
+  # above 0 because the tuner searches it in sqrt space.
+  gains: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
 
-  # Gain MLP: a tanh MLP on the tracking errors + reference speeds, one bounded
-  # factor per scheduled gain: gain_i = base_i * clip(1 + mlp(z)_i, 0, bound) with
-  #   z = [x_e, y_e, theta_e, v_e, omega_e, v_d, |omega_d|] / feature_scale.
-  # theta is a delta on a seeded random init with zero output layer, so theta = 0
-  # is exactly the static controller. Weight matrices are spectrally normalized
-  # to spectral_norm_cap at forward time, capping the network's Lipschitz
-  # constant so the factors stay smooth on noisy/unseen inputs.
+  # Gain schedule: gain_i = base_i * clip(1 + g(z) mlp(z)_i, 0, bound) with
+  #   z = [x_e, y_e, theta_e, v_e, omega_e, v_d, |omega_d|] / feature_scale
+  # (see wmr_simulator.gain_parametrization.error_mlp).
   gain_parametrization:
     kind: error_mlp
     enabled: true
@@ -39,9 +32,7 @@ controller:
     bound: 5.0             # upper factor bound, clipped to >= 1 when applied
     learn_bound: false     # true adds the bound to the trainable vector
     spectral_norm_cap: 2.0 # per-matrix spectral norm cap, 0 disables
-    # Out-of-distribution gate: factor = clip(1 + g(z) mlp(z), 0, bound), g ~1 on the
-    # features the tuning rollouts visit (k-means centers fitted before training)
-    # and -> 0 off them, where the controller is the static one. 0 disables.
+    # Out-of-distribution gate g(z): number of k-means centers (0 disables).
     gate_num_centers: 0
     gate_bandwidth_scale: 1.5
     gate_ood_sigma: 3.0
@@ -56,15 +47,15 @@ robot:
   a_max_lateral: 7.0  # m/s^2
   omega_max: 10.0      # rad/s
   alpha_max: 20.0     # rad/s^2
-noise_enabled: true # false zeroes the estimator measurement noise everywhere (sim, gain tuning, traj-opt FIM)
+noise_enabled: true # false zeroes the measurement noise everywhere
 estimator:
   type: "kf"              # estimator type: "kf" (Kalman Filter) or "dr" (Dead Reckoning)
   wheel_radius: 0.016     # estimator's wheel_radius [m]
   base_diameter: 0.0842   # estimator's base_diameter [m]
-  noise_pos: 0.002        # position measurement noise [m] (from mocap almost no noise)
-  noise_angle: 0.04       # orientation noise [rad] ~ 1 degrees
+  noise_pos: 0.002        # position measurement noise [m]
+  noise_angle: 0.04       # orientation measurement noise [rad]
   enc_angle_noise: 0.03   # encoder noise [rad]
-  wheel_lp_tau: 0.053     # [s] first-order low-pass on encoder wheel speeds fed to the controller (mirrors firmware; ~30 ms lag). 0 disables.
+  wheel_lp_tau: 0.053     # [s] firmware low-pass on the wheel speeds fed to the controller (0 disables)
 
   proc_pos_std: 0.01      # [m]   process noise on x,y per step
   proc_theta_std: 0.03    # [rad] process noise on θ per step

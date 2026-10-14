@@ -1,19 +1,14 @@
 """Modular stages of the iterative active-learning loop.
 
 Each stage reads its inputs and writes its outputs as files inside the
-iteration folder (see experiment.py for the layout), so the loop survives the
-interruptions needed to collect robot data from the SD card. Stage order:
+iteration folder (see experiment.py for the layout). Stage order:
 
     init -> plan-id-trajectory -> [run robot, copy SD logs into data/]
          -> benchmark -> decode-logs -> identify -> train-residual
          -> plan-tuning-trajectories -> tune-gains -> finalize (next iteration)
 
-The bracketed step is the only one that is not a stage, because on the real
-robot it is a person with an SD card. simulate-deployment replaces it with a
-MuJoCo run of the same trajectory (mujoco_sim), which is what lets `run` carry
-an experiment through several iterations on its own. benchmark is the other
-half of that stand-in: the same plant driving a *fixed* baseline reference, so
-every iteration is scored on something that did not change with it.
+simulate-deployment replaces the bracketed robot step with a MuJoCo run of the
+same trajectory; benchmark drives the held-out evaluation references.
 
 Heavy imports (jax, the pipelines) happen inside the stage functions so the
 CLI stays responsive for bookkeeping commands like status.
@@ -81,10 +76,7 @@ def stage_init(root: str | Path, overrides: dict | None = None) -> Experiment:
 
 
 def _initialize_prior_iteration(experiment: Experiment, paths: IterationPaths) -> None:
-    """Iteration 0 tunes on the prior model with no data: the model the tuning
-    half reads (problem_identified.yaml) is the problem's own, and there is no
-    residual (results/residual_skipped.yaml, the loop's record of an iteration
-    without one)."""
+    """Iteration 0 tunes on the prior model: no identification, no residual."""
     shutil.copy2(paths.problem, paths.problem_identified)
     if experiment.config["use_residual_model"]:
         save_yaml(paths.residual_skipped, {"reason": "iteration 0 tunes on the prior model; no logs yet"})
@@ -118,8 +110,6 @@ def stage_finalize(experiment: Experiment, iteration: int) -> IterationPaths:
     )
     print(f"Created {next_paths.root} from iteration {iteration:02d} results.")
     print(f"  firmware config for the robot: {next_paths.robotcfg_cfg}")
-    # Also for the iteration past the target, which `run` creates and then
-    # stops: its controller is the last one, and it is benchmarked there.
     if not experiment.config["mujoco_deployment"]["enabled"]:
         _create_benchmark_directories(next_paths, experiment.config["benchmark"])
     return next_paths
@@ -164,8 +154,7 @@ def _initialize_iteration(
 
 
 def mocap_calibration(experiment: Experiment):
-    """The robot's mocap calibration (experiment.yaml ``mocap_calibration``,
-    pololu.mocap_calibration), or None."""
+    """The robot's mocap calibration (experiment.yaml ``mocap_calibration``), or None."""
     path = experiment.config.get("mocap_calibration")
     if not path:
         return None
@@ -187,12 +176,10 @@ def _write_static_gain_config(
     physical_params,
     static_gains: list[float],
 ) -> None:
-    """Write the gain-MLP-free baseline variant of this iteration's robot config.
+    """Write the static-gain variant of this iteration's robot config.
 
-    Same identified robot parameters, but the gains of the static tuning run
-    and no gain parametrization, so the two can be benchmarked against each
-    other on the robot (copy ROBOTCFG_static.CFG as ROBOTCFG.CFG without a
-    GAINMLP.JSN next to it).
+    On the robot, copy ROBOTCFG_static.CFG as ROBOTCFG.CFG without a
+    GAINMLP.JSN next to it.
     """
     from wmr_simulator.pololu.robot_config import export_robot_config
 
@@ -210,12 +197,7 @@ def _write_static_gain_config(
 
 
 def _export_gain_mlp_if_configured(problem_path: Path, output_path: Path) -> Path | None:
-    """Export the error-MLP gain parametrization to GAINMLP.JSN for the robot.
-
-    No-op unless the generated iteration problem enables the gain
-    parametrization; the factors are multiplicative so the file sits next to
-    ROBOTCFG.CFG on the SD card and scales the firmware base gains it holds.
-    """
+    """Export the gain schedule to GAINMLP.JSN if the iteration problem enables it."""
     from wmr_simulator.gain_parametrization import params_from_cfg
 
     problem_cfg = load_yaml(problem_path)
@@ -237,24 +219,16 @@ def _export_gain_mlp_if_configured(problem_path: Path, output_path: Path) -> Pat
 
 
 def _residual_in_design(experiment: Experiment, stage_config: dict) -> bool:
-    """Whether a trajectory-design stage rolls out on the residual plant.
-
-    The top-level use_residual_model is the master switch: with it off the
-    experiment never trains a residual, and no stage may pick up a checkpoint
-    that got into results/ some other way. The stage's own flag can only turn
-    the residual off on top of that.
-    """
+    """Whether a trajectory-design stage rolls out on the residual plant
+    (the top-level use_residual_model is the master switch)."""
     return bool(experiment.config["use_residual_model"] and stage_config["use_residual_model"])
 
 
 def _load_design_residual_model(path: Path, problem_path: Path):
     """Residual checkpoint a trajectory-design stage rolls out on.
 
-    Only called when the residual is enabled for the stage
-    (_residual_in_design), so a missing checkpoint raises instead of silently
-    designing on the nominal plant. A checkpoint trained against a different
-    nominal model than ``problem_path``'s raises as well
-    (residual_model.io.load_residual_model).
+    A missing checkpoint raises unless the iteration skipped the residual; a
+    checkpoint trained against a different nominal model raises as well.
     """
     skipped = path.with_name("residual_skipped.yaml")
     if not path.is_file() and skipped.is_file():
@@ -279,20 +253,9 @@ def _load_design_residual_model(path: Path, problem_path: Path):
 def _static_design_gains(paths: IterationPaths) -> list[float] | None:
     """The static gains the trajectory designers compute their FIM around.
 
-    The designers always drive the *static* controller (no rollout in
-    TrajectoryOptimizationPipeline passes schedule_params), so their design
-    point has to be static gains. The iteration's problem yaml carries the
-    *parametrized* run's base gains -- finalize writes those into
-    robot_config.yaml and write_iteration_problem copies them on -- and those
-    are not a controller anybody runs: the network absorbs whatever scale they
-    take, so they drift far from the effective gains and, being large, flatten
-    the designs.
-
-    robot_config_static_gains.yaml is the same file stage_tune_gains warm-starts
-    its static run from. Missing it means there is no separate static
-    controller for this iteration -- iteration 1, or an experiment with the
-    parametrization off -- and the problem's own gains already are the static
-    ones.
+    The problem yaml carries the parametrized run's base gains, which are not a
+    controller that is driven on their own. None: the problem's gains are the
+    static ones.
     """
     if not paths.robot_config_static.is_file():
         return None
@@ -318,10 +281,7 @@ def stage_plan_identification_trajectory(experiment: Experiment, iteration: int)
             )
         baseline = Path(baseline)
         if baseline.is_dir():
-            # A directory holds one random draw per seed (fixed_sets.
-            # random_identification_reference): seed k drives draw k, so the
-            # fixed level averages over uninformed choices instead of betting
-            # on one.
+            # One random draw per seed.
             draws = sorted(baseline.glob("*.pkl"))
             if not draws:
                 raise FileNotFoundError(f"No identification references in {baseline}.")
@@ -331,9 +291,7 @@ def stage_plan_identification_trajectory(experiment: Experiment, iteration: int)
     else:
         from wmr_simulator.trajectory_optimization.pipeline import TrajectoryOptimizationPipeline
 
-        # The previous iteration's residual: this stage runs before the robot
-        # has driven anything for *this* iteration, so its own residual does not
-        # exist yet. Iteration 1 has no previous one either and designs nominal.
+        # This iteration has no residual yet, so the previous one is used.
         residual_model = None
         if _residual_in_design(experiment, config) and iteration > 1:
             residual_model = _load_design_residual_model(
@@ -346,11 +304,7 @@ def stage_plan_identification_trajectory(experiment: Experiment, iteration: int)
             str(_identification_problem(paths, config)),
             time_scaling=config["time_scaling"],
             objective_mode="identification",
-            # The design is driven with the parametrization off, so it is
-            # scored at the static gains rather than the problem's base gains.
             controller_gains=design_gains,
-            # A slow identified phase, then a fast one for the residual; see
-            # identification_trajectory.phases.
             motion_phases=config["phases"],
             residual_model=residual_model,
         )
@@ -396,8 +350,6 @@ def stage_plan_identification_trajectory(experiment: Experiment, iteration: int)
         )
         print(f"Exported Pololu reference JSN: {jsn_path}")
 
-        # The appended tuning trajectories take the place of the fast phase and
-        # of most of the slow return.
         if appended:
             environment = load_yaml(_identification_problem(paths, config))["environment"]
             with pickle_path.open("rb") as file:
@@ -410,8 +362,8 @@ def stage_plan_identification_trajectory(experiment: Experiment, iteration: int)
                 box_max=tuple(environment["max"]),
                 margin=float(config["appended_box_margin"]),
             )
-            # Over the firmware's limits, the return's line is driven faster
-            # first (the arcs stay), and only then is an appended trajectory dropped.
+            # Over the firmware limits: drive the return line faster before
+            # dropping an appended trajectory.
             line_speeds = np.arange(arc_return.peak_speed, float(config["appended_return_max_line_speed"]) + 1e-9, 0.25)
             for line_speed in line_speeds:
                 bridged_path = append_bridge_reference(
@@ -470,22 +422,15 @@ def _reference_problems(jsn_path: Path, environment: dict) -> list[str]:
 def _append_tuning_trajectories(
     experiment: Experiment, iteration: int, pickle_path: Path, config: dict, count: int
 ) -> list[str]:
-    """Replace everything after the identified phase of this iteration's
-    identification reference by trajectories of the previous iteration's tuning
-    set (``trajectory_optimization.reference_extension``), so the residual is
-    trained where the tuner rolls out. The experiment's first iteration has no
-    tuning set before it and keeps its fast phase; with prior tuning that is
-    iteration 0, which drives nothing, so iteration 1 appends iteration 0's
-    set. The reference as designed (or copied) is kept in
-    ``identification_trajectory/designed/``; the pickle the stages read is the
-    extended one, with the same ``identified_duration``; a second call (fewer
-    trajectories) extends that kept copy again. The extended reference has to
-    stay inside the problem's environment box: when no placement of the chosen
-    trajectories does (2026-10-06, real S-A-R seed 1: the tuning set's most
-    demanding curve spans 2.7 x 3.5 m and the placed reference reached y 3.06),
-    the trajectory that leaves it furthest is excluded and the representatives
-    are chosen again from the rest of the set. Returns the appended
-    trajectories' names (empty when nothing was appended, or nothing fits)."""
+    """Replace everything after the identified phase of the identification
+    reference by trajectories of the previous iteration's tuning set
+    (``trajectory_optimization.reference_extension``).
+
+    The reference as designed is kept in ``identification_trajectory/designed/``.
+    A trajectory that cannot be placed inside the environment box is excluded
+    and the representatives are chosen again. Returns the appended
+    trajectories' names (empty when nothing was appended).
+    """
     from wmr_simulator.trajectory_optimization.reference_extension import (
         extended_payload,
         outside_box,
@@ -508,8 +453,6 @@ def _append_tuning_trajectories(
         shutil.move(str(pickle_path), designed)
     identification_problem = load_yaml(_identification_problem(experiment.paths(iteration), config))
     environment = identification_problem["environment"]
-    # Traction usage at the wheelbase of the controller that drives the
-    # reference (reference_extension.traction_usage).
     max_usage = float(config.get("appended_max_traction_usage", 0.0))
     base_diameter = float(identification_problem["robot"]["base_diameter"])
     excluded: list[Path] = []
@@ -534,7 +477,7 @@ def _append_tuning_trajectories(
         )
         if violation == 0.0:
             break
-        # A turn leaves the box on the way into the trajectory after it.
+        # A turn leaving the box is attributed to the trajectory after it.
         names = [piece.get("name") for piece in payload["pieces"]]
         name = next((name for name in names[culprit:] if name), None)
         if name is None:
@@ -561,14 +504,8 @@ def _append_tuning_trajectories(
 
 
 def _check_fixed_tuning_references(pickles: list[Path], problem_path: Path) -> None:
-    """Refuse fixed tuning references the tuner would not roll out whole.
-
-    The tuner fits every reference onto the tuning problem's time grid
-    (SimulationPipeline._fit_reference_states): a longer one is silently cut
-    off at sim_time, a shorter one held at its last state. The cut is the one
-    to refuse -- training on a truncated benchmark reference, say, is a
-    different experiment from the one named.
-    """
+    """Refuse fixed tuning references longer than the tuning horizon (the
+    tuner would cut them off at sim_time)."""
     problem = load_yaml(problem_path)
     dt = float(problem["geometry_controller_dt"])
     sim_time = float(problem["sim_time"])
@@ -618,15 +555,6 @@ def stage_plan_tuning_trajectories(experiment: Experiment, iteration: int) -> li
 
     from wmr_simulator.trajectory_optimization.pipeline import TrajectoryOptimizationPipeline
 
-    # kimotor's and kdmotor's FIM columns are scaled by pinned constants rather
-    # than by the design point (see tuning_trajectories.kimotor_fim_scale): the
-    # tuned gains this iteration inherits usually have kimotor = 0, where a tied
-    # scale leaves the design blind to it and the trajectories dull. The gains
-    # themselves are untouched -- the iteration's problem.yaml, the tune-gains
-    # stage and everything exported to the robot keep the tuned values.
-    #
-    # This iteration's own residual: train-residual runs between identify and
-    # this stage, so the model is fitted to the logs recorded for it.
     residual_model = None
     if _residual_in_design(experiment, config):
         residual_model = _load_design_residual_model(paths.residual_model, problem_path)
@@ -642,9 +570,6 @@ def stage_plan_tuning_trajectories(experiment: Experiment, iteration: int) -> li
         kimotor_fim_scale=float(config["kimotor_fim_scale"]),
         kdmotor_fim_scale=float(config["kdmotor_fim_scale"]),
         start_offset_mode=str(config["start_offset_mode"]),
-        # The FIM's design parameters *are* these gains here, and the rollout
-        # runs them with the parametrization off -- so they have to be the
-        # static ones, not the parametrized run's base gains.
         controller_gains=design_gains,
         residual_model=residual_model,
         motion_limits=motion_limits or None,
@@ -693,10 +618,7 @@ def stage_plan_tuning_trajectories(experiment: Experiment, iteration: int) -> li
               f"(final losses {final_losses.min():.4e} .. {final_losses.max():.4e})")
 
     clamped_batch = [pipeline.clamp_control_points(points) for points in control_point_batch]
-    # Check the whole batch before writing any of it: the per-export check
-    # inside save_reference_states_pickle would abort partway and leave a
-    # half-written directory, and one stalled design usually means the run's
-    # settings are wrong for every design.
+    # Check the whole batch before writing any of it.
     stalled = {
         index: report
         for index, points in enumerate(clamped_batch)
@@ -726,13 +648,8 @@ def stage_plan_tuning_trajectories(experiment: Experiment, iteration: int) -> li
                     reference_states=pipeline.reference_states_from_control_points(
                         clamped_control_points
                     ),
-                    # The curve itself, not just its samples, so a warm start
-                    # picks up the decision variables directly.
                     control_points=clamped_control_points,
-                    # Each trajectory ships the offsets it was designed under,
-                    # which the gain tuner then tunes on. The batch path designs
-                    # them per trajectory; a single design has only the shared
-                    # bundle, which is what the default already writes.
+                    # The gain tuner tunes on the offsets each trajectory was designed under.
                     start_offsets=(
                         ...
                         if pipeline.batch_start_offsets is None
@@ -755,33 +672,13 @@ def stage_simulate_deployment(
     iteration: int,
     num_logs: int | None = None,
 ) -> list[Path]:
-    """Stand in for the robot: drive this iteration's identification trajectory
-    in the MuJoCo plant and write binary ``TRxx`` logs into ``data/``.
+    """Drive this iteration's bridged identification trajectory on the MuJoCo
+    plant and write binary ``TRxx`` logs into ``data/``.
 
-    Replaces "copy the JSN and ROBOTCFG.CFG to the SD card, run the robot, copy
-    the logs back". Nothing downstream can tell the difference: the logs are in
-    the firmware's own binary format, in the directory decode-logs already
-    reads, and the plant's true parameters stay inside ``mujoco_sim`` -- so
-    identification still has something to find.
-
-    The runs are consecutive, as they are on the robot. What is driven is the
-    **bridged** JSN -- the trajectory, a wait, then a planned path back to the
-    start -- so only the first run is placed by hand and every later one begins
-    wherever the previous one's bridge left the robot. That reproduces the real
-    repeat procedure, including the fact that the placement of run 5 is
-    whatever four bridges accumulated to. A run that ends further than
-    ``mujoco_deployment.divergence_radius`` from the trajectory's start point
-    did not come back, so the next one is placed by hand again instead -- the
-    same rule the benchmark stage chains under, and the same thing a person
-    would do standing next to the robot. The log loader clips the bridge back
-    off again (``log_loading.clip_after_first_trajectory``, which keys on the
-    wait's zero setpoint), so identification sees the trajectory alone.
-
-    The ground truth the deployment does know -- tracking error against the
-    reference, duty saturation, where the robot started and ended -- is printed
-    and *not* written next to the log: decode-logs tries to decode every
-    non-csv file in ``data/``, and it would leak the hidden truth into the
-    pipeline besides.
+    The runs are chained like robot repeats: only the first is placed by hand,
+    each later one starts where the previous bridge left the robot, and a run
+    ending more than ``divergence_radius`` from the start is placed again. The
+    ground truth is printed, never written to ``data/``.
     """
     from wmr_simulator.mujoco_sim.deploy import run_deployment
 
@@ -817,14 +714,8 @@ def stage_simulate_deployment(
         placement = "placed by hand" if start_pose is None else "left by the bridge"
         distance_to_start = math.dist(result.final_pose[:2], reference_start[:2])
         diverged = distance_to_start > divergence_radius
-        # A run the bridge brought back close enough to the start is where the
-        # next one begins; one that did not is a robot standing somewhere else,
-        # so it is picked up and placed again.
         start_pose = None if diverged else result.final_pose
         offset = result.start_offset
-        # Tenths of a millimetre, distances in mm alongside them: a bridge that
-        # ends its min-jerk creep on the start point regularly lands inside a
-        # millimetre, and rounding that away reads as an implausible exact zero.
         print(
             f"  {result.log_path.name}  seed {seed}  {placement} "
             f"{1000 * offset[0]:+.1f}/{1000 * offset[1]:+.1f} mm, {offset[2]:+.3f} rad  "
@@ -837,12 +728,7 @@ def stage_simulate_deployment(
 
 
 def _identification_trajectory_jsn(paths: IterationPaths) -> Path:
-    """The reference the deployment drives: this iteration's *bridged* JSN.
-
-    The bridge is what makes a repeat run possible without touching the robot,
-    which is what lets the deployments be chained; the unbridged variant is
-    only exported because the bridged one is derived from it.
-    """
+    """The reference the deployment drives: this iteration's bridged JSN."""
     candidates = sorted(paths.identification_trajectory_dir.glob("*_bridge.JSN"))
     if not candidates:
         raise FileNotFoundError(
@@ -859,14 +745,8 @@ def _identification_trajectory_jsn(paths: IterationPaths) -> Path:
 
 
 def _identified_duration(paths: IterationPaths) -> float | None:
-    """Seconds of each identification log the fit uses, or None for all of it.
-
-    Read off the trajectory the logs were driven on rather than the experiment
-    config, which may have changed since: a motion-phased design records how
-    long its identified phases run (``identified_duration`` in the pickle), and
-    a trajectory without that record (a copied baseline, a design from before
-    phases) is fitted whole.
-    """
+    """Seconds of each identification log the fit uses (the pickle's
+    ``identified_duration``), or None for all of it."""
     import pickle
 
     pickles = sorted(paths.identification_trajectory_dir.glob("*.pkl"))
@@ -889,10 +769,7 @@ def _deployment_seed(experiment: Experiment, iteration: int, index: int) -> int:
     return 1_000_000 * int(experiment.config["seed"]) + 1_000 * int(iteration) + int(index)
 
 
-# A reference whose last pose is this close to its first one already returns
-# the robot to where it started, so repeat runs can be chained without a bridge
-# path. Loose enough for a hand-authored baseline that closes only to plotting
-# precision, tight enough that a genuinely open path is bridged.
+# A reference ending this close to its start is chained without a bridge path.
 SELF_CLOSING_POSITION_TOLERANCE = 0.05  # m
 SELF_CLOSING_HEADING_TOLERANCE = 0.15  # rad
 
@@ -902,42 +779,13 @@ def stage_run_benchmark(
     iteration: int,
     num_runs: int | None = None,
 ) -> list[Path]:
-    """Record this iteration's runs of the fixed baseline reference.
+    """Drive the benchmark references under every controller variant this
+    iteration ships.
 
-    Every iteration drives the *same* trajectory (``benchmark.trajectory``)
-    under its own controller, so the progress plot has one thing that does not
-    move: a difference between two iterations' benchmark runs is a difference
-    in the controller, never in what it was asked to track. The iteration's own
-    identification and tuning trajectories cannot answer that question, because
-    they are redesigned every iteration.
-
-    Both controller options an iteration ships are driven when it has two (see
-    ``_benchmark_variant_specs``): the deployed one, whose gain parametrization
-    the runs therefore include, into ``data/benchmark/``, and the static-gain
-    baseline into ``data/benchmark_static/``. They run on the *same* seeds, so
-    the hand placements and the sensor noise are paired and the difference
-    between the two sets is the controller and nothing else. Without prior
-    tuning, iteration 1 ships only the initial static controller and records
-    only that set.
-
-    The runs are consecutive and chained exactly like the identification
-    deployment, and like a repeat on the real robot: only the first is placed by
-    hand, and each later one starts wherever the previous run ended. A run that
-    ends further than ``benchmark.divergence_radius`` from the reference's start
-    point did not come back, so the next one is placed by hand again instead --
-    the same thing a person would do standing next to the robot.
-
-    Chaining needs the reference to end where it begins. A self-closing one
-    (both shipped baselines are) is driven as it is; anything else gets a wait
-    plus a planned bridge path back to the start appended
-    (``pololu.bridge_exporter``), which is how the identification trajectory is
-    repeated too.
-
-    The logs go into subdirectories of ``data/``: the identify and residual
-    stages only look one level deep, so benchmark runs never leak into the
-    identification data. They stay in the firmware's binary format the way
-    SD-card benchmark recordings do; the progress evaluation and the baseline
-    comparison plot decode them into a temporary directory when they need them.
+    Each reference is driven ``num_runs`` times in a chain (as in
+    ``stage_simulate_deployment``); open references are bridged back to their
+    start. Variants share their seeds, so placements and sensor noise are
+    paired. Logs go to ``data/benchmark[_static]/<shape>/``.
     """
     paths = experiment.paths(iteration)
     paths.create_directories()
@@ -945,10 +793,7 @@ def stage_run_benchmark(
     count = int(config["num_runs"] if num_runs is None else num_runs)
 
     sources = _benchmark_sources(config)
-    # Ground truth the logs do not carry, kept out of data/ so nothing
-    # downstream can read the hidden plant through it (mujoco_sim.deploy). One
-    # variant's recording is left alone when the other one is added later, and
-    # so is one shape's when another is added to the set.
+    # Ground truth, kept out of data/.
     report = load_yaml(paths.benchmark_result) if paths.benchmark_result.is_file() else {}
     report["divergence_radius"] = float(config["divergence_radius"])
     report.setdefault("trajectories", {})
@@ -956,9 +801,7 @@ def stage_run_benchmark(
     if len(sources) > 1:
         print(f"Benchmark set: {len(sources)} held-out reference(s) -- {', '.join(p.stem for p in sources)}")
 
-    # Two passes: decide every chain first (which also writes the bridged
-    # references and stages the configs -- both parent-only), then drive them.
-    # The chains share nothing, so the second pass can run several at once.
+    # Set up every chain first, then drive them (in parallel).
     written: list[Path] = []
     jobs: list[dict] = []
     job_targets: list[tuple[dict, str, Path, Path]] = []
@@ -966,8 +809,7 @@ def stage_run_benchmark(
         shape = source.stem
         trajectory = _benchmark_reference(paths, config, source)
         reference_start = _reference_start_pose(trajectory)
-        # Scored over the reference alone: a bridged copy adds a wait and a slow
-        # return path that would dilute the position RMSE of open references.
+        # Scored over the reference alone, without the bridge.
         score_duration = _reference_duration(source)
         entry = report["trajectories"].setdefault(shape, {})
         entry["trajectory"] = str(trajectory)
@@ -1017,31 +859,6 @@ def stage_run_benchmark(
     return written
 
 
-def _record_benchmark_runs(
-    experiment: Experiment,
-    iteration: int,
-    variant: str,
-    robot_config: Path,
-    trajectory: Path,
-    data_dir: Path,
-    count: int,
-    config: dict,
-    reference_start: tuple[float, float, float],
-    shape: str | None = None,
-    score_duration: float | None = None,
-) -> tuple[list[Path], list[dict]]:
-    """Drive ``count`` chained runs of ``trajectory`` under one controller."""
-    written, runs, lines = _drive_benchmark_chain(
-        _benchmark_chain_job(
-            experiment, iteration, variant, robot_config, trajectory, data_dir, count, config,
-            reference_start, shape, score_duration=score_duration,
-        )
-    )
-    for line in lines:
-        print(line)
-    return written, runs
-
-
 def _benchmark_chain_job(
     experiment: Experiment,
     iteration: int,
@@ -1055,20 +872,11 @@ def _benchmark_chain_job(
     shape: str | None = None,
     score_duration: float | None = None,
 ) -> dict:
-    """Everything one chain needs, as plain data.
+    """Everything one chain needs, as plain (picklable) data.
 
-    ``score_duration`` is the length of the unbridged reference: the runs are
-    scored over it only (``mujoco_sim.deploy.run_deployment``). ``None`` scores
-    whole runs.
-
-    The seeds are resolved here rather than inside the chain so the job carries
-    no ``Experiment``: chains are driven in worker *processes*, and the seeds
-    are what make a run reproducible, so they must be decided in one place
-    whether or not the pool is used.
+    ``score_duration`` limits scoring to the unbridged reference (None: whole runs).
     """
-    # Distinct per shape, so two references in a set never draw the same hand
-    # placement -- but still paired across variants, which is what makes the two
-    # controllers a like-for-like comparison.
+    # Seeds differ per shape but are shared across variants.
     shape_offset = _benchmark_shape_offset(shape)
     return {
         "variant": variant,
@@ -1087,16 +895,8 @@ def _benchmark_chain_job(
 
 
 def _drive_benchmark_chain(job: dict) -> tuple[list[Path], list[dict], list[str]]:
-    """Drive one (shape, variant) chain of runs under a single controller.
-
-    Returns its console output instead of printing it: several chains run at
-    once (``_run_benchmark_chains``) and interleaved progress lines would be
-    unreadable, so the parent replays them in job order.
-
-    Module level and taking only plain data, so it is picklable into a worker
-    process. Runs *within* a chain stay sequential by construction -- each one
-    starts where the last left the robot.
-    """
+    """Drive one (shape, variant) chain of runs; returns the console lines
+    instead of printing them, so parallel chains do not interleave."""
     from wmr_simulator.mujoco_sim.deploy import run_deployment
     from wmr_simulator.mujoco_sim.firmware import GAIN_MLP_FILENAME
 
@@ -1107,9 +907,6 @@ def _drive_benchmark_chain(job: dict) -> tuple[list[Path], list[dict], list[str]
     divergence_radius = job["divergence_radius"]
     reference_start = job["reference_start"]
 
-    # Named rather than implied: a static-variant run *with* a network beside it
-    # is a first iteration, where that network is still the identity, and the line
-    # would otherwise read as a contradiction.
     network = ""
     if (robot_config.parent / GAIN_MLP_FILENAME).is_file():
         identity = " (identity)" if variant == baseline_runs.STATIC_VARIANT else ""
@@ -1136,9 +933,6 @@ def _drive_benchmark_chain(job: dict) -> tuple[list[Path], list[dict], list[str]
         placement = "placed by hand" if start_pose is None else "left by the previous run"
         distance_to_start = math.dist(result.final_pose[:2], reference_start[:2])
         diverged = distance_to_start > divergence_radius
-        # A run that came back close enough to the start is where the next one
-        # begins; one that did not is a robot standing somewhere else, so it is
-        # picked up and placed again.
         start_pose = None if diverged else result.final_pose
         offset = result.start_offset
         lines.append(
@@ -1155,9 +949,7 @@ def _drive_benchmark_chain(job: dict) -> tuple[list[Path], list[dict], list[str]
                 "start_offset": [float(value) for value in offset],
                 "tracking_rmse": float(result.tracking_rmse),
                 "tracking_max": float(result.tracking_max),
-                # tracking_rmse/tracking_max/duty_saturated_fraction cover the
-                # first scored_duration seconds (the unbridged reference);
-                # tracking_rmse_full is the whole run, bridge included.
+                # Scores cover scored_duration; tracking_rmse_full the whole run.
                 "scored_duration": float(result.scored_duration),
                 "tracking_rmse_full": float(result.tracking_rmse_full),
                 "distance_to_start": float(distance_to_start),
@@ -1177,32 +969,15 @@ def _benchmark_worker_count(num_jobs: int, configured) -> int:
     if configured == 1:
         return 1
     available = os.cpu_count() or 1
-    # Leave a core for the parent; a chain is one process pinned to one core
-    # (the MuJoCo step and the firmware port are both single-threaded here).
+    # Leave a core for the parent.
     auto = max(1, min(num_jobs, available - 1))
     return auto if configured <= 0 else min(configured, num_jobs)
 
 
 def _run_benchmark_chains(jobs: list[dict], max_workers) -> list[tuple[list[Path], list[dict], list[str]]]:
-    """Drive independent chains, in parallel when there is more than one.
-
-    A benchmark set is ``shapes x variants`` chains that share nothing: each
-    writes into its own ``data/`` directory and draws from its own seeds, so the
-    results are identical however they are interleaved. Only the runs *inside* a
-    chain are ordered, because each starts where the last one finished.
-
-    Processes rather than threads: the deployment is a Python control loop
-    around single MuJoCo steps, so it holds the GIL almost the whole time.
-
-    Spawned rather than forked. By the time this stage runs the parent has JAX
-    up, and JAX warns outright that forking it "will likely lead to a deadlock"
-    -- the child inherits its thread pools' locks without their threads. The
-    cost is that a spawned child re-imports ``__main__``, which only exists when
-    the entry point is a file (it is: ``scripts/run_active_learning.py``, under
-    a ``__main__`` guard). Driven from a REPL or a heredoc there is nothing to
-    re-import, so those fall back to driving the chains in this process -- the
-    results are identical either way, only slower.
-    """
+    """Drive independent chains, in spawned worker processes when there is
+    more than one (JAX does not survive a fork). Without a ``__main__`` file to
+    re-import (REPL), the chains run in this process; results are identical."""
     workers = _benchmark_worker_count(len(jobs), max_workers)
     main_module = sys.modules.get("__main__")
     spawnable = getattr(main_module, "__file__", None) is not None
@@ -1216,8 +991,6 @@ def _run_benchmark_chains(jobs: list[dict], max_workers) -> list[tuple[list[Path
     print(f"Driving {len(jobs)} benchmark chain(s) on {workers} worker process(es).")
     context = multiprocessing.get_context("spawn")
     with ProcessPoolExecutor(max_workers=workers, mp_context=context) as pool:
-        # Submission order is preserved, so the parent's report and console
-        # output come out exactly as they would from the serial path.
         return list(pool.map(_drive_benchmark_chain, jobs))
 
 
@@ -1226,37 +999,11 @@ def _benchmark_variant_specs(
 ) -> list[tuple[str, Path, Path]]:
     """``(variant, robot config, data dir)`` per controller this iteration ships.
 
-    Always a static-gain set, in ``data/benchmark_static/``. **Without prior
-    tuning, iteration 1's deployed controller *is* that set**: ``problem.yaml``'s
-    gains are the initial static ones and the exported parametrization is
-    exactly the identity (its output layer is zero, so every factor is
-    ``clip(1 + 0, ...)`` = 1.0), so its runs are driven from ``ROBOTCFG.CFG``
-    where it lives, network beside it and all. Nothing tuned exists yet to
-    compare them against -- the first tuned parametrization ships in iteration
-    2 -- so iteration 1 records one set and it belongs on the static side of the
-    comparison. With prior tuning, iteration 0 already tuned both, and
-    iteration 1 is like any later one.
-
-    From iteration 2 the iteration also carries ``ROBOTCFG_static.CFG``, which
-    ``finalize`` writes whenever the previous tuning ran an independent static
-    tune beside a parametrized one. Its presence *is* the question "was the gain
-    parametrization worth it": the deployed (parametrized) controller then gets
-    its own set in ``data/benchmark/`` and the static side switches to those
-    static-tuned gains. An experiment with the parametrization off never gets a
-    second entry, correctly -- its deployed controller is static in every
-    iteration.
-
-    The static side is always the gains some run converged to, never the
-    parametrized run's base gains with the network taken away: those base gains
-    are not a controller anybody tuned (the factors they are tuned against range
-    over ``[0, bound]``, so the base gains absorb whatever scale the
-    network leaves them), and driving them bare would benchmark an artifact
-    instead of the alternative actually on offer.
+    Always the static controller (``ROBOTCFG_static.CFG``, or ``ROBOTCFG.CFG``
+    when the iteration ships only one), plus the parametrized controller when
+    there is a separate static one, plus any post-hoc parametrized variants.
     """
-    # A set of references gets one subdirectory per shape under each variant's
-    # directory, because two shapes are not comparable and the figures group by
-    # shape. A single reference keeps writing straight into the variant
-    # directory, so every recording made before the set existed still reads.
+    # One subdirectory per shape when the benchmark is a set.
     def data_dir(base: Path) -> Path:
         return base if shape is None or num_shapes <= 1 else base / shape
 
@@ -1269,9 +1016,7 @@ def _benchmark_variant_specs(
             (baseline_runs.STATIC_VARIANT, paths.robotcfg_static_cfg, data_dir(paths.benchmark_static_data_dir)),
             (baseline_runs.PARAMETRIZED_VARIANT, paths.robotcfg_cfg, data_dir(paths.benchmark_data_dir)),
         ]
-    # Parametrized controllers tuned post hoc on a static run
-    # (active_learning.posthoc), one per variant, each driven in place with
-    # its own network beside it.
+    # Post-hoc parametrized controllers (active_learning.posthoc).
     from wmr_simulator.active_learning.posthoc import VARIANT_PREFIX
 
     for config in sorted((paths.root / "parametrized").glob("*/ROBOTCFG.CFG")):
@@ -1281,15 +1026,10 @@ def _benchmark_variant_specs(
 
 
 def _staged_benchmark_config(paths: IterationPaths, variant: str, source: Path) -> Path:
-    """The robot config as the benchmark driver reads it off its own "SD card".
+    """The robot config as the benchmark driver reads it.
 
-    The firmware picks up a ``GAINMLP.JSN`` sitting *next to* the config
-    (``mujoco_sim.firmware.FirmwareConfig.from_file``, mirroring ``sdlog.rs``),
-    so the static variant cannot be driven from the iteration root -- the
-    deployed network is right there and would be applied to it. It is copied
-    into its own directory under ``benchmark/`` instead, which is exactly the
-    swap the real SD card needs (ROBOTCFG_static.CFG as ROBOTCFG.CFG, with no
-    GAINMLP.JSN beside it). The deployed config is driven where it lives.
+    The firmware picks up a ``GAINMLP.JSN`` next to the config, so the static
+    variant is copied into its own directory under ``benchmark/``.
     """
     if source == paths.robotcfg_cfg or source.parent.parent == paths.root / "parametrized":
         return source
@@ -1310,15 +1050,8 @@ def _benchmark_set_description(config: dict) -> str:
 
 
 def _benchmark_sources(config: dict) -> list[Path]:
-    """The reference(s) ``benchmark.trajectory`` names, in a stable order.
-
-    A *directory* is a held-out cross-validation set: every ``.JSN``/``.pkl`` in
-    it is driven, each under both controller variants, so one iteration's
-    benchmark says how the controller transfers across several unseen shapes
-    rather than one. A single file keeps the previous behaviour exactly. Editing
-    the set is then adding or removing a file, which is the point -- nothing in
-    here enumerates shapes.
-    """
+    """The reference(s) ``benchmark.trajectory`` names: a file, or every
+    ``.JSN``/``.pkl`` in a directory except ``*_bridge`` copies."""
     source = Path(config["trajectory"])
     if source.is_file():
         return [source]
@@ -1327,17 +1060,13 @@ def _benchmark_sources(config: dict) -> list[Path]:
             path
             for path in source.iterdir()
             if path.is_file() and path.suffix.lower() in (".jsn", ".pkl")
-            # A bridged copy is generated from its own reference below; driving
-            # it as a set member too would benchmark the same shape twice.
             and not path.stem.endswith("_bridge")
         )
         if not references:
             raise FileNotFoundError(
                 f"No .JSN or .pkl references in benchmark trajectory directory {source}."
             )
-        # The stem names the shape -- the data subdirectory, the results key and
-        # the figure -- so two files sharing one would silently collapse into a
-        # single shape, and the second would be skipped as "already recorded".
+        # The stem names the shape, so it has to be unique.
         duplicates = sorted(
             {path.stem for path in references if [p.stem for p in references].count(path.stem) > 1}
         )
@@ -1354,13 +1083,8 @@ def _benchmark_sources(config: dict) -> list[Path]:
 
 
 def _benchmark_reference(paths: IterationPaths, config: dict, source: Path | None = None) -> Path:
-    """The baseline JSN as this iteration drives it, copied into ``benchmark/``.
-
-    Bridged when the reference does not close on itself, since chaining a
-    repeat run onto the previous one's end pose only works if that end pose is
-    the start pose. The copy is per iteration so the directory records what was
-    actually driven, even if ``benchmark.trajectory`` is edited later.
-    """
+    """The benchmark reference as this iteration drives it, copied into
+    ``benchmark/`` and bridged when it does not close on itself."""
     source = Path(config["trajectory"]) if source is None else Path(source)
     if not source.is_file():
         raise FileNotFoundError(
@@ -1384,8 +1108,7 @@ def _benchmark_reference(paths: IterationPaths, config: dict, source: Path | Non
 
 
 def _reference_start_pose(trajectory: Path) -> tuple[float, float, float]:
-    """``(x, y, yaw)`` a chained reference starts (and, being chainable, ends)
-    at -- what a run's final pose is measured against."""
+    """``(x, y, yaw)`` of the reference's first state."""
     from wmr_simulator.pololu.reference_importer import load_pololu_reference
 
     start = load_pololu_reference(trajectory).states[0]
@@ -1393,8 +1116,7 @@ def _reference_start_pose(trajectory: Path) -> tuple[float, float, float]:
 
 
 def _reference_duration(trajectory: Path) -> float:
-    """How long the firmware follows ``trajectory`` [s]: ``SetpointFinder::duration``,
-    states times dt, the same rule as ``mujoco_sim.firmware``."""
+    """How long the firmware follows ``trajectory`` [s] (states times dt)."""
     from wmr_simulator.pololu.reference_importer import load_reference
 
     reference = load_reference(trajectory)
@@ -1422,15 +1144,7 @@ def _run_log_paths(directory: Path) -> list[Path]:
 
 
 def _create_benchmark_directories(paths: IterationPaths, config: dict) -> list[Path]:
-    """The ``data/`` subdirectories the benchmark stage would record into, empty.
-
-    On the robot the benchmark runs are recorded by hand; creating their
-    directories up front (one per controller variant and shape, named as in
-    MuJoCo, so ``data/benchmark_static/<shape>/`` for a static experiment)
-    shows where each shape's SD-card logs go. Empty directories count as not
-    recorded (``_benchmark_recorded``), and the run-log plots skip them. Empty
-    when the benchmark set is not found (the benchmark stage reports that).
-    """
+    """Create the empty ``data/`` subdirectories the robot's benchmark logs go into."""
     try:
         sources = _benchmark_sources(config)
     except FileNotFoundError:
@@ -1446,12 +1160,7 @@ def _create_benchmark_directories(paths: IterationPaths, config: dict) -> list[P
 
 
 def _benchmark_recorded(paths: IterationPaths, config: dict) -> bool:
-    """Whether every controller variant of this iteration has its runs.
-
-    Both sets are needed for the comparison, so an iteration that recorded only
-    the deployed controller is not done -- rerunning the stage adds the missing
-    variant without touching the one it has.
-    """
+    """Whether every controller variant and shape of this iteration has its runs."""
     try:
         sources = _benchmark_sources(config)
     except FileNotFoundError:
@@ -1464,12 +1173,7 @@ def _benchmark_recorded(paths: IterationPaths, config: dict) -> bool:
 
 
 def _benchmark_shape_offset(shape: str | None) -> int:
-    """A stable per-shape seed offset, so two references in the set never draw
-    the same hand placement while each stays reproducible across reruns.
-
-    Zero for a single-reference benchmark, which keeps every seed such an
-    experiment has ever used exactly where it was.
-    """
+    """A stable per-shape seed offset (zero for a single reference)."""
     if not shape:
         return 0
     digest = hashlib.sha256(shape.encode("utf-8")).digest()
@@ -1477,21 +1181,13 @@ def _benchmark_shape_offset(shape: str | None) -> int:
 
 
 def _benchmark_seed(experiment: Experiment, iteration: int, index: int) -> int:
-    """Distinct per (iteration, run) and disjoint from the identification
-    deployment's seeds, so the two never draw the same placement or noise.
-
-    Deliberately *not* distinct per controller variant: the two variants are a
-    paired comparison, so run ``i`` of each gets the same hand placement and the
-    same sensor noise (common random numbers), leaving the controller as the only
-    difference between them.
-    """
+    """Distinct per (iteration, run), disjoint from the deployment seeds and
+    shared by the controller variants (paired comparison)."""
     return _deployment_seed(experiment, iteration, index) + 500
 
 
 def stage_decode_logs(experiment: Experiment, iteration: int) -> list[Path]:
-    """Decode binary SD-card logs in data/ into csv files (skips existing) and
-    render the log-loader summary plot of every decoded log into
-    visualize/logs/ (skips logs that already have one)."""
+    """Decode the binary logs in data/ into csv files and plot a summary of each."""
     from wmr_simulator.pololu.decode_binary import decode_file
 
     paths = experiment.paths(iteration)
@@ -1537,7 +1233,7 @@ def _plot_log_summaries(experiment: Experiment, paths: IterationPaths) -> None:
         except ValueError as error:
             print(f"Log summary plot skipped for {log_path.name}: {error}")
             continue
-        # Recover the applied (scheduled) gains offline; the firmware does not log them.
+        # The firmware does not log the scheduled gains; recover them offline.
         gains = None
         if gain_params is not None:
             from wmr_simulator.pololu.gain_reconstruction import applied_gains_over_log
@@ -1553,8 +1249,6 @@ def _plot_log_summaries(experiment: Experiment, paths: IterationPaths) -> None:
         )
         print(f"Log summary plot: {plot_path}")
     if logs:
-        # Redrawn every time, unlike the per-log plots: it is the whole set, so a
-        # newly decoded log changes it.
         plot_path = plot_logged_trajectories(
             logs,
             log_labels,
@@ -1593,21 +1287,9 @@ def _list_log_csvs(paths: IterationPaths) -> list[Path]:
 
 
 def plot_run_directory_logs(experiment: Experiment) -> list[Path]:
-    """Summary-plot every ``data/`` subdirectory recording of every iteration.
-
-    Recordings directly in ``data/`` are the identification logs and are plotted
-    by the decode-logs stage; the *subdirectories* hold the runs of a fixed
-    reference -- the benchmark stage's two variants, or a hand-recorded shape --
-    and nothing plotted those. They also arrive late: a real robot's benchmark
-    logs are copied off the SD card long after the iteration that recorded them
-    was finalized, and a MuJoCo benchmark is recorded for an iteration the loop
-    then leaves behind. So the whole experiment is rescanned whenever the loop
-    proceeds, and each recording gets one plot in the iteration's own
-    ``visualize/logs/<the same subdirectory>/`` -- beside the identification
-    logs' plots, which decode-logs writes straight into ``visualize/logs/``.
-    Plots that already exist are kept, so a rescan of a finished experiment
-    costs nothing.
-    """
+    """Summary-plot every recording in a ``data/`` subdirectory (benchmark
+    runs) of every iteration into ``visualize/logs/<subdirectory>/``; existing
+    plots are kept."""
     written: list[Path] = []
     for iteration in experiment.iteration_indices():
         written.extend(_plot_run_directory_logs(experiment, experiment.paths(iteration)))
@@ -1626,10 +1308,7 @@ def _plot_run_directory_logs(experiment: Experiment, paths: IterationPaths) -> l
         relative = directory.relative_to(paths.data_dir)
         out_dir = paths.visualize_dir / "logs" / relative
         base_gains, gain_params = _run_directory_gains(paths, relative)
-        # The histogram is of the whole recording set, so a missing one is a
-        # reason to load every run of the directory again -- otherwise only the
-        # runs still missing a summary plot are decoded, and a rescan of a
-        # finished experiment stays free.
+        # A missing histogram needs every run of the directory loaded.
         histogram_path = out_dir / "motion_histograms.pdf"
         logs = []
         with tempfile.TemporaryDirectory(prefix="run_log_plots_") as temp_name:
@@ -1647,8 +1326,6 @@ def _plot_run_directory_logs(experiment: Experiment, paths: IterationPaths) -> l
                     continue
                 gains = None
                 if gain_params is not None:
-                    # Recover the applied (scheduled) gains offline; the firmware
-                    # does not log them.
                     from wmr_simulator.pololu.gain_reconstruction import applied_gains_over_log
 
                     gains = applied_gains_over_log(log, base_gains, gain_params)
@@ -1672,15 +1349,7 @@ def _plot_run_directory_logs(experiment: Experiment, paths: IterationPaths) -> l
 def _plot_run_motion_histograms(
     paths: IterationPaths, relative: Path, logs: list, out_dir: Path
 ) -> Path | None:
-    """Motion histogram of one recording set (the benchmark, or a hand-recorded
-    baseline), pooled over its runs.
-
-    This is the held-out side of the comparison the tune-gains stage's
-    ``gain tuning/tuning_trajectory_histograms.pdf`` is the training side of:
-    the gains were tuned on that envelope and are judged on this one. Both the
-    reference the runs were driving and what they actually drove are shown,
-    since the two differ by exactly the tracking error under investigation.
-    """
+    """Motion histogram (reference and measured) of one recording set, pooled over its runs."""
     from wmr_simulator.visualization.motion_histograms import (
         measured_motion_channels_from_log,
         plot_motion_histograms,
@@ -1688,8 +1357,7 @@ def _plot_run_motion_histograms(
         reference_motion_channels_from_log,
     )
 
-    # Only for the limit lines, and an iteration problem always carries a robot
-    # block -- but this is a best-effort figure, so a missing one just drops them.
+    # Only used for the limit lines.
     robot_cfg = load_yaml(paths.problem).get("robot") if paths.problem.is_file() else None
     return plot_motion_histograms(
         [
@@ -1715,18 +1383,12 @@ def _run_directories(data_dir: Path) -> list[Path]:
 def _run_log_csvs(
     directory: Path, temporary_dir: Path, out_dir: Path, needed_only: bool = True
 ) -> list[Path]:
-    """csv paths of the recordings in ``directory``, by default only those that
-    still need a summary plot (``needed_only=False`` returns them all).
-
-    Benchmark recordings are normally kept in the firmware's binary SD-card
-    format, so anything that is not already a csv is decoded into
-    ``temporary_dir``: plotting an iteration must not write into its data/.
-    """
+    """csv paths of the recordings in ``directory`` (by default only those
+    still missing a summary plot); binary logs are decoded into ``temporary_dir``."""
     from wmr_simulator.pololu.decode_binary import decode_file
 
     log_paths = sorted(path for path in directory.glob("TR*") if path.is_file())
-    # A decoded csv sits next to its binary as TRxx.csv, so both spellings of
-    # the same run are in the glob; the csv is the one to read.
+    # Prefer a decoded csv over its binary.
     decoded = {path.stem for path in log_paths if path.suffix.lower() == ".csv"}
     log_paths = [path for path in log_paths if path.suffix.lower() == ".csv" or path.name not in decoded]
 
@@ -1749,29 +1411,13 @@ def _run_log_csvs(
 
 def _run_directory_gains(paths: IterationPaths, relative: Path):
     """Base gains + gain parametrization the runs in ``data/<relative>/`` were
-    driven under (``None`` params for a static-gain recording).
-
-    The parametrized variant is the benchmark stage's ``benchmark/`` and the
-    hand-recorded ``with gain MLP/`` tree -- baseline_runs' own rule for which
-    controller a run directory holds. Every other subdirectory was recorded
-    without a network on the card, so it is plotted against the iteration's
-    static gains rather than the problem yaml's, which are the parametrized
-    run's base gains and not a controller anybody drove.
-
-    An iteration with no problem.yaml -- an archived recording kept for its
-    logs alone -- is plotted without the gain overlay rather than refused.
-    """
+    driven under (``None`` params for a static-gain recording)."""
     if not paths.problem.is_file():
         return None, None
 
-    from wmr_simulator.active_learning.baseline_runs import (
-        BENCHMARK_DIRECTORY_NAMES,
-        GAIN_MLP_DIRECTORY_NAMES,
-        PARAMETRIZED_VARIANT,
-    )
+    from wmr_simulator.active_learning.baseline_runs import BENCHMARK_DIRECTORY_NAMES, PARAMETRIZED_VARIANT
 
-    top = relative.parts[0]
-    if top == BENCHMARK_DIRECTORY_NAMES[PARAMETRIZED_VARIANT] or top in GAIN_MLP_DIRECTORY_NAMES:
+    if relative.parts[0] == BENCHMARK_DIRECTORY_NAMES[PARAMETRIZED_VARIANT]:
         return _log_gain_parametrization(paths)
     static_gains = _static_design_gains(paths)
     if static_gains is None:
@@ -1789,17 +1435,11 @@ def stage_identify(
     iteration: int,
     log: str | None = None,
 ) -> dict:
-    """Identify the robot parameters from every identification log of this iteration.
+    """Identify the robot parameters from the decoded logs directly in data/.
 
-    All decoded logs sitting *directly* in data/ are identification data (record
-    several, diverse trajectories per iteration); subdirectories are reserved for
-    baseline comparison runs and stay out of the fit. Identification is cheap, so
-    the stage first runs it per log, flags logs whose parameters disagree with the
-    median of the batch (identification.outlier_z_threshold, 0 disables), and only
-    then fits one parameter set jointly to the remaining logs.
-
-    Writes results/identification.yaml and problem_identified.yaml (the base
-    problem with the updated robot block) used by all downstream stages.
+    Fits each log on its own, excludes logs whose parameters disagree with the
+    batch (``identification.outlier_z_threshold``), then fits the rest jointly.
+    Writes results/identification.yaml and problem_identified.yaml.
     """
     import jax.numpy as jnp
     import numpy as np
@@ -1850,10 +1490,7 @@ def stage_identify(
         for log_path in log_paths
     ]
     pololu_logs = [log for log, _ in loaded]
-    # The encoder lag the loader measured and took out of each log, after
-    # undoing the firmware low-pass (pololu.measurement_smoothing): a few ms in
-    # MuJoCo, about -7 ms (yaw) on the robot; anything far outside that means
-    # the log's encoder and mocap clocks disagree.
+    # Encoder-to-mocap lag the loader measured and removed per log.
     encoder_lags = [
         None if lag is None else {
             "lag_ms": round(float(1000.0 * lag.lag_s), 2),
@@ -1884,7 +1521,6 @@ def stage_identify(
     _print_per_log_parameters(log_paths, parameter_samples, per_log_results, report)
 
     if len(kept_indices) == len(log_paths) and len(log_paths) == 1:
-        # A joint fit on a single log is exactly the per-log fit; don't redo it.
         joint_result = per_log_results[0]
     else:
         print(f"Joint identification on {len(kept_indices)} log(s) ...")
@@ -1924,8 +1560,7 @@ def stage_identify(
     print(f"Wrote {paths.identification_result} and {paths.problem_identified}")
 
     with collect_plots(paths.visualize_dir / "identification"):
-        # Kept logs are shown under the joint parameters (what downstream stages
-        # use); excluded ones under their own fit, which is what got them flagged.
+        # Kept logs under the joint fit, excluded ones under their own.
         for position, index in enumerate(kept_indices):
             pipeline = joint_result["pipelines"][position]
             plot_system_id(
@@ -1965,12 +1600,7 @@ def stage_identify(
 
 
 def _plot_identified_parameters(experiment: Experiment, paths: IterationPaths) -> str | None:
-    """Cross-iteration history of the identified parameters, regenerated from
-    every iteration up to this one and written straight into *this* iteration's
-    visualize dir -- not through collect_plots, since it never touches the
-    shared repo-root visualize/. Best-effort for the same reason the progress
-    plot is: a plotting failure must not abort the stage that just produced this
-    iteration's parameters."""
+    """Plot the identified parameters of every iteration so far (best effort)."""
     try:
         from wmr_simulator.active_learning.identified_parameters import collect_identified_parameters
         from wmr_simulator.visualization.identified_parameters import plot_identified_parameters
@@ -2018,12 +1648,7 @@ def _print_per_log_parameters(log_paths, parameter_samples, per_log_results, rep
 
 
 def _resolve_log_paths(paths: IterationPaths, log: str | None) -> list[Path]:
-    """Identification logs of an iteration: every decoded log directly in data/,
-    or just the one named by ``--log``.
-
-    Baseline comparison runs live in subdirectories of data/ and are not
-    identification data, so discovery stays one level deep (list_pololu_log_paths
-    does not recurse)."""
+    """Every decoded log directly in data/, or just the one named by ``--log``."""
     if log is not None:
         log_path = Path(log)
         if not log_path.is_file():
@@ -2045,20 +1670,9 @@ def _resolve_log_paths(paths: IterationPaths, log: str | None) -> list[Path]:
 
 
 def residual_training_iterations(experiment: Experiment, iteration: int) -> list[int]:
-    """Iteration indices whose decoded logs feed the residual model at ``iteration``.
-
-    With ``residual.pool_previous_iterations`` the model trains on every decoded
-    log of this iteration *and all earlier ones*, so each iteration sees strictly
-    more data than the last (multiple trajectories per iteration accumulate).
-    Later iterations are never included, so rerunning an old one reproduces what
-    it originally saw.
-
-    Pooling is sound because one-step residual training is gain-independent: the
-    descriptor is built from each log's own recorded duty, so it does not matter
-    that earlier iterations ran different tuned gains. Every log's targets are
-    computed against this iteration's identified model, the one the residual is
-    added to downstream (residual.train_from_logs).
-    """
+    """Iteration indices whose decoded logs feed the residual model at
+    ``iteration``: this one and, with ``residual.pool_previous_iterations``,
+    every earlier one."""
     if not experiment.config["residual"].get("pool_previous_iterations", True):
         candidates = [iteration]
     else:
@@ -2069,9 +1683,8 @@ def residual_training_iterations(experiment: Experiment, iteration: int) -> list
 def _screen_diverged_logs(
     log_paths: list[Path], max_position_error: float, clip_after_first_trajectory: bool
 ) -> tuple[list[Path], list[tuple[Path, float]]]:
-    """``(usable, [(diverged, max error)])``: a log whose mocap pose leaves its
-    reference by more than ``max_position_error`` [m] is a diverged run. 0
-    keeps every log."""
+    """``(usable, [(diverged, max error)])``: logs whose mocap pose leaves the
+    reference by more than ``max_position_error`` [m] diverged (0: keep all)."""
     if max_position_error <= 0.0:
         return list(log_paths), []
     from wmr_simulator.pololu.log_loader import load_pololu_traj_control_log
@@ -2095,11 +1708,8 @@ def _screen_diverged_logs(
 
 
 def stage_train_residual(experiment: Experiment, iteration: int) -> Path:
-    """Train the residual dynamics model on the pooled decoded logs (see
-    residual_training_log_dirs)."""
+    """Train the residual dynamics model on the pooled decoded logs."""
     if not experiment.config["use_residual_model"]:
-        # A checkpoint in results/ would be all it takes for a later stage run
-        # by hand to disagree with what the experiment claims to be.
         raise ValueError(
             f"use_residual_model is disabled for {experiment.root}; this experiment "
             "never trains a residual (set it in experiment.yaml to change that)."
@@ -2126,7 +1736,7 @@ def stage_train_residual(experiment: Experiment, iteration: int) -> Path:
         f"({', '.join(f'{ITERATION_PREFIX}{index:02d}' for index in pooled_iterations)}); "
         f"{len(diverged_logs)} diverged run(s) left out"
     )
-    # Training holds whole logs out for validation, so it needs two.
+    # Validation holds out whole logs, so training needs two.
     if len(usable_logs) < 2:
         paths.residual_model.unlink(missing_ok=True)
         save_yaml(
@@ -2162,7 +1772,6 @@ def stage_train_residual(experiment: Experiment, iteration: int) -> Path:
         output_reg_weight=float(config["output_reg_weight"]),
         clip_after_first_trajectory=log_config["clip_after_first_trajectory"],
         resample_uniform=bool(config["resample_uniform"]),
-        # log_dirs are the data/ directories themselves; no subdirectories to walk.
         recursive=False,
         out_dir=str(paths.visualize_dir / "residual model"),
         training=str(config["training"]),
@@ -2210,26 +1819,17 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
         from wmr_simulator.gain_tuning.defaults import GAIN_TUNING_DEFAULTS
 
         config = GAIN_TUNING_DEFAULTS
-        print("Gain tuning: using standalone run_gain_tuning.py defaults (GAIN_TUNING_DEFAULTS).")
+        print("Gain tuning: using GAIN_TUNING_DEFAULTS.")
     else:
         config = experiment.config["gain_tuning"]
-    # The cross-iteration refinement policy (presearch band + MLP warm-start) is
-    # active-learning intent and always comes from the experiment's own
-    # gain_tuning block, independent of the standalone hyperparameter swap above.
+    # The cross-iteration settings always come from the experiment's gain_tuning block.
     refine = experiment.config["gain_tuning"]
-    # The tuning trajectories were designed on this grid, so the tuner has to
-    # roll out on it too -- see _tuning_problem.
     problem_path = _tuning_problem(paths, experiment.config["tuning_trajectories"])
     if not any(paths.tuning_trajectories_dir.glob("*.pkl")):
         raise FileNotFoundError(
             f"No tuning trajectories in {paths.tuning_trajectories_dir}; run plan-tuning-trajectories first."
         )
 
-    # Two flags, because training a residual and tuning against one are separate
-    # decisions: the model is worth fitting and inspecting every iteration even
-    # when it is not trusted to drive the gains (a residual fitted to logs whose
-    # duty saturated carries a large unexplained yaw term, and the tuner would
-    # roll that out as if it were the robot).
     robot_params = resolve_gain_robot_params(str(problem_path), None, None)
     print_physical_params("Robot parameters for gain tuning:", robot_params)
     residual_model = None
@@ -2248,10 +1848,7 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
 
         residual_model, checkpoint = load_residual_model(paths.residual_model, robot_params)
         print(f"Loaded residual model {paths.residual_model} (config: {checkpoint['config']})")
-    # The static run is an independent controller option, so it refines the
-    # previous iteration's *static* gains (robot_config_static_gains.yaml,
-    # written by finalize) rather than the parametrized run's base gains, which
-    # are what the iteration problem carries.
+    # The static run continues from the previous static gains.
     static_init_gains = None
     if paths.robot_config_static.is_file():
         static_init_gains = [
@@ -2281,8 +1878,7 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
         num_adam_optimizations=int(config["num_adam_optimizations"]),
         optimizer=str(config["optimizer"]),
         outlier_loss_factor=float(config["outlier_loss_factor"]),
-        # The experiment's master switch wins; on, the stage config (None =
-        # follow the problem yaml) decides.
+        # None follows the problem yaml.
         schedule_enabled=(
             config.get("gain_parametrization")
             if experiment.config["use_gain_parametrization"]
@@ -2293,14 +1889,9 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
         static_tune_steps=int(config["static_tune_steps"]),
         static_tune_learning_rate=float(config["static_tune_learning_rate"]),
         static_init_gains=static_init_gains,
-        # The first tuning (iteration 0 with prior tuning, else 1) has no trained
-        # parametrization to warm-start from, so both presearches are the same
-        # evaluation; hand the parametrized run the static run's converged gains
-        # as extra candidates instead of letting it start from raw LHS winners.
-        # Later iterations keep the two lineages apart.
+        # The first tuning seeds the parametrized run from the static result
+        # and searches the full presearch range.
         seed_parametrization_from_static=iteration <= experiment.first_iteration,
-        # The first tuning has no prior result to refine from: search the full
-        # presearch range instead of a band around the base gains.
         presearch_relative_range=(
             0.0 if iteration <= experiment.first_iteration else float(refine["presearch_relative_range"])
         ),
@@ -2317,9 +1908,7 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
 
     payload = {
         "gains": [float(gain) for gain in result["optimized_gains"]],
-        # Gains of the independent static run (no parametrization); finalize
-        # exports them as the iteration's ROBOTCFG_static.CFG baseline. None
-        # when there was no static run (parametrization or static_tune off).
+        # Gains of the static run (None: no separate static run).
         "static_gains": (
             None
             if result["static_gains"] is None
@@ -2332,8 +1921,6 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
         "final_validation_loss": (
             None if result["final_validation_loss"] is None else float(result["final_validation_loss"])
         ),
-        # Same losses for the independent static run, so the two controller
-        # options can be compared without rerunning the stage.
         "static_final_loss": (
             None if result["static_final_loss"] is None else float(result["static_final_loss"])
         ),
@@ -2342,9 +1929,7 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
             if result["static_final_validation_loss"] is None
             else float(result["static_final_validation_loss"])
         ),
-        # Stall / box-bound / divergence checks per run, and the warnings they
-        # raised (gain_tuning.checks). Warnings, not errors: a thesis run must
-        # finish, and a failed check is a result to report.
+        # Stall / box-bound / divergence checks per run (gain_tuning.checks).
         "checks": result["checks"],
         "warnings": check_warnings(result["checks"]),
     }
@@ -2357,8 +1942,7 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
     print(f"Wrote {paths.gains_result}")
 
     with collect_plots(paths.visualize_dir / "gain tuning"):
-        # Trajectory 0 of the training set, under the keys the objective scored
-        # it with -- split over the whole set, then sliced.
+        # Training trajectory 0, under the noise keys the objective used.
         summary_references = pipeline.training_reference_trajectories[:1]
         summary_offsets = result["summary_start_offsets"][None, ...]
         summary_robot_keys, summary_estimator_keys = realization_keys_for_set(
@@ -2433,8 +2017,6 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
             init_schedule_params=result["init_schedule_params"],
             out_prefix="summary_validation",
         )
-        # The envelope the gains were tuned on, to read the benchmark's own
-        # histogram (visualize/logs/<recording>/motion_histograms.pdf) against.
         plot_tuning_trajectory_histograms(pipeline)
         plot_controller_tuning_errors(
             pipeline=pipeline,
@@ -2449,8 +2031,6 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
             validation_loss_component_history=result["validation_loss_component_history"],
             out_prefix="ctrl_tuning",
         )
-        # The static run is independent, so it gets its own curve instead of
-        # being prepended to the parametrized one.
         if result["static_loss_history"] is not None:
             plot_loss_history(
                 loss_history=result["static_loss_history"],
@@ -2460,12 +2040,7 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
                 out_prefix="ctrl_tuning_static",
             )
 
-    # Cross-iteration progress plot, regenerated from every iteration up to
-    # this one (see active_learning.progress.evaluate_pipeline_progress) and
-    # written straight into *this* iteration's visualize dir -- not through
-    # collect_plots, since it never touches the shared repo-root visualize/.
-    # A missing benchmark recording or a plotting failure must never abort the
-    # stage that just produced this iteration's gains, so this is best-effort.
+    # Cross-iteration progress plot (best effort).
     try:
         from wmr_simulator.active_learning.progress import evaluate_pipeline_progress
         from wmr_simulator.visualization.pipeline_progress import plot_pipeline_progress
@@ -2483,14 +2058,7 @@ def stage_tune_gains(experiment: Experiment, iteration: int) -> dict:
 
 
 def plot_baseline_runs_per_iteration(experiment: Experiment) -> list[str]:
-    """Rewrite every iteration's baseline-run figures from the recordings on disk.
-
-    Benchmark and hand-recorded baseline runs arrive late, often after the
-    iteration's tune-gains stage wrote its figures, and an experiment that never
-    tunes (a retest of deployed configs) never writes them at all. The
-    recordings are loaded once, and each iteration gets the figures over itself
-    and every earlier iteration.
-    """
+    """Rewrite every iteration's benchmark figures from the recordings on disk."""
     from wmr_simulator.active_learning.baseline_runs import collect_baseline_runs
 
     try:
@@ -2505,15 +2073,9 @@ def plot_baseline_runs_per_iteration(experiment: Experiment) -> list[str]:
 
 
 def _plot_baseline_runs(experiment: Experiment, iteration: int, collected: dict | None = None) -> list[str]:
-    """Overlay every iteration's runs of each held-out baseline reference.
-
-    One figure per baseline shape, drawn from all iterations up to this one and
-    written into *this* iteration's visualize dir, so each iteration keeps the
-    comparison as it stood when it finished. Best-effort for the same reason the
-    progress plot is: a missing or unreadable recording must not abort the stage
-    that just produced this iteration's gains. ``collected`` is a
-    ``collect_baseline_runs`` result to reuse across iterations.
-    """
+    """One figure per benchmark reference over the runs of every iteration up
+    to this one (best effort). ``collected`` reuses a ``collect_baseline_runs``
+    result."""
     written: list[str] = []
     paths = experiment.paths(iteration)
     try:
@@ -2522,8 +2084,6 @@ def _plot_baseline_runs(experiment: Experiment, iteration: int, collected: dict 
 
         if collected is None:
             collected = collect_baseline_runs(experiment)
-        # Later iterations' runs are not part of the comparison as it stood
-        # when this iteration finished.
         collected = {
             shape: [record for record in records if record.index <= iteration]
             for shape, records in collected.items()
@@ -2531,9 +2091,6 @@ def _plot_baseline_runs(experiment: Experiment, iteration: int, collected: dict 
         collected = {shape: records for shape, records in collected.items() if records}
         if not collected:
             return written
-        # Their own subdirectory: a benchmark *set* produces one figure per
-        # reference, and half a dozen of them alongside everything else the
-        # iteration writes makes visualize/ unreadable.
         output_dir = paths.visualize_dir / "baseline runs"
         output_dir.mkdir(parents=True, exist_ok=True)
         for shape, records in sorted(collected.items()):
@@ -2555,10 +2112,7 @@ def _plot_baseline_runs(experiment: Experiment, iteration: int, collected: dict 
 # ---------------------------------------------------------------------------
 
 
-# The stages an iteration has to get through, with the output that marks each
-# one done. simulate-deployment is not in here: it is one of two ways to fill
-# data/ (the other being the SD card), and decode-logs is what records that the
-# data arrived either way.
+# The stages an iteration has to get through, with the output that marks each done.
 REQUIRED_STAGE_OUTPUTS: tuple[tuple[str, str], ...] = (
     ("plan-id-trajectory", "identification_trajectory/*.pkl + .JSN"),
     ("decode-logs", "data/*.csv"),
@@ -2568,16 +2122,12 @@ REQUIRED_STAGE_OUTPUTS: tuple[tuple[str, str], ...] = (
     ("tune-gains", "results/gains.yaml"),
 )
 
-# Stages an iteration is complete without. The benchmark only scores the
-# controller this iteration deployed -- nothing downstream reads it, so a
-# missing one costs the progress plot a point and nothing else. It also needs a
-# plant to drive, which an experiment collecting real robot data does not have.
+# Stages an iteration is complete without.
 OPTIONAL_STAGE_OUTPUTS: tuple[tuple[str, str], ...] = (
     ("benchmark", "data/benchmark[_static]/TRxx"),
 )
 
-# Iteration 0 (prior tuning) tunes on the prior model: no data, so no
-# identification, residual or benchmark.
+# The stages of iteration 0 (prior tuning).
 PRIOR_STAGES = ("plan-tuning-trajectories", "tune-gains")
 
 
@@ -2659,16 +2209,9 @@ def stage_run(
 ) -> int:
     """Run the loop from ``iteration`` on, and return the last iteration finalized.
 
-    One iteration at a time by default. ``num_iterations`` (or the experiment's
-    own ``num_iterations``) is a *target total*: the loop keeps going until that
-    iteration has been finalized, and refuses to start one past it, so rerunning
-    on a finished experiment is a no-op rather than another iteration's work.
-    Getting anywhere unattended needs the logs to appear without a human, i.e.
-    ``simulate_deployment`` or ``mujoco_deployment.enabled``; otherwise the loop
-    stops at the first iteration that needs robot data.
-
-    Naming an ``iteration`` past the target raises the target to it: an explicit
-    request is the more specific instruction.
+    ``num_iterations`` (default: the experiment's) is the total to reach. Without
+    a MuJoCo deployment the loop stops at the first iteration that needs robot
+    data. Naming an ``iteration`` past the target raises the target to it.
     """
     target = int(experiment.config["num_iterations"] if num_iterations is None else num_iterations)
     if iteration is not None:
@@ -2684,8 +2227,6 @@ def stage_run(
         if not _run_iteration(
             experiment,
             iteration,
-            # --log names one file in one data/ directory, so it can only mean
-            # the iteration the command was pointed at.
             log=log,
             simulate_deployment=simulate_deployment,
         ):
@@ -2702,20 +2243,14 @@ def stage_run(
 
 @contextlib.contextmanager
 def logged_stage(paths: IterationPaths, stage: str):
-    """Record the stage's wall-clock start before it runs and its finish after.
-
-    The start is written first, so a stage killed halfway leaves an entry with
-    no ``finished``: its outputs may be partial even where ``iteration_status``
-    already counts them as done (a data/ directory with some of its logs, a
-    tuning set with some of its pickles).
-    """
+    """Record the stage's start before it runs and its finish after (a start
+    without a finish marks possibly partial outputs)."""
     import datetime
 
     def now() -> str:
         return datetime.datetime.now().isoformat(timespec="seconds")
 
     def save(log: dict) -> None:
-        # Atomic, so a process killed mid-write never leaves a truncated log.
         temporary = paths.stage_log.with_suffix(".yaml.tmp")
         save_yaml(temporary, log)
         os.replace(temporary, paths.stage_log)
@@ -2738,18 +2273,14 @@ def _run_iteration(
 ) -> bool:
     """Run every stage of one iteration that can proceed, in order.
 
-    Returns whether the iteration was finalized (and the next one created).
-    Stops with instructions, returning False, when robot data is required and
-    no deployment stands in for it.
+    Returns whether the iteration was finalized; False when it waits for robot data.
     """
     paths = experiment.paths(iteration)
     status = iteration_status(experiment, iteration)
     if iteration == 0:
         return _run_prior_iteration(experiment, status)
 
-    # Benchmark recordings turn up in *earlier* iterations' data/ long after
-    # those iterations were finalized (a person copies them off the SD card),
-    # so the whole experiment is rescanned every time the loop proceeds.
+    # Benchmark logs may arrive late, so every iteration is rescanned.
     plot_run_directory_logs(experiment)
     plot_baseline_runs_per_iteration(experiment)
 
@@ -2758,10 +2289,7 @@ def _run_iteration(
             stage_plan_identification_trajectory(experiment, iteration)
         status = iteration_status(experiment, iteration)
 
-    # The benchmark scores the controller this iteration deployed, so it is
-    # recorded here, before anything identifies or tunes on this iteration's
-    # data. Independent of the identification logs: rerunning an iteration
-    # whose data/ is already filled still records the benchmark it is missing.
+    # Benchmark the controller this iteration deployed.
     deploys_in_simulation = simulate_deployment or experiment.config["mujoco_deployment"]["enabled"]
     benchmark_directories = (
         [] if deploys_in_simulation else _create_benchmark_directories(paths, experiment.config["benchmark"])
@@ -2771,8 +2299,7 @@ def _run_iteration(
             stage_run_benchmark(experiment, iteration)
 
     if not status["decode-logs"]:
-        # Logs already on disk but not decoded (an interrupted run) are decoded,
-        # never topped up: a second deployment would add more logs next to them.
+        # Logs on disk are decoded, never topped up by another deployment.
         if deploys_in_simulation and not _run_log_paths(paths.data_dir):
             with logged_stage(paths, "simulate-deployment"):
                 stage_simulate_deployment(experiment, iteration)
@@ -2827,12 +2354,8 @@ def _run_prior_iteration(experiment: Experiment, status: dict[str, bool]) -> boo
 
 
 def _problem_at_sim_time(source: Path, sim_time: float, name: str, label: str) -> Path:
-    """``source`` with ``sim_time`` overridden, written next to it as ``name``.
-
-    Returns ``source`` unchanged when the override is off (0/absent) or already
-    equal, so a run that does not ask for one is byte-identical to before and
-    no extra file appears in the iteration.
-    """
+    """``source`` with ``sim_time`` overridden, written next to it as ``name``
+    (``source`` itself when the override is off or equal)."""
     sim_time = float(sim_time or 0.0)
     if sim_time <= 0.0:
         return source
@@ -2848,13 +2371,8 @@ def _problem_at_sim_time(source: Path, sim_time: float, name: str, label: str) -
 
 
 def _identification_problem(paths: IterationPaths, config: dict) -> Path:
-    """The problem the identification design runs against.
-
-    Its clock is the sum of ``identification_trajectory.phases`` durations, its
-    own for the same reason the tuning design has one: a tuning trajectory is
-    rolled out in sim from a small start offset, while this one is placed by
-    hand and driven on the robot.
-    """
+    """The problem the identification design runs against (sim_time = the
+    sum of the phase durations)."""
     sim_time = sum(float(phase["duration"]) for phase in config["phases"])
     return _problem_at_sim_time(
         paths.problem, sim_time, "problem_identification.yaml", "Identification design",
@@ -2862,34 +2380,8 @@ def _identification_problem(paths: IterationPaths, config: dict) -> Path:
 
 
 def _tuning_problem(paths: IterationPaths, config: dict) -> Path:
-    """The problem the tuning half of the loop runs against.
-
-    ``tuning_trajectories.sim_time`` (0/absent = leave it alone) shortens the
-    *designed* trajectories without touching the identification trajectory,
-    which reads the same yaml but is driven under completely different
-    conditions -- placed by hand and driven open loop on the robot, where a
-    short run is simply less data.
-
-    It has to be one file shared by ``plan-tuning-trajectories`` and
-    ``tune-gains``: ``sim_time`` sets the designer's time grid *and* the
-    tuner's, and a tuner whose grid disagrees with the references it loads is
-    not rolling out the trajectory that was designed.
-
-    Measured 2026-09-11 on test19/iteration_03 (design -> tune static gains ->
-    benchmark on the plant, 6 shapes x 5 runs, median pose RMSE):
-
-    | sim_time | 3.0 | 3.5 | 4.0 | 4.5 | 5.5 | 6.0 | 7.0 |
-    |---|---|---|---|---|---|---|---|
-    | at design alpha_max 16 | .0489 | .0466 | **.0428** | .0493 | .0537 | .0544 | .0554 |
-
-    i.e. an interior optimum at 4.0 s, 21% better than the 7.0 s the loop
-    shipped. The far side is not a gentle roll-off: below 4 s the designs start
-    demanding more yaw acceleration than the robot has (1.05-1.26x alpha_max at
-    3.0 s) and the tuner is then scoring gains on references nothing can track
-    -- 3.0 s / alpha_max 20 returns the *lowest* ky of the whole sweep (4.76)
-    and the *worst* benchmark (0.0592). Keep the designs inside alpha_max and
-    take the shortest clock that does.
-    """
+    """The problem the tuning design and the gain tuner share
+    (``tuning_trajectories.sim_time`` overrides the identified problem's)."""
     return _problem_at_sim_time(
         _identified_problem(paths), config.get("sim_time"), "problem_tuning.yaml",
         "Tuning half",

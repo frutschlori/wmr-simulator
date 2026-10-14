@@ -1,34 +1,21 @@
 """Read and write Pololu firmware robot configuration files (ROBOTCFG.CFG).
 
-The firmware consumes a flat ``key=value`` text file (see e.g.
-"Pololu Data/Experiments/2026_06_22/Logs/gain tuning/tuned_3/ROBOTCFG.CFG").
-This module renders that format from simulator quantities:
+The firmware reads a flat ``key=value`` text file. Rendered from simulator
+quantities:
 
-- ``wheel_radius`` / ``wheel_base`` come from PhysicalParams (base_diameter is
-  the effective wheelbase).
-- ``wheel_max`` is the identified ``max_wheel_speed``. The firmware divides its
-  inner-loop feedforward by it (``inner_controller.rs``) and clamps the
-  commanded wheel speeds to it (``trajectory_control.rs``), so leaving it at a
-  template value while the robot identifies something lower makes the
-  feedforward weak by exactly that fraction -- visible as a standing
-  inner-loop integrator offset in the logs.
-- ``kx_traj`` / ``ky_traj`` / ``ktheta_traj`` are the outer tracking gains,
-  identical in both conventions.
-- ``kp_inner`` / ``ki_inner`` / ``kd_inner`` are the inner wheel-speed PID
-  gains. The simulator keeps them in wheel-speed units (feedback on rad/s
-  errors, their integral and their derivative) while the firmware expects duty
-  per rad/s (resp. rad, rad/s^2), so the simulator gains are divided by the
-  motor gain (max_wheel_speed) on export. Gain vectors from before the D-term
-  have five entries and export ``kd_inner = 0``.
+- ``wheel_radius`` / ``wheel_base`` from PhysicalParams (``base_diameter``);
+- ``wheel_max`` is the identified ``max_wheel_speed`` (the firmware's
+  feedforward divides by it);
+- ``kx_traj`` / ``ky_traj`` / ``ktheta_traj`` are the outer tracking gains;
+- ``kp_inner`` / ``ki_inner`` / ``kd_inner``: the simulator's wheel-speed gains
+  divided by ``max_wheel_speed`` (the firmware works in duty units). Five-gain
+  vectors export ``kd_inner = 0``.
 
-Keys that have no simulator counterpart (joystick timing, motor directions,
-encoder constants, ...) are taken from a template: either an existing CFG file
-or the built-in defaults below.
+All other keys come from a template CFG or the built-in defaults below.
 """
 
 from __future__ import annotations
 
-import argparse
 from pathlib import Path
 from typing import Mapping
 
@@ -120,13 +107,9 @@ def robot_config_values(
 ) -> dict[str, float]:
     """Firmware config dict from simulator quantities.
 
-    ``physical_params`` is a PhysicalParams (or anything with wheel_radius,
-    base_diameter and max_wheel_speed attributes); ``controller_gains`` is the
-    simulator gain vector [kx, ky, kth, kpmotor, kimotor, kdmotor] (a
-    five-gain vector means kdmotor = 0). ``max_wheel_speed`` is exported twice
-    over: as ``wheel_max`` itself, and as the divisor turning the simulator's
-    inner gains into the firmware's duty units -- so exporting gains requires
-    physical_params too.
+    ``controller_gains`` is the simulator gain vector [kx, ky, kth, kpmotor,
+    kimotor, kdmotor]; exporting gains requires ``physical_params`` (for the
+    inner-gain unit conversion).
     """
     values = dict(DEFAULT_ROBOT_CONFIG if template is None else template)
     if physical_params is not None:
@@ -178,55 +161,4 @@ def _format_robot_config_value(key: str, value: float) -> str:
 
 
 def _format_value(value: float) -> str:
-    # repr of a rounded float matches the firmware files ("20.0", "0.01637", ...)
-    # while keeping enough precision for converted gains.
     return repr(round(float(value), 9))
-
-
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Export a Pololu firmware ROBOTCFG.CFG.")
-    parser.add_argument("output", type=str, help="Output path for the CFG file.")
-    parser.add_argument("--template", type=str, default=None, help="Existing CFG file to use as template.")
-    parser.add_argument("--problem", type=str, default=None,
-                        help="Problem yaml; robot wheel_radius/base_diameter, max_wheel_speed and controller gains are exported.")
-    parser.add_argument("--set", dest="overrides", action="append", default=[], metavar="KEY=VALUE",
-                        help="Override an individual config value (repeatable).")
-    args = parser.parse_args(argv)
-
-    physical_params = None
-    controller_gains = None
-    if args.problem is not None:
-        import yaml
-
-        with open(args.problem, "r", encoding="utf-8") as file:
-            problem_cfg = yaml.safe_load(file)
-        from types import SimpleNamespace
-
-        robot_cfg = problem_cfg["robot"]
-        physical_params = SimpleNamespace(
-            wheel_radius=robot_cfg["wheel_radius"],
-            base_diameter=robot_cfg["base_diameter"],
-            max_wheel_speed=robot_cfg["max_wheel_speed"],
-        )
-        controller_gains = problem_cfg["controller"]["gains"]
-
-    overrides = {}
-    for item in args.overrides:
-        key, _, value = item.partition("=")
-        if not key or not value:
-            parser.error(f"--set expects KEY=VALUE, got {item!r}")
-        overrides[key.strip()] = float(value)
-
-    output_path = export_robot_config(
-        args.output,
-        physical_params=physical_params,
-        controller_gains=controller_gains,
-        template_path=args.template,
-        overrides=overrides,
-    )
-    print(output_path)
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

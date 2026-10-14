@@ -1,37 +1,21 @@
 """MLP gain parametrization on tracking errors and reference speeds.
 
-A small tanh MLP maps normalized body-frame tracking errors plus the reference
-speed features to one bounded multiplicative factor per *scheduled* controller
-gain (``scheduled_indices``, default the first five; gains not listed pass through
-untouched, e.g. ``[0, 1, 2]`` keeps the motor PI gains static):
+A small tanh MLP maps normalized body-frame tracking errors and reference speed
+features to one bounded multiplicative factor per scheduled controller gain
+(``scheduled_indices``; the other gains pass through unchanged):
 
-    gains[i] = base_gains[i] * clip(1 + mlp(z)[i], 0, bound),  bound >= 1
+    gains[i] = base_gains[i] * clip(1 + g(z) * mlp(z)[i], 0, bound),  bound >= 1
 
-The trainable flat vector is a *delta* on a frozen random init whose final
-layer is zero, so a zero delta is exactly the identity parametrization (static
-controller) while the hidden layers still produce nonzero activations -- the
-tuner starts from the static controller and sees useful gradients from step
-one (an all-zero MLP would be a dead saddle).
+The trainable vector is a delta on a frozen random initialization whose final
+layer is zero, so a zero delta is exactly the static controller while the
+hidden layers still pass gradients. Every weight matrix is spectrally
+normalized to ``spectral_norm_cap`` at forward time (0 disables it).
 
-Regularization: every weight matrix is spectrally normalized at forward time
-to ``spectral_norm_cap`` (Miyato et al. 2018), which caps the Lipschitz
-constant of the whole network (tanh is 1-Lipschitz) in normalized feature
-space. This bounds how fast the factors can change under noisy or unseen
-inputs by construction, independent of the tuning objective. 0 disables it.
-
-Out-of-distribution gate (``gate_num_centers`` > 0; 0 disables it): the
-network is only trained where the tuning rollouts go, so away from them its
-output is extrapolation. The gate is the residual model's (k-means centers
-with Gaussian responsibilities against a null component at ``gate_ood_sigma``
-bandwidths, ``residual_model.residual._gate_weights``) fitted on the features
-the tuning rollouts visit, and scales the network's output:
-
-    gains[i] = base_gains[i] * clip(1 + g(z) * mlp(z)[i], 0, bound)
-
-g is ~1 on the tuning data and falls to 0 away from it, where the controller
-is then exactly the static one. The gate is fitted before the network is
-trained (``with_gate``, from rollouts of the controller the run starts from)
-and frozen, so the tuner trains the gated controller it ships.
+``g(z)`` is an optional out-of-distribution gate (``gate_num_centers`` > 0):
+k-means centers with Gaussian responsibilities against a null component at
+``gate_ood_sigma`` bandwidths, fitted on the features the tuning rollouts visit
+(``with_gate``) and frozen. It is ~1 on that data and 0 far from it; without a
+gate g = 1.
 """
 
 import math
@@ -46,10 +30,8 @@ KIND = "error_mlp"
 # reference speed features.
 FEATURE_NAMES = ("x_e", "y_e", "theta_e", "v_e", "omega_e", "v_d", "abs_omega_d")
 NUM_FEATURES = len(FEATURE_NAMES)
-# The gains a factor can be scheduled on: the first five of the controller
-# gain vector [kx, ky, kth, kpmotor, kimotor]. The firmware MLP is hard-capped
-# at these five (gain_mlp's NUM_GAINS) and never scales kdmotor, which
-# therefore always passes through as a static gain.
+# The schedulable gains [kx, ky, kth, kpmotor, kimotor] (the firmware's limit;
+# kdmotor is always static).
 NUM_SCHEDULABLE_GAINS = 5
 
 _V_D_EPS = 1e-12
@@ -71,8 +53,7 @@ class ErrorMlpParams(NamedTuple):
     learn_bound: bool             # whether the bound is part of the flat trainable vector
     seed: int                     # PRNG seed of the frozen init (kept for serialization)
     spectral_norm_cap: float      # per-matrix spectral norm cap at forward time; 0 disables
-    # Out-of-distribution gate (module docstring). gate_num_centers etc. are the
-    # fitting settings; the fitted gate is the arrays (no centers = no gate yet).
+    # Out-of-distribution gate: fitting settings, then the fitted arrays (no centers: no gate).
     gate_num_centers: int = 0
     gate_bandwidth_scale: float = 1.5
     gate_ood_sigma: float = 3.0
@@ -109,11 +90,7 @@ def _init_layers(hidden_sizes: tuple, seed: int, num_outputs: int) -> tuple:
 
 
 def _spectral_norm(weight: jax.Array, num_iters: int = 30) -> jax.Array:
-    """Largest singular value via power iteration (deterministic start).
-
-    The singular vectors are treated as constants (stop-gradient), so the
-    gradient of the returned sigma is the standard rank-one u v^T estimate.
-    """
+    """Largest singular value via power iteration (singular vectors stop-gradient)."""
     eps = 1e-12
     v = jnp.full((weight.shape[1],), 1.0 / math.sqrt(weight.shape[1]), dtype=weight.dtype)
     for _ in range(num_iters):
@@ -129,12 +106,8 @@ def _spectral_norm(weight: jax.Array, num_iters: int = 30) -> jax.Array:
 
 
 def effective_layers(params: "ErrorMlpParams") -> tuple:
-    """Weights as used by the forward pass: spectrally normalized to the cap.
-
-    Each weight matrix is rescaled by ``cap / max(sigma, cap)`` -- untouched
-    while its spectral norm is below the cap (in particular the zero output
-    layer at the identity), hard-limited above it. Biases are unconstrained.
-    """
+    """Weights as used by the forward pass: each matrix rescaled by
+    ``cap / max(sigma, cap)``; biases unconstrained."""
     cap = float(params.spectral_norm_cap)
     if cap <= 0.0:
         return params.layers
@@ -253,13 +226,8 @@ def on_reference_gains_over_refs(
     params: ErrorMlpParams,
     reference_states: jax.Array,
 ) -> jax.Array:
-    """Gains along a reference at zero tracking error, for diagnostics/penalties.
-
-    The rollout gains depend on the realized errors; this evaluates the
-    schedule at the on-track condition (pose on the reference, twist matching
-    it), so only the reference speed features vary. Used by the gain-rate
-    smoothness penalty, which therefore shapes the on-track schedule only.
-    """
+    """Gains along a reference at zero tracking error (used by the gain-rate
+    smoothness penalty)."""
 
     def on_track_gains(ref_state):
         pose_est = ref_state[:3]

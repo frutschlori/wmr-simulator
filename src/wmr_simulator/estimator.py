@@ -10,9 +10,8 @@ class EstimatorState(NamedTuple):
     u_true: jax.Array
     P: jax.Array
     key: jax.Array
-    # Low-pass-filtered wheel speeds handed to the controller, mirroring the
-    # first-order encoder filter running on the real robot's firmware (introduces
-    # a ~30 ms phase lag). Equals the raw u_hat when wheel_lp_tau is 0.
+    # Low-pass-filtered wheel speeds handed to the controller, as in the firmware
+    # (equals the raw u_hat when wheel_lp_tau is 0).
     u_lp: jax.Array
 
 class DiffDriveEstimator:
@@ -44,10 +43,8 @@ class DiffDriveEstimator:
         self.slip_r_var = (float(estimator_cfg.get("slip_r", 0.0)) ** 2) / 3
         self.slip_l_var = (float(estimator_cfg.get("slip_l", 0.0)) ** 2) / 3
 
-        # First-order low-pass filter time constant [s] applied to the encoder
-        # wheel speeds before they reach the controller, matching the on-board
-        # firmware filter: alpha = dt / (tau + dt); omega_lp += alpha*(omega_raw -
-        # omega_lp). 0 disables it (alpha = 1 -> passes the raw speed through).
+        # Time constant [s] of the firmware's wheel-speed low-pass:
+        # omega_lp += alpha * (omega_raw - omega_lp), alpha = dt / (tau + dt); 0 disables it.
         self.wheel_lp_tau = float(estimator_cfg.get("wheel_lp_tau", 0.0))
 
     # ------------------------------------------------------------------ #
@@ -94,7 +91,7 @@ class DiffDriveEstimator:
     # Main update
     # ------------------------------------------------------------------ #
     def _resolve_geometry(self, wheel_radius=None, base_diameter=None):
-        # optionally accept explicit physical parameters s.t. SI-loop can differentiate through module
+        # Explicit physical parameters, so identification can differentiate through them.
         r_est = self.r_est if wheel_radius is None else wheel_radius
         L_est = self.L_est if base_diameter is None else base_diameter
         return r_est, L_est
@@ -117,13 +114,8 @@ class DiffDriveEstimator:
         # Generate keys for PRNG
         key, k_enc_r, k_enc_l, k_x_meas, k_y_meas, k_th_meas = jax.random.split(est_state.key, 6)
 
-        # 1) Simulate encoder increments. The real encoder counts ticks
-        #    accumulated over [t_{k-1}, t_k] = integral(u dt), which for a
-        #    near-linear speed is the trapezoidal average of the previous and
-        #    current wheel speed -- not the endpoint speed alone. Using the
-        #    endpoint (u_k) would make the measured speed lead reality by half a
-        #    sample; the trapezoidal increment restores that half-step of loop
-        #    lag. est_state.u_true carries the previous step's true wheel speeds.
+        # 1) Simulate encoder increments over [t_{k-1}, t_k] (trapezoidal
+        #    average of the previous and current true wheel speed).
         u_prev = est_state.u_true
         dphi_r_true = 0.5 * (u_prev[0] + ur_true) * dt
         dphi_l_true = 0.5 * (u_prev[1] + ul_true) * dt
@@ -136,8 +128,7 @@ class DiffDriveEstimator:
         ul_hat = dphi_l_meas / dt
         u_hat = np.array([ur_hat, ul_hat])
 
-        # First-order low-pass on the wheel speeds, matching the firmware filter
-        # that feeds the controller (raw u_hat still drives the odometry below).
+        # Low-pass for the controller; the odometry below uses the raw u_hat.
         alpha_lp = dt / (self.wheel_lp_tau + dt)
         u_lp = est_state.u_lp + alpha_lp * (u_hat - est_state.u_lp)
 
@@ -150,7 +141,7 @@ class DiffDriveEstimator:
             x_hat, y_hat, theta_hat = est_state.pose_hat
             x_hat += v_hat * np.cos(theta_hat) * dt
             y_hat += v_hat * np.sin(theta_hat) * dt
-            theta_hat = self._wrap_to_pi(theta_hat + w_hat * dt) # changed order to match robot model and EKF
+            theta_hat = self._wrap_to_pi(theta_hat + w_hat * dt)
             pose_hat = np.array([x_hat, y_hat, theta_hat])
 
             # simulate one noisy pose measurement (mocap + IMU)
@@ -189,10 +180,8 @@ class DiffDriveEstimator:
                            [r/2 * st,     r/2 * st],
                            [r/L_est, -r/L_est]])
 
-            # Slip-induced covariance on measured wheel increments
-            # since slip is multiplicative its var needs to be scaled with dphi_true^2
-            # because in practice we only know dphi_meas, which also contains enc noise, we subtract its var
-            # to not inflate slip var (max just ensures non negativity for small speeds)
+            # Slip-induced covariance of the wheel increments (multiplicative, scaled
+            # by dphi^2 with the encoder noise variance subtracted).
             dphi_l_slip_var = np.maximum(dphi_l_meas**2 - self.enc_angle_noise**2, 0.0) * self.slip_l_var
             dphi_r_slip_var = np.maximum(dphi_r_meas**2 - self.enc_angle_noise**2, 0.0) * self.slip_r_var
             M_slip = np.diag(np.array([dphi_r_slip_var, dphi_l_slip_var]))
@@ -201,7 +190,7 @@ class DiffDriveEstimator:
             M = M_slip + self.M_encoder
 
             # Covariance prediction
-            P_pred = Fx @ est_state.P @ Fx.T + Lx @ M @ Lx.T + self.Q # added input noise L M L^T
+            P_pred = Fx @ est_state.P @ Fx.T + Lx @ M @ Lx.T + self.Q
 
             # ----- Measurement simulation (mocap + IMU) -----
             if pose_true is not None:
@@ -225,7 +214,6 @@ class DiffDriveEstimator:
                 S = H @ P_pred @ H.T + self.R
                 S += 1e-6 * self.I3  # regularization
                 K = P_pred @ np.linalg.inv(S)
-                # K = np.linalg.solve(S.T, P_pred.T).T
 
                 x_upd = x_pred + K @ y_res
                 x_upd = x_upd.at[2].set(self._wrap_to_pi(x_upd[2]))
@@ -263,18 +251,12 @@ class DiffDriveEstimator:
 
     @staticmethod
     def get_measured_wheel_speeds(est_state):
-        """The raw encoder speeds u_hat (increment over the last step / dt, no
-        low-pass): what a logged run's wheel speeds become once the log loader
-        has inverted the firmware filter."""
+        """The raw encoder speeds u_hat (increment over the last step / dt, no low-pass)."""
         return est_state.u_hat
 
     @staticmethod
     def get_est_wheel_speeds(est_state):
-        """
-        Return the wheel speeds handed to the controller: the low-pass-filtered
-        encoder speeds (u_lp), matching the on-board firmware filter. With
-        wheel_lp_tau == 0 this equals the raw encoder estimate u_hat.
-        """
+        """The low-pass-filtered encoder speeds handed to the controller."""
         return est_state.u_lp
 
     # ------------------------------------------------------------------ #

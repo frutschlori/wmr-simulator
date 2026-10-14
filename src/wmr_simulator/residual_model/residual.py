@@ -1,86 +1,20 @@
-"""Learned state-action residual dynamics on the body-frame twist.
+"""Learned residual dynamics on the body-frame twist.
 
-Overview
---------
-The nominal differential-drive model (first-order motor lag -> traction limit ->
-ideal kinematics) predicts a body twist ``(v_nom, omega_nom)`` with zero lateral
-velocity. A small learned residual corrects the leftover gap between that
-nominal twist and the measured (mocap) twist during *nominal* (non-drifting)
-operation:
+The nominal model (first-order motor lag + ideal kinematics) predicts a body
+twist ``(v_nom, omega_nom)``. The residual corrects it additively:
 
-    delta = [delta_v, delta_omega] = residual(v_nom, omega_nom, v_cmd, omega_cmd)
+    [delta_v, delta_omega] = residual(v_nom, omega_nom, v_cmd, omega_cmd)
+    v = v_nom + delta_v,   omega = omega_nom + delta_omega,   v_y = 0
 
-    v     = v_nom     + delta_v
-    v_y   = 0                                # no side-slip in nominal operation
-    omega = omega_nom + delta_omega
+where ``(v_cmd, omega_cmd)`` is the twist of the commanded wheel speeds
+``max_wheel_speed * duty``. The residual is a mixture of ``K`` small MLP experts
+with spectrally normalized weights. A Gaussian gate over k-means centers in the
+normalized descriptor space routes between them, and a null expert drives the
+residual to zero more than ``ood_sigma`` bandwidths away from every center. The
+last layer is zero-initialized, so an untrained ensemble is the nominal model.
 
-so the corrected twist is integrated with the ideal planar kinematics. This is
-the additive residual of Sym2Real (arXiv:2509.15412), reduced to the two
-degrees of freedom a two-wheel differential drive actually has, conditioned on
-a (state, action) pair as in that paper.
-
-Why the descriptor is (state, action) and not the state alone
--------------------------------------------------------------
-The *state* half is the nominal twist ``[v_nom, omega_nom]``: a bijective linear
-re-parametrization of the (ground-contact) wheel speeds, since
-``u_r = (2v + L omega) / 2r`` and ``u_l = (2v - L omega) / 2r``. Feeding the
-wheel speeds *as well* would add literally no information -- it is the same two
-numbers in a different basis -- and measurably does not help.
-
-The *action* half is the commanded twist ``[v_cmd, omega_cmd]``, i.e. the
-kinematics of the target wheel speeds ``max_wheel_speed * duty`` the motor lag is
-heading toward. This is the information the nominal model has and the state
-alone does not. It matters because the leftover physics splits in two:
-quasi-static effects (Coulomb/viscous friction, wheelbase error) are functions
-of the operating point and were already representable, whereas *transient*
-effects -- a mis-identified motor time constant, transport delay, backlash on
-torque reversal -- appear in proportion to (command - state), which a memoryless
-function of the state alone cannot express at any capacity. Note the motor lag
-gives ``u^+ - u = (1 - alpha) (u_target - u)``, so the commanded twist is the
-nominal acceleration up to a constant; empirically it roughly doubles the share
-of the yaw residual the model explains (held-out RMSE 0.265 -> 0.240 rad/s
-against a 0.287 zero-residual baseline), while the forward channel is already
-saturated by the state alone.
-
-Both halves are available identically in training (encoder speeds through the
-lag; logged duty) and in simulation, where there is no encoder -- ``robot.step``
-builds them from its own lag state and its duty argument. The action is a
-function of the actuation, never of the measured target, so there is no leakage.
-
-Expert ensemble + out-of-distribution gate
--------------------------------------------
-The residual is a mixture of ``K`` small expert MLPs, each specialized to a
-region of the operating envelope. K-means over the normalized descriptor
-(the full (state, action) vector) fixes one center/bandwidth per expert.
-At query time a softmax over Gaussian responsibilities routes to the nearest
-expert(s); a *null* "zero expert" with a fixed responsibility wins whenever the
-query is farther than ``ood_sigma`` bandwidths from every center, so the residual
-smoothly decays to zero in operating regimes the training data never covered
-(no spiky extrapolation off the manifold). The whole gate is differentiable, so
-gradients still flow controller gains -> duty -> nominal twist -> residual ->
-rollout loss during gain tuning.
-
-Smoothness
-----------
-Every expert weight matrix is spectrally normalized to ``spectral_norm_cap`` at
-forward time (Miyato et al. 2018, power iteration -- the same regularizer as the
-error-MLP gain parametrization). tanh activations are 1-Lipschitz, so the cap
-bounds each expert's Lipschitz constant in normalized feature space: the
-residual cannot change arbitrarily fast with the twist, which keeps the
-residual -> twist -> feature closed loop from oscillating. A small L2 penalty on
-the residual output shrinks the model toward the nominal dynamics wherever the
-data does not clearly demand a correction. The last layer is zero-initialized,
-so an untrained ensemble is exactly the nominal model.
-
-Training is one-step only (predict this step's twist residual from this step's
-nominal twist): the target is measured-minus-nominal, and since the input is the
-nominal twist (a function of the actuation, not of the measured target) there is
-no target leakage. Everything is pure JAX so a saved model is a single
-self-contained pytree (see residual_model.io).
-
-This module also hosts the dataset construction from Pololu logs, the training
-loop, and evaluation helpers; plotting lives in
-wmr_simulator.visualization.residual and the CLI wrappers in scripts/ are thin.
+This module also builds the training data from Pololu logs and trains the
+ensemble (one-step, or closed-loop via ``residual_model.closed_loop``).
 """
 
 from __future__ import annotations
@@ -94,9 +28,7 @@ import numpy as np
 import yaml
 
 
-# (state, action) descriptor: the nominal predicted body twist and the commanded
-# twist the motor lag is heading toward (see the module docstring). Doubles as
-# the gate's regime descriptor (the k-means / softmax space).
+# Descriptor of the residual and its gate: nominal twist and commanded twist.
 RESIDUAL_FEATURE_NAMES = ("v_nom", "omega_nom", "v_cmd", "omega_cmd")
 RESIDUAL_INPUT_DIM = len(RESIDUAL_FEATURE_NAMES)
 RESIDUAL_OUTPUT_DIM = 2  # [delta_v, delta_omega]
@@ -107,11 +39,9 @@ TARGET_LABELS = (r"$\Delta v$ [m/s]", r"$\Delta \omega$ [rad/s]")
 DEFAULT_NUM_EXPERTS = 4
 DEFAULT_HIDDEN_SIZES = (16, 16)
 DEFAULT_SPECTRAL_NORM_CAP = 1.0
-# Gaussian gate bandwidth = (root-mean intra-cluster distance) * this factor;
-# > 1 overlaps neighbouring experts so the hand-off between regimes is smooth.
+# Gaussian gate bandwidth = (root-mean intra-cluster distance) * this factor.
 DEFAULT_GATE_BANDWIDTH_SCALE = 1.5
-# The null "zero expert" wins (residual -> 0) once the nearest cluster is more
-# than this many bandwidths away in normalized descriptor space.
+# Distance [bandwidths] beyond which the null expert wins (residual -> 0).
 DEFAULT_OOD_SIGMA = 3.0
 
 
@@ -124,10 +54,8 @@ class ResidualEnsemble(eqx.Module):
     """Mixture of spectrally-normalized expert MLPs with an OOD gate.
 
     ``layers`` holds one stacked array per (weight, bias) with a leading expert
-    axis of length K, so the whole ensemble evaluates with a single ``vmap``.
-    ``centers``/``scales`` are the fixed k-means gate (normalized descriptor
-    space); ``ood_sigma`` sets the null-expert distance. Normalization stats are
-    carried inside the module so a checkpoint is self-contained.
+    axis of length K. ``centers``/``scales`` are the fixed k-means gate in
+    normalized descriptor space; the normalization stats are part of the model.
     """
 
     layers: tuple                 # stacked expert layers: (W0[K,h,in], b0[K,h], ..., Wn[K,out,h], bn[K,out])
@@ -180,14 +108,8 @@ def init_residual_model(
     spectral_norm_cap: float = DEFAULT_SPECTRAL_NORM_CAP,
     ood_sigma: float = DEFAULT_OOD_SIGMA,
 ) -> ResidualEnsemble:
-    """Fresh ensemble with identity normalization and an unset (zero) gate.
-
-    The gate centers/scales are placeholders here; ``train_residual_ensemble``
-    fills them from k-means. ``io.load_residual_model`` uses this to rebuild the
-    checkpoint skeleton before swapping in the saved leaves, so the shapes must
-    match the trained model (fixed by ``input_dim``/``output_dim``/
-    ``num_experts``/``hidden_sizes``).
-    """
+    """Fresh ensemble with identity normalization and a placeholder gate
+    (filled from k-means by training)."""
     hidden_sizes = tuple(int(h) for h in hidden_sizes)
     return ResidualEnsemble(
         layers=_init_expert_layers(key, num_experts, input_dim, hidden_sizes, output_dim),
@@ -203,11 +125,7 @@ def init_residual_model(
 
 
 def residual_features(nominal_v, nominal_omega, commanded_v, commanded_omega) -> jax.Array:
-    """Assemble the descriptor [v_nom, omega_nom, v_cmd, omega_cmd].
-
-    See RESIDUAL_FEATURE_NAMES: the nominal twist is the state, the commanded
-    twist (kinematics of ``max_wheel_speed * duty``) is the action.
-    """
+    """Assemble the descriptor [v_nom, omega_nom, v_cmd, omega_cmd]."""
     return jnp.stack(
         [
             jnp.asarray(nominal_v, dtype=jnp.float32),
@@ -219,12 +137,7 @@ def residual_features(nominal_v, nominal_omega, commanded_v, commanded_omega) ->
 
 
 def _spectral_norm(weight: jax.Array, num_iters: int = 15) -> jax.Array:
-    """Largest singular value via power iteration (deterministic start).
-
-    The singular vectors are treated as constants (stop-gradient), so the
-    gradient of the returned sigma is the standard rank-one u v^T estimate.
-    Matches gain_parametrization.error_mlp._spectral_norm.
-    """
+    """Largest singular value via power iteration (singular vectors stop-gradient)."""
     eps = 1e-12
     v = jnp.full((weight.shape[1],), 1.0 / math.sqrt(weight.shape[1]), dtype=weight.dtype)
     for _ in range(num_iters):
@@ -259,13 +172,8 @@ def _expert_forward(layers: tuple, z: jax.Array, cap: float) -> jax.Array:
 
 
 def _gate_weights(model: ResidualEnsemble, z: jax.Array) -> jax.Array:
-    """Softmax responsibilities over the K experts (rows sum to <= 1).
-
-    Each expert gets ``r_k = exp(-1/2 * ||z - c_k||^2 / s_k^2)``; a null expert
-    with fixed ``r_0 = exp(-1/2 * ood_sigma^2)`` competes in the softmax so the
-    experts' weights vanish (residual -> 0) when the query is far from every
-    center. Returns the K expert weights (the null weight is the remainder).
-    """
+    """Softmax responsibilities of the K experts, ``r_k = exp(-1/2 ||z - c_k||^2 / s_k^2)``,
+    against a null expert with ``r_0 = exp(-1/2 ood_sigma^2)`` (the remainder)."""
     distance_sq = jnp.sum((z - model.centers) ** 2, axis=1)  # (K,)
     responsibilities = jnp.exp(-0.5 * distance_sq / (model.scales**2 + 1e-12))
     null = jnp.exp(-0.5 * model.ood_sigma**2)
@@ -273,11 +181,7 @@ def _gate_weights(model: ResidualEnsemble, z: jax.Array) -> jax.Array:
 
 
 def _shaped_delta(model: ResidualEnsemble, z: jax.Array) -> jax.Array:
-    """Physical residual delta from a single normalized descriptor ``z``.
-
-    Blends the experts by their gate weights (OOD -> zero) and denormalizes.
-    ``target_mean`` is zero, so a zero blend is exactly zero physical residual.
-    """
+    """Physical residual delta from a single normalized descriptor ``z``."""
     cap = model.spectral_norm_cap
     outputs = jax.vmap(lambda layers: _expert_forward(layers, z, cap))(model.layers)  # (K, out)
     weights = _gate_weights(model, z)  # (K,)
@@ -286,11 +190,7 @@ def _shaped_delta(model: ResidualEnsemble, z: jax.Array) -> jax.Array:
 
 
 def apply_residual_model(model: ResidualEnsemble, features: jax.Array) -> jax.Array:
-    """Physical residual twist [delta_v, delta_omega] for one or a batch of features.
-
-    Accepts a single feature vector or a batch (leading axis). The gate zeroes
-    the residual out of distribution, so no input clamping is needed.
-    """
+    """Physical residual twist [delta_v, delta_omega] for one or a batch of features."""
     features = jnp.asarray(features, dtype=jnp.float32)
 
     def single(feature_vector):
@@ -322,11 +222,7 @@ def residual_corrected_twist(
     nominal_v: jax.Array,
     nominal_omega: jax.Array,
 ):
-    """Corrected body twist (v_x, v_y, omega) from the nominal twist and features.
-
-    ``v_y`` is always zero (no side-slip in nominal operation); returned for a
-    uniform (v_x, v_y, omega) interface.
-    """
+    """Corrected body twist (v_x, v_y = 0, omega) from the nominal twist and features."""
     delta = apply_residual_model(model, features)
     v_x = nominal_v + delta[..., 0]
     v_y = jnp.zeros_like(v_x)
@@ -349,29 +245,16 @@ def build_residual_dataset(
 ) -> dict:
     """Supervised one-step samples from one experiment log.
 
-    Measured twist: the log's filter-derived body twists (``log.pose.twists``,
-    see pololu.measurement_smoothing) at the interval starts, consistent with
-    Euler integration; logs without twists fall back to finite-differencing the
-    poses over each mocap interval and rotating the world displacement into the
-    body frame at the interval start.
-
-    Nominal twist: encoder wheel speeds interpolated to the interval starts,
-    passed through the first-order motor lag (matching DiffDrive.step -- the
-    simulator has no encoder) and the ideal differential-drive kinematics.
-    There is no traction model: slip is part of what the residual learns.
-
-    Commanded twist: the same kinematics applied to the *target* wheel speeds
-    ``max_wheel_speed * duty`` (the action half of the descriptor). The residual
-    input is the concatenation of the two and the target is
-    ``measured - nominal``; because both inputs are functions of the actuation
-    (not of the measured target) there is no target leakage and every valid
-    interval is a sample (no off-by-one drop).
+    Measured twist: the log's smoothed body twists (finite differences of the
+    poses when it has none). Nominal twist: the encoder wheel speeds through
+    the motor lag (as in ``DiffDrive.step``) and the ideal kinematics.
+    Commanded twist: the kinematics of ``max_wheel_speed * duty``. The target
+    is ``measured - nominal``.
 
     ``resample_uniform`` interpolates poses (and twists) onto a uniform
     median-dt grid; ``max_dt_factor`` drops mocap intervals longer than that
-    multiple of the median (stream gaps make the twist meaningless). Returns
-    float32 ``features`` (N, 4), ``targets`` (N, 2), ``time_s``, ``dt``, and the
-    measured/nominal twists plus pose arrays for diagnostics.
+    multiple of the median. Returns float32 ``features`` (N, 4), ``targets``
+    (N, 2), ``time_s``, ``dt``, and the twists and poses for diagnostics.
     """
     pose_time_s = np.asarray(log.pose.time_s, dtype=float)
     pose_states = np.asarray(log.pose.states, dtype=float)
@@ -408,10 +291,8 @@ def build_residual_dataset(
     r = float(params.wheel_radius)
     effective_wheelbase = float(params.base_diameter)
 
-    # Zero-order-hold duty at the interval starts, then the first-order motor
-    # lag: lag[t] = alpha * u_enc[t-1] + (1 - alpha) * max_speed * duty[t],
-    # matching DiffDrive.step. Both the nominal twist and (if ever needed) the
-    # wheel feature are built from this lag, never the raw encoder speed.
+    # Motor lag as in DiffDrive.step:
+    # lag[t] = alpha * u_enc[t-1] + (1 - alpha) * max_speed * duty[t].
     duty = _zero_order_hold(interval_time, wheel_time_s, duty_cycle)
     max_speed = float(params.max_wheel_speed)
     tau = float(params.time_constant)
@@ -426,9 +307,7 @@ def build_residual_dataset(
     omega_nom = r * (lag_r - lag_l) / effective_wheelbase
     nominal_twist = np.column_stack([v_nom, np.zeros_like(v_nom), omega_nom])
 
-    # Action half of the descriptor: the twist of the *target* wheel speeds the
-    # lag is heading toward (matching DiffDrive.step, which builds it from its
-    # duty argument).
+    # Commanded twist of the target wheel speeds.
     target_r = max_speed * duty[:, 0]
     target_l = max_speed * duty[:, 1]
     v_cmd = 0.5 * r * (target_r + target_l)
@@ -469,13 +348,8 @@ def split_datasets_by_file(
     validation_split: float,
     seed: int,
 ) -> tuple[list[int], list[int]]:
-    """Train/validation indices into ``datasets``, split by whole file.
-
-    Always whole files, never a within-file split: the residual has to learn a
-    complete trajectory, so holding out the tail of every log would train it on
-    truncated runs. With too few files for ``validation_split`` to reach one
-    file, one file is held out anyway and the rest train.
-    """
+    """Train/validation indices into ``datasets``, split by whole file (at
+    least one file is held out)."""
     if len(datasets) < 2:
         raise ValueError("Need at least 2 logs to hold one out for validation.")
     indices = np.arange(len(datasets))
@@ -537,9 +411,8 @@ def _fit_gate(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Centers (K, D) and Gaussian bandwidths (K,) in normalized descriptor space.
 
-    A bandwidth is the root-mean distance of a cluster's own points to its
-    center, scaled by ``bandwidth_scale`` for overlap; empty/singleton clusters
-    fall back to the median bandwidth so the gate stays well-defined.
+    A bandwidth is the root-mean distance of a cluster's points to its center
+    times ``bandwidth_scale``; empty or singleton clusters get the median.
     """
     centers = _kmeans(normalized_inputs, num_experts, seed)
     assignments = np.argmin(
@@ -576,18 +449,13 @@ def train_residual_ensemble(
     learning_rate: float = 1e-3,
     output_reg_weight: float = 1e-2,
 ):
-    """Train the expert ensemble on single-step twist residuals with Adam.
+    """Train the expert ensemble on one-step twist residuals with Adam.
 
-    Inputs/targets are normalized (targets std-only: mean fixed at zero, so a
-    zero output is exactly the nominal model). The gate is fixed from k-means
-    over the normalized inputs before training; only the expert weights are
-    optimized (jointly, through the fixed gate, so each expert specializes to
-    where its gate weight is high). The loss is the blended prediction MSE plus
-    ``output_reg_weight`` times the mean squared normalized residual output
-    (shrinks the correction toward zero where the data does not demand it).
-
-    Returns (model, history) with per-epoch normalized MSE (train = full
-    objective incl. the output penalty, validation = prediction MSE only).
+    Inputs and targets are normalized (targets by std only). The gate is fixed
+    from k-means before training; only the expert weights are optimized. The
+    loss is the prediction MSE plus ``output_reg_weight`` times the mean
+    squared normalized output. Returns (model, history) with per-epoch
+    normalized MSE.
     """
     import optax
 
@@ -639,8 +507,7 @@ def train_residual_ensemble(
     opt_state = optimizer.init(trainable)
 
     def normalized_prediction(net, z):
-        # Blended normalized residual (target_mean is zero, so this is the
-        # physical delta scaled by 1/target_std).
+        # Blended normalized residual.
         return _shaped_delta(net, z) / net.target_std
 
     def prediction_mse(net, x, y):
@@ -699,28 +566,6 @@ def train_residual_ensemble(
 # ---------------------------------------------------------------------------
 
 
-def integrate_twist_trajectory(
-    initial_pose: np.ndarray,
-    twists: np.ndarray,
-    dt: np.ndarray,
-) -> np.ndarray:
-    """Euler-integrate a body twist series [v_x, v_y, omega] into poses (numpy).
-
-    Returns len(twists) + 1 poses starting at ``initial_pose``.
-    """
-    poses = np.empty((len(twists) + 1, 3), dtype=float)
-    poses[0] = np.asarray(initial_pose, dtype=float)
-    for index, (twist, step_dt) in enumerate(zip(twists, dt)):
-        x, y, theta = poses[index]
-        v_x, v_y, omega = twist
-        poses[index + 1] = [
-            x + (v_x * np.cos(theta) - v_y * np.sin(theta)) * step_dt,
-            y + (v_x * np.sin(theta) + v_y * np.cos(theta)) * step_dt,
-            _wrap_to_pi(theta + omega * step_dt),
-        ]
-    return poses
-
-
 def evaluate_predictions(model: ResidualEnsemble, features: np.ndarray, targets: np.ndarray) -> dict:
     """Per-channel RMSE of the model against the zero-residual baseline."""
     predictions = np.asarray(apply_residual_model(model, jnp.asarray(features)))
@@ -738,21 +583,15 @@ def residual_diagnostics(
     validation_features: np.ndarray,
     validation_targets: np.ndarray,
 ) -> dict:
-    """The numbers to screen a checkpoint by, rather than its validation loss.
+    """Diagnostics of a trained checkpoint.
 
-    * ``target_rms``: RMS of what the nominal model misses, [dv, domega]. On
-      real logs ~0.3 rad/s in domega; a saturated, slipping data set carried
-      4.24 and produced a residual that destroyed tuning (memory
-      ``al-residual-breaks-gain-tuning``).
+    * ``target_rms``: RMS of what the nominal model misses, [dv, domega].
     * ``residual_rmse`` / ``explained_fraction``: how much of it the ensemble
       fits (1 - rmse^2 / target_rms^2).
-    * ``input_std``: the per-feature normalization. An inflated spread (e.g.
-      +/-75 rad/s commands) puts every query near a center, so the OOD gate
-      never switches the residual off.
+    * ``input_std``: the per-feature normalization.
     * ``gate_weight_train``: total expert weight (1 - null weight) on the
-      training features; the in-distribution level the gate is judged against.
-    * ``max_abs_prediction``: the largest correction the model applies on its
-      own training data, [dv, domega].
+      training features.
+    * ``max_abs_prediction``: the largest correction on the training data.
     """
     def split(features, targets):
         if len(features) == 0:
@@ -782,10 +621,6 @@ def residual_diagnostics(
     }
 
 
-def pose_rmse(poses: np.ndarray, reference: np.ndarray) -> float:
-    return float(np.sqrt(np.mean(np.sum((poses[:, :2] - reference[:, :2]) ** 2, axis=1))))
-
-
 def simulate_closed_loop_on_log_reference(
     model: ResidualEnsemble | None,
     problem: str,
@@ -794,22 +629,11 @@ def simulate_closed_loop_on_log_reference(
     seed: int = 0,
     clip_after_first_trajectory: bool = True,
 ):
-    """Closed-loop simulation (nominal plant + optional residual) tracking the
-    reference trajectory recorded in a Pololu log.
+    """Closed-loop simulation (nominal plant + optional residual) of the
+    reference recorded in a Pololu log; returns ``(sim_log, measured_log)``.
 
-    Returns ``(sim_log, measured_log)``: the simulated SimulationLog and the
-    decoded Pololu log it was driven from, so callers can compare the simulated
-    robot against the real one that recorded the same reference.
-
-    Two configs meet here, and they must not be confused. The *plant* is
-    ``problem``'s robot block: the nominal model the residual was trained
-    against, which is the only model it may be added to. The *controller* is
-    the one that recorded the log (``controller_problem_for_log``): the
-    iteration's ``problem.yaml`` supplies the tuned base gains, the error-MLP
-    ``theta`` exported to ``GAINMLP.JSN`` and the robot/estimator parameters the
-    firmware was flashed with. Driving the global gains instead compares against
-    a controller that never recorded the log (the stock kx is 4.5 where the
-    tuned one is ~0.003).
+    The plant is ``problem``'s robot block (the residual's nominal model); the
+    controller is the one that recorded the log (``controller_problem_for_log``).
     """
     import yaml
 
@@ -833,7 +657,6 @@ def simulate_closed_loop_on_log_reference(
         else None
     )
 
-    # Over the log's own length: the problem's sim_time would cut long runs.
     reference_time = np.asarray(log.reference.time_s, dtype=float)
     pipeline = SimulationPipeline(
         problem_path=problem_path,
@@ -841,19 +664,13 @@ def simulate_closed_loop_on_log_reference(
         residual_model=model,
         sim_time=float(reference_time[-1] - reference_time[0]),
     )
-    # The hidden robot is the plant: swap the recorded controller's belief for
-    # the residual's own nominal model.
+    # The plant is the residual's nominal model, not the controller's belief.
     pipeline.robot = DiffDrive(robot_cfg=plant_robot_cfg, dt=pipeline.wheel_dt)
     reference_states = jnp.asarray(
         pipeline._fit_reference_states(np.asarray(log.reference.states, dtype=float)),
         dtype=jnp.float32,
     )
-    # Start where the real robot was when its controller took the first
-    # reference sample -- not where the reference starts (the robot is placed
-    # by hand, and the offset it drives out is part of the recorded error), and
-    # not at the log's first pose either: the reference stream starts later than
-    # the pose stream (40 ms on the MuJoCo logs, about 8 cm at 2 m/s), and the
-    # simulated controller takes reference sample 0 at its own t = 0.
+    # Start at the measured pose at the time of the first reference sample.
     t0 = float(reference_time[0])
     pose_time = np.asarray(log.pose.time_s, dtype=float)
     pose = np.asarray(log.pose.states, dtype=float)
@@ -867,7 +684,6 @@ def simulate_closed_loop_on_log_reference(
         reference_states=reference_states,
         initial_pose=jnp.asarray(initial_pose, dtype=jnp.float32),
     )
-    # On the recording's clock, so the two logs compare sample for sample.
     return shift_simulation_log_time(sim_log, t0), log
 
 
@@ -898,16 +714,8 @@ def robot_params_from_problem(problem_path: str):
 
 
 def controller_problem_for_log(log_path: str, default_problem_path: str) -> str:
-    """Problem config the robot's *controller* was running when this log was recorded.
-
-    Active-learning logs live in ``<experiment>/<iteration_XX>/data/TRxx.csv``
-    and each iteration folder carries the ``problem.yaml`` that produced its
-    ``ROBOTCFG.CFG`` / ``GAINMLP.JSN`` export -- the gains and the parameters the
-    firmware was flashed with. That is a statement about the controller, never
-    about the robot's physics: the nominal model a log is compared against is
-    whichever one the caller is fitting or rolling out. Falls back to
-    ``default_problem_path`` for logs outside such a folder.
-    """
+    """The problem config of the controller that recorded a log: the
+    ``problem.yaml`` of its iteration folder, else ``default_problem_path``."""
     from pathlib import Path
 
     iteration_problem = Path(log_path).parent.parent / "problem.yaml"
@@ -918,18 +726,10 @@ DATA_DIR_NAME = "data"
 
 
 def gather_log_paths(log_dirs: list[str], recursive: bool = True) -> list:
-    """Loadable Pololu logs under the given directories.
+    """Loadable Pololu logs under the given directories, sorted and deduplicated.
 
-    ``recursive`` descends into an experiment tree (logs live in
-    ``iteration_XX/data/``); otherwise only direct children are scanned. Files
-    are deduplicated and returned in sorted order.
-
-    Recursion deliberately stops *at* each ``data/`` directory: only logs
-    sitting directly inside one are collected. Subfolders of ``data/`` hold
-    special runs -- baseline comparisons, no-gain-MLP ablations, single-shape
-    sweeps (``circle/``, ``lemniscate/``, ``*_no_mlp/``) -- which must not be
-    baked into the residual training set. Logs lying directly in a scanned
-    directory are kept too, so pointing at a flat folder still works.
+    ``recursive`` descends into an experiment tree but stops at each ``data/``
+    directory (its subfolders hold benchmark runs).
     """
     from pathlib import Path
 
@@ -957,7 +757,7 @@ def gather_log_paths(log_dirs: list[str], recursive: bool = True) -> list:
 
 
 # ---------------------------------------------------------------------------
-# High-level train / evaluate entry points (called by the thin CLI wrappers)
+# Training entry point
 # ---------------------------------------------------------------------------
 
 
@@ -988,21 +788,12 @@ def train_from_logs(
     closed_loop_steps: int = 400,
     closed_loop_learning_rate: float = 1e-3,
 ) -> ResidualEnsemble:
-    """Build datasets from all logs under ``log_dirs``, train, save checkpoint + plots.
+    """Build datasets from the logs, train, and save the checkpoint and plots.
 
-    ``training`` is ``"one_step"`` (``train_residual_ensemble``, ``epochs`` of
-    Adam on the one-step targets) or ``"closed_loop"``: the gate and the
-    normalization are fitted on the one-step data as always, then the residual
-    starts from zero and is trained on closed-loop windows of the training logs
-    (``residual_model.closed_loop``; ``epochs`` is unused).
-
-    ``log_dirs`` may span several active-learning iterations: one-step training is
-    gain-independent (the descriptor is built from the logged duty, so whatever
-    controller produced it is irrelevant), which is what makes pooling iterations
-    with different tuned gains sound. Every log's targets are measured minus
-    ``problem``'s nominal model -- the model the residual is later added to --
-    whichever parameters the robot was flashed with when it was recorded, and the
-    checkpoint records those parameters (``io.load_residual_model`` checks them).
+    ``training`` is ``"one_step"`` (``epochs`` of Adam on the one-step targets)
+    or ``"closed_loop"`` (gate and normalization from the one-step data, then
+    closed-loop windows, ``residual_model.closed_loop``). Every log's targets
+    are relative to ``problem``'s nominal model, which the checkpoint records.
     """
     from datetime import datetime
     from pathlib import Path
@@ -1015,10 +806,8 @@ def train_from_logs(
         plot_training_history,
     )
 
-    # An explicit list (the active-learning stage screens out diverged runs)
-    # wins over scanning log_dirs.
+    # An explicit list wins over scanning log_dirs.
     log_paths = gather_log_paths(log_dirs, recursive=recursive) if log_paths is None else list(log_paths)
-    # One nominal model for every log: the one the residual will be added to.
     params = robot_params_from_problem(problem)
     print(f"Residual targets against the nominal model of {problem}")
     if training not in ("one_step", "closed_loop"):
@@ -1137,8 +926,7 @@ def train_from_logs(
     sim_log, measured_log = simulate_closed_loop_on_log_reference(
         model, problem, first_train_log, seed=seed, clip_after_first_trajectory=clip_after_first_trajectory
     )
-    # Same loop with the residual switched off: the control that says whether
-    # the residual moved the simulated robot toward the real one or past it.
+    # The same loop without the residual, for comparison.
     nominal_sim_log, _ = simulate_closed_loop_on_log_reference(
         None, problem, first_train_log, seed=seed, clip_after_first_trajectory=clip_after_first_trajectory
     )
@@ -1198,168 +986,6 @@ def _train_closed_loop_from_logs(
     return model, report
 
 
-def evaluate_on_log(
-    model_path: str,
-    log_path: str,
-    *,
-    problem: str = "problems/pololu_gains.yaml",
-    clip_after_first_trajectory: bool = True,
-    resample_uniform: bool = True,
-    out_dir: str = "visualize",
-    out_prefix: str | None = None,
-) -> dict:
-    """Compare nominal vs residual-augmented open-loop rollout against mocap."""
-    from pathlib import Path
-
-    from wmr_simulator.pololu.log_loader import load_pololu_traj_control_log
-    from wmr_simulator.residual_model.io import load_residual_model
-    from wmr_simulator.visualization.residual import plot_rollout_comparison
-
-    params = robot_params_from_problem(problem)
-    model, checkpoint = load_residual_model(model_path, params)
-    print(f"Loaded residual model {model_path}")
-    print(f"  config: {checkpoint['config']}")
-    if checkpoint.get("metadata"):
-        validation_files = checkpoint["metadata"].get("validation_files", [])
-        print(f"  trained validation files: {[Path(f).name for f in validation_files]}")
-
-    log = load_pololu_traj_control_log(log_path, clip_after_first_trajectory=clip_after_first_trajectory)
-    dataset = build_residual_dataset(log, params, resample_uniform=resample_uniform)
-
-    predicted_residual = np.asarray(apply_residual_model(model, jnp.asarray(dataset["features"])))
-    corrected_twist = dataset["nominal_twist"].copy()
-    corrected_twist[:, 0] = dataset["nominal_twist"][:, 0] + predicted_residual[:, 0]
-    corrected_twist[:, 2] = dataset["nominal_twist"][:, 2] + predicted_residual[:, 1]
-
-    initial_pose = dataset["initial_pose"]
-    dt = dataset["dt"]
-    nominal_poses = integrate_twist_trajectory(initial_pose, dataset["nominal_twist"], dt)
-    corrected_poses = integrate_twist_trajectory(initial_pose, corrected_twist, dt)
-    measured_poses = integrate_twist_trajectory(initial_pose, dataset["measured_twist"], dt)
-
-    time_s = dataset["time_s"]
-    print(f"Open-loop position RMSE vs mocap-twist trajectory over {time_s[-1] - time_s[0]:.1f} s:")
-    print(f"  nominal model:      {pose_rmse(nominal_poses, measured_poses):.4f} m")
-    print(f"  residual-augmented: {pose_rmse(corrected_poses, measured_poses):.4f} m")
-    evaluation = evaluate_predictions(model, dataset["features"], dataset["targets"])
-    print(f"Residual RMSE  [dv, domega]: {evaluation['rmse']}")
-    print(f"Zero-residual baseline:      {evaluation['baseline_rmse']}")
-
-    prefix = out_prefix if out_prefix is not None else f"residual_eval_{Path(log_path).stem}"
-    plot_rollout_comparison(
-        dataset=dataset,
-        predicted_residual=predicted_residual,
-        corrected_twist=corrected_twist,
-        nominal_poses=nominal_poses,
-        corrected_poses=corrected_poses,
-        out_prefix=prefix,
-        out_dir=out_dir,
-    )
-    print(f"Plots saved to {out_dir}/{prefix}_*.pdf")
-
-    return {
-        "dataset": dataset,
-        "predicted_residual": predicted_residual,
-        "corrected_twist": corrected_twist,
-        "nominal_poses": nominal_poses,
-        "corrected_poses": corrected_poses,
-        "measured_poses": measured_poses,
-        "rmse": evaluation["rmse"],
-        "baseline_rmse": evaluation["baseline_rmse"],
-    }
-
-
-# ---------------------------------------------------------------------------
-# CLI (scripts/train_residual_model.py and scripts/eval_residual_model.py are
-# thin wrappers around these)
-# ---------------------------------------------------------------------------
-
-
-def train_main(argv=None):
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Train the residual dynamics model from Pololu logs.")
-    parser.add_argument("--problem", type=str, default="problems/pololu_gains.yaml")
-    # One or more directories; loadable logs are gathered recursively (default:
-    # exp04 + exp05 across all iterations).
-    parser.add_argument(
-        "--log-dir",
-        type=str,
-        nargs="+",
-        default=["Pololu Data/archive/Experiments/2026_07_27 Full Pipeline (with Residual and Gain MLP)/exp01"],
-    )
-    parser.add_argument("--out", type=str, default="models/residual_pololu.pkl")
-    parser.add_argument("--num-experts", type=int, default=DEFAULT_NUM_EXPERTS)
-    # Hidden layer widths, e.g. --hidden-sizes 32 32 for two layers of 32.
-    parser.add_argument("--hidden-sizes", type=int, nargs="+", default=list(DEFAULT_HIDDEN_SIZES))
-    # Per-matrix spectral-norm cap on the experts (Lipschitz bound); 0 disables.
-    parser.add_argument("--spectral-norm-cap", type=float, default=DEFAULT_SPECTRAL_NORM_CAP)
-    # Gaussian gate bandwidth = intra-cluster RMS distance * this (>1 overlaps).
-    parser.add_argument("--gate-bandwidth-scale", type=float, default=DEFAULT_GATE_BANDWIDTH_SCALE)
-    # Null "zero expert" distance (bandwidths): beyond it the residual -> 0.
-    parser.add_argument("--ood-sigma", type=float, default=DEFAULT_OOD_SIGMA)
-    parser.add_argument("--epochs", type=int, default=500)
-    parser.add_argument("--batch-size", type=int, default=32768)
-    parser.add_argument("--learning-rate", type=float, default=5e-4)
-    # L2 penalty on the (normalized) residual output; shrinks toward nominal.
-    parser.add_argument("--output-reg-weight", type=float, default=1e-2)
-    parser.add_argument("--validation-split", type=float, default=0.2)
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--clip-after-first-trajectory", action="store_true", default=True)
-    parser.add_argument("--resample-uniform", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--recursive", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--out-dir", type=str, default="visualize")
-    args = parser.parse_args(argv)
-
-    train_from_logs(
-        problem=args.problem,
-        log_dirs=args.log_dir,
-        out=args.out,
-        num_experts=args.num_experts,
-        hidden_sizes=tuple(args.hidden_sizes),
-        spectral_norm_cap=args.spectral_norm_cap,
-        gate_bandwidth_scale=args.gate_bandwidth_scale,
-        ood_sigma=args.ood_sigma,
-        epochs=args.epochs,
-        batch_size=args.batch_size,
-        learning_rate=args.learning_rate,
-        output_reg_weight=args.output_reg_weight,
-        validation_split=args.validation_split,
-        seed=args.seed,
-        clip_after_first_trajectory=args.clip_after_first_trajectory,
-        resample_uniform=args.resample_uniform,
-        recursive=args.recursive,
-        out_dir=args.out_dir,
-    )
-
-
-def evaluate_main(argv=None):
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Evaluate a residual dynamics model on a Pololu log.")
-    parser.add_argument("--problem", type=str, default="problems/pololu_gains.yaml")
-    parser.add_argument("--model", type=str, default="models/residual_pololu.pkl")
-    parser.add_argument("--log", type=str, default="Pololu Data/Experiments/exp05/iteration_01/data/TR00.csv")
-    parser.add_argument("--clip-after-first-trajectory", action="store_true", default=True)
-    parser.add_argument("--resample-uniform", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--out-dir", type=str, default="visualize")
-    parser.add_argument("--output", type=str, default=None, help="Output filename prefix")
-    args = parser.parse_args(argv)
-
-    evaluate_on_log(
-        model_path=args.model,
-        log_path=args.log,
-        problem=args.problem,
-        clip_after_first_trajectory=args.clip_after_first_trajectory,
-        resample_uniform=args.resample_uniform,
-        out_dir=args.out_dir,
-        out_prefix=args.output,
-    )
-
-
-main = train_main
-
-
 def _resample_poses_uniform(
     pose_time_s: np.ndarray,
     pose_states: np.ndarray,
@@ -1403,7 +1029,3 @@ def _zero_order_hold(query_time: np.ndarray, time: np.ndarray, values: np.ndarra
 
 def _wrap_to_pi(angle):
     return (angle + np.pi) % (2.0 * np.pi) - np.pi
-
-
-if __name__ == "__main__":
-    train_main()

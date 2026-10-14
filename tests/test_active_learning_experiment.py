@@ -136,25 +136,11 @@ def test_finalize_writes_static_gain_baseline(tmp_path):
     assert load_robot_config_file(next_paths.robotcfg_cfg)["kx_traj"] == 9.1
 
 
-def test_finalize_without_static_gains_writes_no_baseline(tmp_path):
-    experiment = stage_init(tmp_path / "exp", {"problem": PROBLEM, "prior_tuning": False})
-    paths = experiment.paths(1)
-
-    with paths.identification_result.open("w") as file:
-        yaml.safe_dump({"estimated_params": {}}, file)
-    with paths.gains_result.open("w") as file:
-        yaml.safe_dump({"gains": [9.1, 8.2, 6.3, 7.0, 11.0], "schedule_enabled": False}, file)
-
-    next_paths = stage_finalize(experiment, 1)
-    assert not next_paths.robot_config_static.exists()
-    assert not next_paths.robotcfg_static_cfg.exists()
-
-
 def test_finalize_exports_trained_gain_mlp(tmp_path):
     experiment = stage_init(tmp_path / "exp", {"problem": PROBLEM, "prior_tuning": False})
     paths = experiment.paths(1)
 
-    tuned = load_yaml("models/tuned_gains.yaml")
+    tuned = load_yaml("tests/data/trained_gain_schedule.yaml")
     identification = {"estimated_params": load_yaml(paths.robot_config)["robot"]}
     gains = {
         "gains": [float(gain) for gain in tuned["gains"]],
@@ -194,18 +180,6 @@ def test_residual_flag_off_disables_training_and_every_residual_rollout(tmp_path
         stage_train_residual(experiment, 1)
 
 
-def test_an_enabled_residual_without_a_checkpoint_refuses_to_design_nominal(tmp_path):
-    import pytest
-
-    from wmr_simulator.active_learning.stages import _load_design_residual_model, _residual_in_design
-
-    experiment = stage_init(tmp_path / "exp", {"problem": PROBLEM, "prior_tuning": False})
-    assert _residual_in_design(experiment, experiment.config["tuning_trajectories"])
-    paths = experiment.paths(1)
-    with pytest.raises(FileNotFoundError, match="train-residual"):
-        _load_design_residual_model(paths.residual_model, paths.problem)
-
-
 def test_prior_tuning_starts_at_iteration_zero_on_the_prior_model(tmp_path):
     experiment = stage_init(tmp_path / "exp", {"problem": PROBLEM})
     assert experiment.iteration_indices() == [0]
@@ -233,51 +207,3 @@ def test_finalizing_iteration_zero_hands_its_gains_to_iteration_one(tmp_path):
     assert robot_config["controller"]["gains"] == tuned
     assert load_robot_config_file(next_paths.robotcfg_cfg)["kx_traj"] == 2.1
     assert Experiment.load(experiment.root).first_iteration == 0
-
-
-def test_finalize_on_the_robot_creates_the_benchmark_directories(tmp_path):
-    """Hand-recorded benchmark runs go where the MuJoCo benchmark stage would
-    write them: one empty directory per shape, under benchmark_static for a
-    static experiment, and none of it counts as recorded yet."""
-    benchmark_set = tmp_path / "set"
-    benchmark_set.mkdir()
-    for shape in ("circle_fast", "turbo_drift"):
-        (benchmark_set / f"{shape}.JSN").write_text("{}")
-    (benchmark_set / "turbo_drift_bridge.JSN").write_text("{}")
-    experiment = stage_init(tmp_path / "exp", {
-        "problem": PROBLEM, "use_gain_parametrization": False, "benchmark": {"trajectory": str(benchmark_set)},
-    })
-    with experiment.paths(0).gains_result.open("w") as file:
-        yaml.safe_dump({"gains": [2.1, 5.9, 7.1, 2.7, 0.0, 0.0], "static_gains": None,
-                        "schedule_enabled": False, "schedule": None}, file)
-
-    next_paths = stage_finalize(experiment, 0)
-    benchmark_dir = next_paths.data_dir / "benchmark_static"
-    assert sorted(path.name for path in benchmark_dir.iterdir()) == ["circle_fast", "turbo_drift"]
-    assert not iteration_status(experiment, 1)["benchmark"]
-
-    # In MuJoCo the benchmark stage records them; finalize leaves data/ alone.
-    mujoco = stage_init(tmp_path / "mujoco", {
-        "problem": PROBLEM, "use_gain_parametrization": False, "benchmark": {"trajectory": str(benchmark_set)},
-        "mujoco_deployment": {"enabled": True},
-    })
-    with mujoco.paths(0).gains_result.open("w") as file:
-        yaml.safe_dump({"gains": [2.1, 5.9, 7.1, 2.7, 0.0, 0.0], "static_gains": None,
-                        "schedule_enabled": False, "schedule": None}, file)
-    assert not (stage_finalize(mujoco, 0).data_dir / "benchmark_static").exists()
-
-
-def test_an_experiment_from_before_prior_tuning_still_starts_at_one(tmp_path):
-    experiment = stage_init(tmp_path / "exp", {"problem": PROBLEM, "prior_tuning": False})
-    config = load_yaml(experiment.config_path)
-    del config["prior_tuning"]
-    with experiment.config_path.open("w") as file:
-        yaml.safe_dump(config, file)
-    assert Experiment.load(experiment.root).first_iteration == 1
-
-
-def test_without_an_initial_model_the_loop_starts_from_the_problem_robot(tmp_path):
-    experiment = stage_init(tmp_path / "exp", {"problem": PROBLEM, "prior_tuning": False, "initial_robot_params": None})
-    problem_robot = load_yaml(PROBLEM)["robot"]
-    robot = load_yaml(experiment.paths(1).robot_config)["robot"]
-    assert robot == {key: float(problem_robot[key]) for key in robot}

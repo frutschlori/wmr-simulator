@@ -1,11 +1,8 @@
-#!/usr/bin/env python3
 import struct
-import sys
 import os
 import math
 
-# Every field the records carry. The last six columns (the rest of the EKF and
-# mocap attitude) were added 2026-10-07; csvs decoded before have the first 29.
+# Every field the records carry (csvs of the earlier decoder have the first 29).
 CSV_HEADER = "ts,x,y,yaw,x_des,y_des,yaw_des,v_ff,w_ff,v_actual,w_actual,omega_l_cmd,omega_r_cmd,omega_l_meas,omega_r_meas,duty_l,duty_r,x_err,y_err,yaw_err,x_raw,y_raw,yaw_raw,acc_x,acc_y,acc_z,gyro_x,gyro_y,gyro_z,ekf_z,ekf_roll,ekf_pitch,z_raw,roll_raw,pitch_raw\n"
 MAGIC_HEADER = b"\xaa\xbb\xcc\xdd"
 FLOAT_COUNTS = {1: 6, 2: 5, 3: 2, 4: 3, 5: 2, 6: 2, 7: 6, 8: 2, 9: 6}
@@ -91,14 +88,8 @@ def is_compact_format(bin_file, start_pos):
 
 
 def find_compact_start(data, start_pos=0):
-    """Return the start of the longest valid Compact Tagged record run.
-
-    SD-card log chunks can be cut in the middle of a record.  In that case the
-    file magic is still present, but the bytes immediately after it complete
-    the preceding chunk's record and therefore cannot be interpreted as a new
-    record header.  Searching for the longest self-consistent run lets a
-    standalone decode recover the records owned by this chunk.
-    """
+    """Return the start of the longest valid Compact Tagged record run (a log
+    chunk can start in the middle of a record)."""
     if start_pos == len(data):
         return start_pos
 
@@ -114,8 +105,7 @@ def find_compact_start(data, start_pos=0):
                 best_count = runs[pos]
                 best_pos = pos
 
-    # A short match can occur by chance in arbitrary bytes.  Real logs have
-    # thousands of records, while ten is also the existing format probe size.
+    # Minimum run length that counts as valid.
     return best_pos if best_count >= 10 else None
 
 
@@ -183,15 +173,14 @@ def decode_file(input_path, output_path=None):
                     break
                 unpacked = struct.unpack(f"<{num_floats}f", payload_chunk)
 
-                # Exact millisecond bucketing only: adjacent timestamps such as
-                # 1000 and 1001 ms stay on separate CSV rows.
+                # One csv row per exact millisecond.
                 if t_ms not in rows_by_timestamp:
                     timestamp_order.append(t_ms)
                     rows_by_timestamp[t_ms] = new_csv_row(t_ms)
                 map_tag_to_row(tag, unpacked, rows_by_timestamp[t_ms])
             records = [",".join(rows_by_timestamp[t_ms]) for t_ms in timestamp_order]
         else:
-            print(f"Error: Unsupported legacy binary format. Only Compact Tagged Binary logs can be decoded.")
+            print("Error: Unsupported legacy binary format. Only Compact Tagged Binary logs can be decoded.")
             return False
 
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
@@ -203,45 +192,3 @@ def decode_file(input_path, output_path=None):
 
     print(f"Successfully decoded {len(records)} log entries.")
     return True
-
-
-def main():
-    if len(sys.argv) < 2:
-        print("Usage: python decode_binary.py <path_or_dir_1> [<path_or_dir_2> ...]")
-        sys.exit(1)
-
-    success = True
-    decode_jobs = []
-
-    for arg in sys.argv[1:]:
-        if os.path.isdir(arg):
-            print(f"Scanning directory: {arg}")
-            output_dir = os.path.join(arg, "decoded")
-            for entry in sorted(os.listdir(arg)):
-                full_path = os.path.join(arg, entry)
-                if os.path.isfile(full_path) and entry.startswith("TR") and not entry.endswith(
-                        ".png") and not entry.endswith(".csv"):
-                    try:
-                        with open(full_path, "rb") as f:
-                            magic = f.read(4)
-                            if magic == MAGIC_HEADER:
-                                decode_jobs.append((full_path, csv_output_path(full_path, output_dir)))
-                    except Exception:
-                        pass
-        else:
-            decode_jobs.append((arg, csv_output_path(arg)))
-
-    if not decode_jobs:
-        print("No matching binary log files found to decode.")
-        return
-
-    for input_path, output_path in decode_jobs:
-        if not decode_file(input_path, output_path):
-            success = False
-
-    if not success:
-        sys.exit(1)
-
-
-if __name__ == "__main__":
-    main()

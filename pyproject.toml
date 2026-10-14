@@ -2,7 +2,7 @@
 [project]
 name = "wmr-simulator"
 version = "0.1.0"
-description = "Add description"
+description = "Differentiable simulator and active-learning pipeline for tuning the controller of a differential-drive robot"
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
 
@@ -11,22 +11,15 @@ dependencies = [
     "meshcat==0.3.2",
     "numpy==2.3.5",
     "pyyaml>=6.0.3",
-    "moviepy>=2.2.1",
-    "tensorboard>=2.20.0",
-    "wandb>=0.23.1",
-    "hydra-core",
     "jax==0.9.2",
     "optax==0.2.8",
     "jax-tqdm>=0.4.0",
-    "pyqt6>=6.11.0",
     "scipy>=1.16.3",
     "equinox>=0.13.8",
     "cvxpy>=1.7.4",
     "optimistix>=0.1.0",
     "mujoco>=3.2",
-    # The deployment video renderer: imageio(+ffmpeg) writes the mp4, pillow
-    # composites its legend onto the rendered frames. All three arrive
-    # transitively via matplotlib/moviepy, but package code imports them.
+    # Deployment videos.
     "imageio>=2.31",
     "imageio-ffmpeg>=0.4.9",
     "pillow>=10.1",

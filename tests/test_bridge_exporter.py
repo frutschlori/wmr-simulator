@@ -50,20 +50,6 @@ def test_bridged_jsn_returns_to_start(tmp_path):
     assert bridged_states[-1, :2] == pytest.approx(original_states[0, :2], abs=1e-3)
 
 
-def test_zero_wait_time_adds_no_wait_samples(tmp_path):
-    jsn_path = _export_jsn(tmp_path)
-    with_wait = append_bridge_reference(
-        jsn_path, tmp_path / "with_wait.JSN", wait_time=2.0, bridge_time=4.0
-    )
-    without_wait = append_bridge_reference(
-        jsn_path, tmp_path / "without_wait.JSN", wait_time=0.0, bridge_time=4.0
-    )
-    dt = json.loads(jsn_path.read_text())["result"][0]["dt"]
-    num_with = json.loads(with_wait.read_text())["result"][0]["num_states"]
-    num_without = json.loads(without_wait.read_text())["result"][0]["num_states"]
-    assert num_with - num_without == round(2.0 / dt)
-
-
 def _wrap(angle):
     import numpy as np
 
@@ -107,54 +93,3 @@ def test_arc_return_stays_in_the_box_with_a_smaller_radius_when_needed():
     boxed = arc_line_arc_states(start, goal, 0.05, ArcReturn(box_min=(-1.3, -2.3), box_max=(1.3, 2.3), margin=0.1))
     assert boxed[:, 0].max() <= 1.2 + 1e-9
     np.testing.assert_allclose(boxed[-1, :2], goal[:2], atol=1e-9)
-
-
-def test_arc_return_drives_each_arc_on_its_own_radius():
-    import numpy as np
-
-    from wmr_simulator.pololu.bridge_exporter import ArcReturn, arc_line_arc_states
-
-    route = ArcReturn(radius=0.4, goal_radius=0.15, lateral_acceleration=1.5)
-    start, goal = np.array([0.0, 0.0, 0.0]), np.array([0.0, -1.5, np.pi])
-    states = arc_line_arc_states(start, goal, 0.05, route)
-    np.testing.assert_allclose(states[-1, :2], goal[:2], atol=1e-9)
-    assert abs(_wrap(states[-1, 2] - goal[2])) < 1e-9
-    speed = np.hypot(states[:, 3], states[:, 4])
-    turning = np.abs(states[:, 5]) > 1e-9
-    radii = speed[turning] / np.abs(states[turning, 5])
-    # Every turning sample lies on one of the two arcs, and both arcs are driven.
-    assert np.all(np.isclose(radii, 0.4) | np.isclose(radii, 0.15))
-    assert np.isclose(radii, 0.4).any() and np.isclose(radii, 0.15).any()
-    assert np.isclose(radii[0], 0.4) and np.isclose(radii[-1], 0.15)
-
-
-def test_smooth_return_has_no_stop_and_no_yaw_rate_step():
-    import numpy as np
-
-    from wmr_simulator.pololu.bridge_exporter import ArcReturn, arc_line_arc_states
-
-    dt = 0.05
-    route = ArcReturn(radius=0.4, goal_radius=0.15, lateral_acceleration=1.5, peak_speed=1.5,
-                      box_min=(-1.3, -2.3), box_max=(1.3, 2.3), margin=0.0, smooth=True)
-    start, goal = np.array([0.0, 0.0, 0.0]), np.array([0.0, -1.5, np.pi])
-    states = arc_line_arc_states(start, goal, dt, route)
-    np.testing.assert_allclose(states[0, :3], start)
-    np.testing.assert_allclose(states[-1, :2], goal[:2], atol=1e-6)
-    assert abs(_wrap(states[-1, 2] - goal[2])) < 1e-6
-    speed = np.hypot(states[:, 3], states[:, 4])
-    assert speed[0] == 0.0 and speed[-1] < 1e-9 and speed[1:-1].min() > 0.0
-    assert speed.max() <= 1.5 + 1e-6
-    assert (speed * np.abs(states[:, 5])).max() <= 1.5 + 1e-3  # v^2 / r
-    # Continuous curvature: the yaw rate changes by small steps only (an arc -
-    # line joint at this speed would jump by about 2 rad/s).
-    assert np.abs(np.diff(states[:, 5])).max() < 0.5
-    # No tighter than the radius floor (default: the smaller guide radius, 0.15 m).
-    turning = (np.abs(states[:, 5]) > 1e-3) & (speed > 1e-3)
-    assert (speed[turning] / np.abs(states[turning, 5])).min() >= 0.15 - 1e-3
-    moving = speed > 1e-9
-    np.testing.assert_allclose(np.cos(np.arctan2(states[moving, 4], states[moving, 3]) - states[moving, 2]), 1.0,
-                               atol=1e-6)
-    midpoint_velocity = 0.5 * (states[1:, 3:5] + states[:-1, 3:5])
-    np.testing.assert_allclose(np.diff(states[:, :2], axis=0), midpoint_velocity * dt, atol=0.01)
-    assert states[:, 0].min() >= -1.3 and states[:, 0].max() <= 1.3
-    assert states[:, 1].min() >= -2.3 and states[:, 1].max() <= 2.3

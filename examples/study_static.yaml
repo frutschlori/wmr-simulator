@@ -1,0 +1,17 @@
+# The static-gain configurations of the thesis evaluation in MuJoCo:
+# trajectories designed (A) or fixed (F), tuning on the nominal plant (N) or
+# with the residual model (R). Results land in experiments/<phase>/.
+#
+#   python scripts/generate_fixed_trajectory_sets.py      # once, for the F arms
+#   python scripts/run_study.py examples/study_static.yaml --max-parallel 2
+#   python scripts/summarize_study.py experiments/static_matrix
+phase: static_matrix
+iterations: 5
+seeds: [0, 1, 2]
+overrides:
+  benchmark: {max_workers: 4}
+configurations:
+  S-A-R: {tag: S-A-R}
+  S-A-N: {tag: S-A-N}
+  S-F-R: {tag: S-F-R}
+  S-F-N: {tag: S-F-N}

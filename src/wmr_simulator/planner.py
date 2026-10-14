@@ -1,6 +1,5 @@
 import numpy as np
 import cvxpy as cp
-import matplotlib.pyplot as plt
 
 
 class QuinticSplineFitter:
@@ -35,7 +34,7 @@ class QuinticSplineFitter:
         self.coeffs = None
         self.T = None
 
-        # old-style boundary derivative specs (used if v_waypoints is None)
+        # boundary derivatives (used if v_waypoints is None)
         self.v_start = v_start
         self.v_end   = v_end
         # boundary second derivatives
@@ -44,14 +43,6 @@ class QuinticSplineFitter:
         # per-knot derivative constraints
         self.v_waypoints = v_waypoints  # list or None
 
-    def _compute_Q(self, T):
-        # Not used here but kept for completeness
-        return np.array([
-            [400/7 * T**7, 40 * T**6, 24 * T**5, 10 * T**4],
-            [40 * T**6, 28.8 * T**5, 18 * T**4, 8 * T**3],
-            [24 * T**5, 18 * T**4, 12 * T**3, 6 * T**2],
-            [10 * T**4, 8 * T**3, 6 * T**2, 4 * T]
-        ], dtype=float)
 
     def fit(self):
         n = self.num_segments
@@ -105,7 +96,7 @@ class QuinticSplineFitter:
             v_wp = list(self.v_waypoints)
             assert len(v_wp) == n + 1, "v_waypoints must have length num_segments+1"
         else:
-            # fallback to old boundary-only API
+            # boundary derivatives only
             v_wp = [None] * (n + 1)
             v_wp[0]  = self.v_start
             v_wp[-1] = self.v_end
@@ -449,105 +440,3 @@ def compute_reference_trajectory(start, goal, intermediate_waypoints, time):
     ])
 
     return reference_states, traj
-
-
-if __name__ == "__main__":
-    dt = 0.01
-    T = 5.0
-    N = int(T / dt)
-    t = np.linspace(0, N * dt, N + 1)
-
-    # 4 waypoints example
-    waypoints_x = np.array([0.0, 0.5, 1.0, 2.0])
-    waypoints_y = np.array([0.0, 0.0, 0.5, 1.0])
-
-    # start and goal with headings
-    start = np.array([waypoints_x[0], waypoints_y[0], 0.0])       # θ = 0
-    goal  = np.array([waypoints_x[-1], waypoints_y[-1], np.pi/2]) # θ = π/2
-
-    # Example intermediate waypoints:
-    #   first: [x, y]      → no θ constraint
-    #   second: [x, y, θ]  → enforce θ = π/4 at that waypoint
-    intermediate_waypoints = [
-        [waypoints_x[1], waypoints_y[1]],               # unconstrained θ
-        [waypoints_x[2], waypoints_y[2], np.pi/4],      # constrained θ
-    ]
-
-    reference_states, traj = compute_reference_trajectory(
-        start, goal, intermediate_waypoints, t
-    )
-
-    # Extract individual components from reference_states
-    x   = reference_states[:, 0]
-    y   = reference_states[:, 1]
-    th_d = reference_states[:, 2]
-    vx  = reference_states[:, 3]
-    vy  = reference_states[:, 4]
-    w_d = reference_states[:, 5]
-    ax  = reference_states[:, 6]
-    ay  = reference_states[:, 7]
-
-    # For plotting waypoint times, reuse traj and time-scaling
-    u_t = traj._sigma(t)   # u(t) in [0,1] for each sample in t
-    u_wps = np.linspace(0.0, 1.0, len(waypoints_x))
-    t_wps = np.array([t[np.argmin(np.abs(u_t - u_wp))] for u_wp in u_wps])
-
-    # For θ markers at waypoints
-    theta_waypoints = [start[2]]
-    for wp in intermediate_waypoints:
-        wp = np.asarray(wp)
-        if wp.shape[0] > 2:
-            theta_waypoints.append(wp[2])
-        else:
-            theta_waypoints.append(None)
-    theta_waypoints.append(goal[2])
-
-    # --- Plot results ---
-    fig, axes = plt.subplots(5, 1, figsize=(8, 10))
-
-    # positions
-    axes[0].plot(t, x, label="x(t)", color="C0")
-    axes[0].plot(t, y, label="y(t)", color="C1")
-    axes[0].scatter(t_wps, waypoints_x, color="r", zorder=5, label="waypoints_x")
-    axes[0].scatter(t_wps, waypoints_y, color="b", zorder=5, label="waypoints_y")
-    axes[0].legend()
-    axes[0].set_ylabel("position")
-    axes[0].set_title("Path-Time Quintic Spline Trajectory (θ at selected WPs)")
-    axes[0].grid(True)
-
-    # velocities
-    axes[1].plot(t, vx, label="vx", color="C0")
-    axes[1].plot(t, vy, label="vy", color="C1")
-    axes[1].legend()
-    axes[1].set_ylabel("velocity")
-    axes[1].grid(True)
-
-    # accelerations
-    axes[2].plot(t, ax, label="ax", color="C0")
-    axes[2].plot(t, ay, label="ay", color="C1")
-    axes[2].legend()
-    axes[2].set_ylabel("acceleration")
-    axes[2].grid(True)
-
-    # heading
-    axes[3].plot(t, th_d, label="th_d (heading)", color="C2")
-    # only scatter θ where specified (skip None)
-    for twp, th in zip(t_wps, theta_waypoints):
-        if th is not None:
-            axes[3].scatter(twp, th, color="k", marker="x", zorder=5)
-    axes[3].legend()
-    axes[3].set_ylabel("th_d")
-    axes[3].grid(True)
-
-    # angular velocity
-    axes[4].plot(t, w_d, label="w_d (angular vel)", color="C3")
-    axes[4].legend()
-    axes[4].set_ylabel("w_d")
-    axes[4].set_xlabel("time [s]")
-    axes[4].grid(True)
-
-    plt.tight_layout()
-
-    pdf_filename = "spline_trajectory.pdf"
-    fig.savefig(pdf_filename, bbox_inches='tight', transparent=True)
-    print(f"Figure saved as: {pdf_filename}")

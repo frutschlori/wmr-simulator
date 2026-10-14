@@ -1,33 +1,24 @@
 """Multi-configuration, multi-seed studies of the active-learning loop.
 
-A *study* runs a list of loop configurations over several seeds, one MuJoCo
-experiment at a time, and collects their benchmark results into one table. It
-is how the thesis evaluation (Chapter 5) is produced, so every run carries a
-manifest of what exactly ran.
+A study runs a list of loop configurations over several seeds as MuJoCo
+experiments and collects their benchmark results into one table. It is
+described by a spec yaml (see ``examples/study_static.yaml``)::
 
-A study is described by a spec yaml (``studies/``)::
-
-    phase: phase1_tuner            # output directory under the study root
+    phase: example                 # output directory under the study root
     iterations: 3                  # tuning passes per run
     seeds: [0, 1, 2]
     overrides: {...}               # experiment.yaml overrides for every run
     configurations:
-      bfgs_current:                # run directory prefix
+      designed:                    # run directory prefix
         tag: S-A-N                 # the three switches, see configuration_overrides
         overrides: {...}           # on top of the common ones
 
-and every (configuration, seed) pair becomes ``<root>/<phase>/<name>_seed<k>/``,
-an ordinary experiment directory plus ``study_manifest.yaml``,
-``git_diff_session<n>.patch`` and ``logs/session<n>.log``.
-
-Runs are resumable. A rerun of the launcher skips finished runs, and inside an
-unfinished one it first deletes the outputs of any stage that started but never
-finished (``stage_log.yaml``), since `run` would otherwise take a half-written
-data/ or tuning set for a finished one.
-
-After the loop, the launcher benchmarks the last tuned controller as well:
-iteration ``N + 1`` exists once iteration ``N`` is finalized, but `run` stops
-before recording it.
+Every (configuration, seed) pair becomes ``<root>/<phase>/<name>_seed<k>/``,
+an experiment directory plus ``study_manifest.yaml`` (code version, diff,
+configuration, timings), ``git_diff_session<n>.patch`` and
+``logs/session<n>.log``. Runs are resumable: finished runs are skipped and the
+outputs of interrupted stages are deleted first. After the loop, the last
+tuned controller is benchmarked as well.
 """
 
 from __future__ import annotations
@@ -55,13 +46,10 @@ CLI_SCRIPT = REPO_ROOT / "scripts" / "run_active_learning.py"
 MANIFEST_NAME = "study_manifest.yaml"
 MAX_PARALLEL_FILE = "max_parallel"
 RUN_SUMMARY_NAME = "run_summary.json"
-# Bumped whenever ``summarize_run`` scores differently, so cached scores of
-# finished runs are recomputed rather than mixed with new ones (2: yaw ringing
-# band-passed, reference-subtracted and cut at departure, worst-shape aggregate).
-RUN_SUMMARY_VERSION = 2
+# Bumped whenever ``summarize_run`` scores differently, so cached scores are recomputed.
+RUN_SUMMARY_VERSION = 3
 
-# Experiment keys holding paths the loop opens relative to its cwd. Runs start
-# from their own directory, so these are made absolute against the repo.
+# Experiment keys holding repo-relative paths, made absolute for the runs.
 _PATH_KEYS = (
     ("problem",),
     ("baseline_identification_trajectory",),
@@ -70,17 +58,15 @@ _PATH_KEYS = (
     ("identification_trajectory", "append_tuning_trajectories_from"),
 )
 
-# What each stage writes, relative to its iteration directory, so a stage that
-# was interrupted can be undone. ``finalize`` writes the *next* iteration.
+# What each stage writes, relative to its iteration directory (``finalize``
+# writes the next iteration).
 _STAGE_OUTPUTS = {
     "plan-id-trajectory": ("identification_trajectory/*", "problem_identification.yaml"),
     "benchmark": (
         "data/benchmark", "data/benchmark_static", "data/benchmark_parametrized_*", "benchmark", "results/benchmark.yaml",
     ),
     "simulate-deployment": ("data/TR*",),
-    # Not just the csvs: `run` redeploys whenever no decoded log exists, and a
-    # redeployment next to surviving binaries numbers its logs after them, with
-    # other seeds. Removing both makes the rerun reproduce the original logs.
+    # Binaries too, so a redeployment reproduces the original logs.
     "decode-logs": ("data/TR*",),
     "identify": ("results/identification.yaml", "problem_identified.yaml"),
     "train-residual": ("results/residual_model.pkl", "results/residual_diagnostics.yaml", "results/residual_skipped.yaml"),
@@ -127,8 +113,7 @@ def run_overrides(spec: dict, name: str, seed: int) -> dict:
     # A baseline run never tunes or designs; it only needs the static controller.
     overrides = merge_config(overrides, configuration_overrides(configuration.get("tag", "S-F-N")))
     if configuration.get("baseline_gains") is not None:
-        # The stock firmware configuration: its gains with the robot's nominal
-        # parameters (the problem's robot block), no tuning on any model.
+        # Fixed gains with the problem's robot parameters, no tuning.
         overrides = merge_config(overrides, {"prior_tuning": False})
         overrides["initial_robot_params"] = None
     overrides = merge_config(
@@ -137,13 +122,9 @@ def run_overrides(spec: dict, name: str, seed: int) -> dict:
             "seed": int(seed),
             "num_iterations": int(spec["iterations"]),
             "mujoco_deployment": {"enabled": True},
-            # The gain_tuning block of experiment.yaml is what runs, so the
-            # manifest's copy of it is the complete tuner configuration.
             "use_standalone_gain_tuning_defaults": False,
         },
     )
-    # The loop opens these relative to its cwd; runs start in their own
-    # directory, so resolve them against the repo.
     full = merge_config(DEFAULT_EXPERIMENT_CONFIG, overrides)
     for key in _PATH_KEYS:
         section = overrides if len(key) == 1 else overrides.setdefault(key[0], {})
@@ -158,9 +139,7 @@ def run_directory(study_root: Path, spec: dict, name: str, seed: int) -> Path:
 
 
 def study_runs(spec: dict) -> list[tuple[str, int]]:
-    """Every (configuration, seed) pair, seed-major, so that an interrupted
-    study has every configuration on the first seeds rather than every seed of
-    the first configurations."""
+    """Every (configuration, seed) pair, seed-major."""
     return [(name, int(seed)) for seed in spec["seeds"] for name in spec["configurations"]]
 
 
@@ -178,11 +157,10 @@ def _git(*args: str) -> str:
 
 def git_state() -> tuple[str, str]:
     """``(HEAD hash, dirty diff)``: tracked changes against HEAD plus every
-    untracked file under src/, scripts/, problems/ and studies/ as a new-file
-    diff, so the patch reproduces the tree the run used."""
+    untracked file under src/, scripts/, problems/ and examples/ as a new-file diff."""
     head = _git("rev-parse", "HEAD").strip()
     diff = _git("diff", "HEAD")
-    untracked = _git("ls-files", "--others", "--exclude-standard", "--", "src", "scripts", "problems", "studies")
+    untracked = _git("ls-files", "--others", "--exclude-standard", "--", "src", "scripts", "problems", "examples")
     for path in untracked.splitlines():
         diff += _git("diff", "--no-index", "--", "/dev/null", path)
     return head, diff
@@ -273,14 +251,8 @@ def _baseline_iterations(experiment: Experiment, gains: list[float]) -> None:
 
 
 def _cli(run_dir: Path, log_file, *args: str, processes: list | None = None) -> int:
-    """One run_active_learning.py command in its own process, from the run
-    directory (plots land in a cwd-relative visualize/), output appended to the
-    session log.
-
-    The command gets its own process group (it spawns benchmark workers), and
-    is registered in ``processes`` while it runs, so the parallel scheduler can
-    stop the whole tree when memory runs short.
-    """
+    """One run_active_learning.py command in its own process group, run from
+    the run directory, output appended to the session log."""
     command = [sys.executable, str(CLI_SCRIPT), *args, "--experiment", str(run_dir)]
     log_file.write(f"\n$ {' '.join(command)}\n")
     log_file.flush()
@@ -301,11 +273,9 @@ def launch_run(
 ) -> dict:
     """Create or resume one (configuration, seed) run and drive it to the end.
 
-    A configuration with ``baseline_gains`` instead of a tag is a baseline
-    run: no loop, just those fixed gains benchmarked on every iteration's
-    paired seeds (1..N+1), the same seeds the tuned runs of that seed use.
-
-    Returns the session record it appended to the manifest.
+    A configuration with ``baseline_gains`` instead of a tag only benchmarks
+    those fixed gains on every iteration's seeds. Returns the session record
+    appended to the manifest.
     """
     from wmr_simulator.active_learning import stages
 
@@ -373,11 +343,7 @@ def launch_run(
                 if code != 0:
                     break
         else:
-            # One process per iteration: a process that runs every iteration
-            # keeps each iteration's compiled JAX functions, and grew from
-            # 4.3 GB (iteration 1) to 5-6 GB by iteration 3-5 (2026-10-01,
-            # four runs side by side pushed the machine into swap). `run`
-            # returns at once for an iteration that is already finalized.
+            # One process per iteration keeps the JAX compilation caches small.
             code = 0
             for target in range(experiment.first_iteration, final):
                 code = _cli(run_dir, log_file, "run", "--iterations", str(target), processes=processes)
@@ -393,8 +359,7 @@ def launch_run(
     session["tuning_warnings"] = collect_tuning_warnings(Experiment.load(run_dir))
     save_yaml(run_dir / MANIFEST_NAME, manifest)
     if all(code == 0 for code in session["exit_codes"].values()):
-        # Scored in its own process, in this run's slot: the decoding is pure
-        # Python and would serialize on the launcher's interpreter lock.
+        # Scored in its own process.
         score = [sys.executable, "-c", "import sys; from wmr_simulator.active_learning.study import score_run; score_run(sys.argv[1])", str(run_dir)]
         with (run_dir / "logs" / f"session{session_index}.log").open("a", encoding="utf-8") as log_file:
             log_file.write(f"\n$ score_run {run_dir}\n")
@@ -451,19 +416,14 @@ def _process_tree_rss_gb(root_pids: list[int]) -> float:
 def launch_posthoc_run(
     study_root: Path, spec: dict, spec_path: Path, name: str, seed: int, processes: list | None = None
 ) -> dict:
-    """Tune and benchmark the spec's parametrized variants post hoc on a copy of
-    a finished static run (``active_learning.posthoc``).
-
-    The static run ``<source_phase>/<name>_seed<k>`` is copied once into this
-    phase, so the source phase stays as it was; per variant and iteration the
-    tuning and the next iteration's benchmark each run in their own process.
-    """
+    """Tune and benchmark the spec's parametrized variants post hoc on a copy
+    of the finished static run ``<source_phase>/<name>_seed<k>``
+    (``active_learning.posthoc``)."""
     from wmr_simulator.active_learning import posthoc
 
     run_dir = run_directory(study_root, spec, name, seed)
-    # A configuration names the static run it builds on (``source``, default:
-    # its own name) and its variants (default: the spec's), so hypotheses can
-    # run side by side as separate configurations.
+    # A configuration names its static ``source`` run (default: its own name)
+    # and its variants (default: the spec's).
     configuration = spec["configurations"][name] or {}
     source_name = configuration.get("source", name)
     source_phase = configuration.get("source_phase", spec["source_phase"])
@@ -562,21 +522,15 @@ def launch_study(
 ) -> None:
     """Run every (configuration, seed) of a spec, up to ``max_parallel`` at once.
 
-    Runs share nothing but the machine: each is its own process tree in its own
-    directory, with seeds fixed per run, so the results do not depend on how
-    many run side by side. Memory is the constraint (three unbounded parallel
-    MuJoCo experiments once crashed the 30 GB machine), so a run is only
-    admitted when MemAvailable covers ``memory_per_run_gb`` for it on top of
-    the not-yet-used part of every running run's budget, plus
-    ``memory_floor_gb``. Should MemAvailable still fall below the floor, the
-    youngest run is stopped (its whole process group) and queued again; it
-    resumes from its last finished stage. The oldest run is never stopped.
+    A run is admitted when MemAvailable covers ``memory_per_run_gb`` on top of
+    the unused budget of the running runs plus ``memory_floor_gb``. Below the
+    floor, the youngest run is stopped and queued again (it resumes from its
+    last finished stage). Results do not depend on the parallelism.
     """
     import signal
     import threading
 
     spec_path = Path(spec_path).resolve()
-    # Absolute: every run's commands execute from inside its own directory.
     study_root = Path(study_root).resolve()
     spec = load_yaml(spec_path)
     phase_dir = study_root / spec["phase"]
@@ -585,9 +539,7 @@ def launch_study(
     queue = [(name, seed) for name, seed in study_runs(spec) if not only or name in only]
     running: list[dict] = []
     stops = 0
-    # Editable while the study runs: write a new number into this file to
-    # widen or narrow the study without restarting it (running runs are never
-    # stopped for a lower number; they just are not replaced).
+    # Re-read while the study runs, to change the parallelism.
     control = phase_dir / MAX_PARALLEL_FILE
     control.write_text(f"{int(max_parallel)}\n")
 
@@ -673,6 +625,11 @@ def _median(values):
     return float(statistics.median(values)) if values else None
 
 
+def _geometric_mean(values):
+    values = [value for value in values if value is not None]
+    return float(statistics.geometric_mean(values)) if values else None
+
+
 def _yaw_ringing_by_log(data_dir: Path) -> dict[str, float | None]:
     from wmr_simulator.active_learning.baseline_runs import load_run_logs, run_yaw_ringing
 
@@ -698,12 +655,9 @@ def summarize_run(run_dir: Path) -> tuple[list[dict], list[dict]]:
     """``(rows, run_rows)`` of one run.
 
     One row per (controller generation, variant): generation ``g`` is the
-    controller tuned in iteration ``g`` and benchmarked in iteration ``g + 1``
-    (generation 0 is the controller tuned on the prior model in iteration 0, or
-    without prior tuning the initial controller, benchmarked in iteration 1). Each
-    row carries that controller's benchmark, its gains, the checks of the
-    tuning that produced it, the parameters it was tuned on and the stage times
-    of iteration ``g``. ``run_rows`` is the per-benchmark-run long format.
+    controller tuned in iteration ``g`` and benchmarked in iteration ``g + 1``.
+    Each row carries the benchmark, gains, tuning checks, identified parameters
+    and stage times. ``run_rows`` has one row per benchmark run.
     """
     run_dir = Path(run_dir)
     experiment = Experiment.load(run_dir)
@@ -720,8 +674,6 @@ def summarize_run(run_dir: Path) -> tuple[list[dict], list[dict]]:
         if not paths.benchmark_result.is_file():
             continue
         generation = benchmark_iteration - 1
-        # Generation 0 was tuned only with prior tuning (iteration 0); without
-        # it, it is the initial controller.
         tuned = experiment.paths(generation) if generation >= experiment.first_iteration else None
         gains_result = load_yaml(tuned.gains_result) if tuned is not None and tuned.gains_result.is_file() else {}
         identification = (
@@ -775,12 +727,11 @@ def summarize_run(run_dir: Path) -> tuple[list[dict], list[dict]]:
                             "max_duty": run.get("max_duty"),
                         }
                     )
+            # Headline: geometric mean over shapes.
+            row["rmse_geomean"] = _geometric_mean(shape_rmse)
             row["rmse_median"] = _median(shape_rmse)
             row["diverged_total"] = diverged_total
-            # Worst shape, not the median over shapes: only the fast shapes can
-            # ring, and a median over a set of mostly slow ones hides it (a
-            # controller ringing twice as hard as another on circle_fast and
-            # lemniscate_big_fast ranked beside it on the median).
+            # Ringing of the worst shape (only fast shapes ring).
             row["ringing_worst_shape"] = max((ring for ring in shape_ringing if ring is not None), default=None)
             row["saturation_median"] = _median(shape_saturation)
             gains = _controller_gains(paths, variant)
@@ -814,12 +765,7 @@ def summarize_run(run_dir: Path) -> tuple[list[dict], list[dict]]:
 
 
 def score_run(run_dir: str | Path) -> Path:
-    """Score one run (``summarize_run``) and cache the result in its directory.
-
-    The launcher calls this in the run's own slot as soon as the run is done,
-    so decoding its benchmark logs (yaw ringing) happens in parallel with the
-    other runs instead of serially at the end of the study.
-    """
+    """Score one run (``summarize_run``) and cache the result in its directory."""
     import json
 
     run_dir = Path(run_dir)
@@ -904,9 +850,9 @@ def summary_markdown(rows: list[dict]) -> str:
     for row in rows:
         groups.setdefault((row["configuration"], row["iteration"], row["variant"]), []).append(row)
     header = (
-        "| configuration | tag | it | variant | seeds | RMSE [m] | div. circle_fast | div. lemniscates | "
+        "| configuration | tag | it | variant | seeds | RMSE [m] | RMSE, median over shapes [m] | div. circle_fast | div. eights | "
         "div. total | ringing, worst shape [rad/s] | saturation | box-bound hits | zero hits | stalls | kdmotor | tune [s] |\n"
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n"
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n"
     )
     lines = []
     for (configuration, iteration, variant), group in sorted(groups.items()):
@@ -914,9 +860,9 @@ def summary_markdown(rows: list[dict]) -> str:
             values = [row.get(key) for row in group if row.get(key) is not None]
             return sum(values) if values else None
 
-        lemniscates = sum(
+        eights = sum(
             value for row in group for key, value in row.items()
-            if key.startswith("diverged_lemniscate") and value is not None
+            if key.startswith("diverged_eight") and value is not None
         )
         zero_hits = sum(row["bound_hits"].count("@zero") for row in group if row.get("bound_hits"))
         stalls = sum(1 for row in group if row.get("stalled"))
@@ -928,9 +874,10 @@ def summary_markdown(rows: list[dict]) -> str:
                     str(iteration),
                     variant,
                     str(len(group)),
+                    _format(_median(row["rmse_geomean"] for row in group), 4),
                     _format(_median(row["rmse_median"] for row in group), 4),
                     _format(summed("diverged_circle_fast")),
-                    str(lemniscates),
+                    str(eights),
                     _format(summed("diverged_total")),
                     _format(_median(row["ringing_worst_shape"] for row in group)),
                     _format(_median(row["saturation_median"] for row in group)),
@@ -943,8 +890,8 @@ def summary_markdown(rows: list[dict]) -> str:
             ) + " |"
         )
     note = (
-        "\nRMSE: median over seeds of each run's median over shapes of the per-shape median "
-        "position RMSE. Ringing: median over seeds of the largest per-shape median yaw ringing "
+        "\nRMSE: median over seeds of each run's geometric mean over shapes of the per-shape median "
+        "position RMSE (the median over shapes beside it). Ringing: median over seeds of the largest per-shape median yaw ringing "
         "(``baseline_runs.run_yaw_ringing``). Divergence and bound counts are summed over seeds. Iteration g is the "
         "controller tuned in iteration g (0 = initial), benchmarked in iteration g + 1.\n"
     )
